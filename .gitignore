@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Real venv dir; .venv symlinks to it so iCloud Drive skips syncing it
+.venv.nosync/
