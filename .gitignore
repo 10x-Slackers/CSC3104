@@ -219,3 +219,11 @@ __marimo__/
 
 # Real venv dir; .venv symlinks to it so iCloud Drive skips syncing it
 .venv.nosync/
+
+# Course PDFs stay local
+docs/*.pdf
+
+# Generated workloads (apps/dataset/prepare.py)
+apps/dataset/out/
+.DS_Store
+.gitignore
