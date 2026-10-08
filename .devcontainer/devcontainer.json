@@ -1,0 +1,8 @@
+{
+	"name": "CSC3104",
+	"image": "ghcr.io/commit2main/universal:latest"
+	// "features": {}
+	// "forwardPorts": []
+	// "customizations": {}
+	// "remoteUser": "root"
+}

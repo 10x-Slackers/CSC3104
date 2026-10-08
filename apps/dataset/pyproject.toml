@@ -1,0 +1,10 @@
+[project]
+name = "dataset"
+version = "0.1.0"
+description = "Role 1: IBM AML dataset preparation and replay for Banks A, B and C"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka>=2.16.0",
+    "kagglehub[pandas-datasets]>=1.0.2",
+    "pandas>=3.0.6",
+]
