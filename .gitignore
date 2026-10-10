@@ -226,4 +226,3 @@ docs/*.pdf
 # Generated workloads (apps/dataset/prepare.py)
 apps/dataset/out/
 .DS_Store
-.gitignore
