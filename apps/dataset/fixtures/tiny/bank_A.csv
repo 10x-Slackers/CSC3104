@@ -1,0 +1,14 @@
+payment_id,event_time,bank,direction,account,counterparty_bank,amount,payment_format
+p01,2022-09-05T09:00:00Z,A,out,A-alice,B,120.0,Cheque
+p06,2022-09-05T09:10:00Z,A,out,A-m0,B,10000.0,Wire
+p03,2022-09-05T09:20:00Z,A,in,A-alice,C,3000.0,ACH
+p08,2022-09-05T09:30:00Z,A,out,A-l0,B,8000.0,ACH
+p04,2022-09-05T09:40:00Z,A,out,A-alice,C,80.0,Credit Card
+p10,2022-09-05T10:00:00Z,A,out,A-o0,B,7000.0,Wire
+p12,2022-09-05T10:30:00Z,A,in,A-o0,C,6317.5,Wire
+p13,2022-09-05T10:40:00Z,A,out,A-x0,B,5000.0,ACH
+p15,2022-09-05T11:00:00Z,A,out,A-v0,B,20000.0,Wire
+p14,2022-09-05T11:10:00Z,A,in,A-x3,C,4512.5,ACH
+p17,2022-09-05T11:20:00Z,A,in,A-v3,C,18050.0,Wire
+p18,2022-09-05T11:30:00Z,A,out,A-v3,B,17147.5,Wire
+p20,2022-09-05T11:50:00Z,A,in,A-v6,C,15475.61,Wire
