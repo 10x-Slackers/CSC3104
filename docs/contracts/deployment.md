@@ -1,6 +1,6 @@
 # Deployment contract
 
-Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPolicy, Secrets, mTLS) · Status: TODO
+Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPolicy, Secrets, mTLS) · Code: `deploy/` · Status: **draft**
 
 Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monitoring and the evaluation harness.
 
@@ -9,18 +9,21 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | | Local | Cloud |
 | --- | --- | --- |
 | Cluster | k3d | Amazon EKS |
-| Setup command | TODO | TODO |
+| Setup command | `deploy/k3d-up.sh` | TODO |
+| Teardown | `k3d cluster delete csc3104` | TODO |
+| Check | `deploy/check-netpol.sh` | TODO |
+| Tested on | 4 CPU, 8 GB VM, Docker 29: setup about 3 min, about 3.8 GB memory in use with no bank services yet | |
 | Cost controls | — | TODO: budget and shutdown routine |
 
 ## Platform components
 
 | Component | Choice | Status |
 | --- | --- | --- |
-| Kafka | Strimzi, KRaft mode | TODO |
-| PostgreSQL | CloudNativePG or plain StatefulSet | TODO |
-| Autoscaling | KEDA | TODO |
-| Certificates | cert-manager | TODO |
-| CNI enforcing NetworkPolicy | TODO (both k3d and EKS) | TODO |
+| Kafka | Strimzi 1.2.0, KRaft mode | k3d: one single-node cluster per bank, bootstrap `kafka-kafka-bootstrap:9092` (plaintext) |
+| PostgreSQL | CloudNativePG 1.30.1 | k3d: one instance per bank, `postgres-rw:5432`, credentials in Secret `postgres-app` |
+| Autoscaling | KEDA 2.21.0 | k3d: operator installed |
+| Certificates | cert-manager v1.21.2 | k3d: lab CA `ClusterIssuer/bank-ca`; Secret `privacy-node-tls` per bank (**draft**: SAN `privacy-node.bank-<x>.svc`, with Zane and Caleb) |
+| CNI enforcing NetworkPolicy | k3d: k3s's built-in network policy controller. EKS: TODO | k3d: enforced; `check-netpol.sh` passes |
 | Registry | ECR or GHCR | TODO |
 | Image architectures | Only the ones that are needed | TODO |
 | CI | GitHub Actions | TODO |
@@ -43,7 +46,11 @@ Each owner fills in their own row.
 
 ## Namespaces and network paths
 
-One namespace per bank. Allowed paths: TODO, defined with Caleb. Test enforcement in both environments.
+One namespace per bank: `bank-a`, `bank-b`, `bank-c`, each a release of the `deploy/charts/bank` Helm chart.
+
+Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443), and ingress from the `strimzi` and `cnpg-system` operators. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
+
+TODO with Caleb: narrow this to the per-service paths in [security.md](security.md#mtls-and-networkpolicy), and allow privacy node ↔ privacy node once the protocol port is known. Test enforcement in both environments.
 
 ## Open
 

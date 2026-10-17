@@ -1,0 +1,9 @@
+# Bank-local PostgreSQL (CloudNativePG). Service: postgres-rw:5432; credentials in Secret postgres-app.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
