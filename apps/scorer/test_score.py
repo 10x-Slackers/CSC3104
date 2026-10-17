@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 
+# The pytest executable does not add the repository root for namespace imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import pytest
 from confluent_kafka import KafkaError, KafkaException
 from score import Scorer, validate

@@ -2,7 +2,7 @@
 
 Prints one JSON event per line for that bank's ingestor (Role 2), which publishes
 them to the bank-local Kafka. Run one replay per bank with the same --start-at so
-all three stay in step. Contract: docs/data-contract.md.
+all three stay in step. Contract: docs/contracts/data.md.
 
     uv run apps/dataset/replay.py apps/dataset/fixtures/tiny A --speed 0
     uv run apps/dataset/replay.py apps/dataset/out/dev-small A --speed 60 --start-at 1791500000 | <ingestor>
