@@ -2,7 +2,7 @@
 
 Each transfer becomes an `out` event at the sender's bank and an `in` event at the
 receiver's bank, sharing one payment_id. Labels never go into bank files.
-Contract: docs/data-contract.md. The first run downloads HI-Small (~476 MB, no Kaggle
+Contract: docs/contracts/data.md. The first run downloads HI-Small (~476 MB, no Kaggle
 login) into ~/.cache/kagglehub.
 
     uv run apps/dataset/prepare.py apps/dataset/fixtures/tiny --transfers apps/dataset/fixtures/tiny/transfers.csv
