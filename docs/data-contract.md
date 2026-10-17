@@ -107,7 +107,37 @@ uv run apps/dataset/replay.py apps/dataset/out/dev-small A --speed 60 --start-at
 
 At `--speed 60`, the 6 h `small` workload takes 6 min. `--speed 0` sends as fast as possible, for load tests.
 
-## Open
+## Role 2 local scoring (draft thresholds)
+
+`uv run apps/scorer/baseline.py apps/dataset/fixtures/tiny B` exports local
+candidate links as JSONL (no labels or cross-bank confirmation). Defaults are
+inclusive: outgoing/incoming ratio 0.90–0.98, delay 60–1800 seconds. Override
+with `--min-ratio`, `--max-ratio`, `--min-delay`, `--window`, `--max-events`.
+All qualifying pairs are reported; incoming funds are not allocated across payments.
+Each result includes a stable `detection_id`: SHA-256 of the compact JSON array
+`[bank, incoming_payment_id, outgoing_payment_id]` (UTF-8, default JSON escaping).
+Complete replay reproduces these IDs so downstream consumers can deduplicate.
+History/deduplication retain at most 10,000 events globally, within 30 minutes of
+each account's greatest timestamp; late events inside that horizon match in either
+arrival order, older events are ignored. Capacity eviction removes the oldest
+arrival and forgets an account's timestamp when none of its events remain.
+
+Pipe replay into `uv run apps/scorer/stream.py ingest B`; separately run
+`uv run apps/scorer/stream.py consume B`. Both accept `--bootstrap-servers`.
+Topics are `bank-<bank>-transactions`, keys are local accounts. Invalid/wrong-bank
+events stop processing; consumer offsets commit synchronously after output flush.
+Producer queue backpressure fails after 30 seconds per event; final flush is
+separately bounded at 30 seconds.
+State is in memory: use a fresh `--group` to replay from the beginning after
+restart or reassignment (output can repeat). Output and offsets are not atomic.
+`auto.offset.reset=earliest` does not rewind an existing group's committed offsets;
+complete replay needs all original records still retained in the topic.
+Use one consumer per bank for this local prototype; history is not transferred
+between consumers. A single partition per bank also preserves global replay order
+when the shared history capacity limit is reached.
+Tiny fixture expectations are A: 1, B: 4, C: 3 local links.
+
+## Pending team decisions
 
 - Rule parameters and hop limit (Roles 2 and 3) → update the constants in `prepare.py` and regenerate.
 - Event format is fixed here; Role 2 tells Role 1 if they change it.
