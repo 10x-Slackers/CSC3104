@@ -23,11 +23,19 @@ DATASET = "ealtman2019/ibm-transactions-for-anti-money-laundering-aml/versions/8
 # Text, not int: bank IDs are zero-padded ("010"); the second "Account" header becomes "Account.1".
 ID_COLS = {"From Bank": str, "To Bank": str, "Account": str, "Account.1": str}
 SCENARIOS = ("mule_chain", "lookalike", "loop", "absent_link", "over_limit")
-HOP_LIMIT = 4  # draft: pending future testing if we want more than 4 hops in a mule chain
-FORWARD = (0.90, 0.98)  # % of amount forwarded to the next hop configurable if we want to change in future tests
-LOOKALIKE_FORWARD = (0.20, 0.50) # benign tests still follows the same shape for mules, it should not flag these tests
+HOP_LIMIT = (
+    4  # draft: pending future testing if we want more than 4 hops in a mule chain
+)
+FORWARD = (
+    0.90,
+    0.98,
+)  # % of amount forwarded to the next hop configurable if we want to change in future tests
+LOOKALIKE_FORWARD = (
+    0.20,
+    0.50,
+)  # benign tests still follows the same shape for mules, it should not flag these tests
 DELAY_MIN = (1, 30)  # minutes between hops
-EVENT_COLS = ["payment_id", "event_time", "bank", "direction", "account", "counterparty_bank", "amount", "payment_format"]  # fmt: skip 
+EVENT_COLS = ["payment_id", "event_time", "bank", "direction", "account", "counterparty_bank", "amount", "payment_format"]  # fmt: skip
 LABEL_COLS = ["payment_id", "altman_laundering", "chain_id", "hop", "scenario"]
 
 

@@ -9,10 +9,16 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
-from baseline import make_scorer, thresholds
 from confluent_kafka import Consumer, KafkaException, Producer
-from score import validate
+
+if __package__:
+    from .baseline import make_scorer, thresholds
+    from .score import validate
+else:
+    from baseline import make_scorer, thresholds
+    from score import validate
 
 
 def topic(bank):
@@ -56,8 +62,10 @@ def ingest(lines, bank, producer):
         raise RuntimeError(f"Kafka delivery failed: {remaining} pending, {errors}")
 
 
-def consume(consumer, scorer, output=sys.stdout):
+def consume(consumer, scorer, output=sys.stdout, token_index=None):
     try:
+        if token_index is not None and token_index.bank != scorer.bank:
+            raise ValueError("Token index belongs to another bank")
         consumer.subscribe([topic(scorer.bank)])
         while True:
             message = consumer.poll(1)
@@ -72,6 +80,8 @@ def consume(consumer, scorer, output=sys.stdout):
                 or message.key() != event["account"].encode()
             ):
                 raise ValueError("wrong topic or account key")
+            if token_index is not None:
+                token_index.add(event)
             for result in scorer.process(event):
                 print(json.dumps(result, sort_keys=True), file=output)
             output.flush()
@@ -89,7 +99,31 @@ def main():
     thresholds(parser)
     parser.add_argument("--bootstrap-servers", default="localhost:9092")
     parser.add_argument("--group", help="default: scorer-<bank>")
+    parser.add_argument("--key-version", help="enable token indexing with this version")
+    parser.add_argument(
+        "--pairwise-key",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("PEER", "PATH"),
+        help="raw pairwise key file; repeat for each peer",
+    )
     args = parser.parse_args()
+    token_index = None
+    if args.key_version is not None or args.pairwise_key:
+        if args.mode != "consume" or not args.key_version or not args.pairwise_key:
+            parser.error("Indexing requires consume, --key-version and --pairwise-key")
+        # Direct script execution puts apps/scorer, rather than the repo root, on sys.path.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from apps.scorer.token_index import TokenIndex
+
+        paths = {}
+        for peer, path in args.pairwise_key:
+            pair = (args.bank, peer)
+            if pair in paths:
+                parser.error("Duplicate peer key configuration")
+            paths[pair] = path
+        token_index = TokenIndex(args.bank, args.key_version, paths)
     config = {"bootstrap.servers": args.bootstrap_servers}
     if args.mode == "ingest":
         ingest(sys.stdin, args.bank, Producer(config | {"enable.idempotence": True}))
@@ -104,7 +138,7 @@ def main():
             }
         )
         try:
-            consume(consumer, scorer)
+            consume(consumer, scorer, token_index=token_index)
         except KeyboardInterrupt:
             pass
 

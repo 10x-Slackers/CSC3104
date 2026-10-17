@@ -7,6 +7,12 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["apps/*"]
+exclude = ["apps/.gitkeep"]
+
+[tool.pytest.ini_options]
+# The optional persistent cache cannot be shared across Windows accounts.
+addopts = ["-p", "no:cacheprovider"]
+testpaths = ["apps"]
 
 [dependency-groups]
 dev = [

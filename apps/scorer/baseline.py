@@ -5,7 +5,10 @@ import csv
 import json
 from pathlib import Path
 
-from score import Scorer
+if __package__:
+    from .score import Scorer
+else:
+    from score import Scorer
 
 
 def thresholds(parser):
