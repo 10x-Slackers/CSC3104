@@ -1,0 +1,6 @@
+[project]
+name = "scorer"
+version = "0.1.0"
+description = "Role 2: bank-local forwarding detection and Kafka streaming"
+requires-python = ">=3.12"
+dependencies = ["confluent-kafka>=2.6"]

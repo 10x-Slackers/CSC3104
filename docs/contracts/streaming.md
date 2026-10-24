@@ -1,6 +1,6 @@
 # Streaming and scoring contract
 
-Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (tokens), Isaac (scaling, baseline comparison) · Status: TODO
+Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, local implementation available; integration decisions below remain open
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
 
@@ -8,10 +8,27 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 
 | Item | Decision |
 | --- | --- |
-| Topic names | TODO |
-| Event identity / dedup key | TODO |
-| Partitioning key and ordering guarantee | TODO |
-| Replay, late and out-of-order events | TODO |
+| Topic names | `bank-A-transactions`, `bank-B-transactions`, `bank-C-transactions` |
+| Event identity / dedup key | `(payment_id, direction, account)` within one bank; scorer deduplication lasts only while the event is retained |
+| Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters |
+| Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window` |
+
+The ingestor reads Role 1's JSONL replay from stdin using the event format in
+[data.md](data.md). It rejects invalid or wrong-bank events; the consumer also
+checks the topic and account key. Both accept `--bootstrap-servers` (default
+`localhost:9092`). Producer queue waits and final flush are each bounded at 30 seconds.
+
+Scorer history is in memory: at most `--max-events` (default 10,000) globally,
+with time expiry per account. Capacity eviction removes the oldest arrival and
+forgets an account's watermark when none of its events remain. Consumer offsets
+commit synchronously after optional indexing, scoring and output flush succeed;
+processing errors stop the consumer without committing the failed record.
+
+Restart/reassignment requires a full replay to rebuild state. Use a fresh
+`--group` (default `scorer-<bank>`); `auto.offset.reset=earliest` does not rewind
+existing committed offsets. Replay requires the original records to remain in
+Kafka. Output and commits are not atomic; repeated detections are possible.
+There is no durable state or multi-replica recovery; use one consumer per bank.
 
 ## Detection rule
 
@@ -19,16 +36,44 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 
 | Parameter | Value | Notes |
 | --- | --- | --- |
-| Incoming-to-outgoing value ratio | TODO | |
-| Time window | TODO | |
+| Incoming-to-outgoing value ratio | Outgoing / incoming: 0.90–0.98 inclusive | `--min-ratio`, `--max-ratio`; draft defaults pending team approval |
+| Time window | 1–30 minutes inclusive, using transaction timestamps | `--min-delay` (60 seconds), `--window` (1800 seconds) |
 | Minimum chain length | TODO | |
 | Hop limit | TODO | Shared with [protocol.md](protocol.md) |
 | Branching cap | TODO | |
-| Fees, currencies, insufficient history | TODO | |
+| Fees, currencies, insufficient history | Uses Role 1's USD-only data; no separate fee model. Missing/evicted history produces no local match | TODO: agree reporting of unsupported cases and incomplete history |
+
+The scorer reports every qualifying incoming/outgoing pair for the same local
+account; it does not allocate incoming funds across payments or perform graph
+search. Ground-truth labels are never used. JSONL output contains local candidate
+links, not confirmed chains or analyst alerts: bank, account, incoming/outgoing
+payment IDs and times, ratio, delay in seconds and `detection_id`.
+
+`detection_id` is SHA-256 of the UTF-8 compact JSON array
+`[bank, incoming_payment_id, outgoing_payment_id]`, with default JSON escaping.
+Replaying the same pair produces the same ID. This output stays bank-local;
+it is not an approved peer payload.
 
 ## Token index
 
-TODO: when and how events are tokenised; where the index lives; how the privacy node looks tokens up. The index never leaves the bank.
+Optional `TokenIndex` population runs on validated cross-bank events before
+scoring, including unflagged and scorer-too-late events. It uses the original
+`payment_id` and actual `counterparty_bank` with Role 4's `canonical_pair`,
+`derive_token` and `load_pairwise_keys`; same-bank events are skipped. See
+[security.md](security.md) for the token and secret-file contract.
+
+Enable with `--key-version k1` and repeated `--pairwise-key PEER PATH` options on
+`stream.py consume`; omitting both keeps scorer-only operation. Missing/invalid
+configuration fails; an event whose pair lacks a key is not committed. A new
+key/version requires a new index and replay; there is no old-key fallback.
+
+The in-memory index maps `(canonical bank pair, key version, token)` to unique
+local `(payment_id, direction, account)` references. `lookup(pair, version, token)`
+returns those references in deterministic order and rejects unrelated pairs.
+Duplicate replay adds no duplicate references. The index and lookup results stay
+bank-local; Role 3 must not send them as peer responses. There is currently no
+expiry or size cap: TODO, agree tracing/retry lifetime and retention with Roles
+3 and 6 before discarding records, including unmatched payments.
 
 ## Search handoff
 
@@ -40,8 +85,22 @@ TODO: KEDA trigger (Kafka consumer-group lag), min and max replicas, and the met
 
 ## Local-only baseline
 
-TODO: the same rules without peer queries. Isaac specifies the comparison.
+`uv run apps/scorer/baseline.py apps/dataset/fixtures/tiny B` reads only that bank's
+CSV and exports JSONL candidates using the same scorer, without Kafka or peers.
+Repeat for A and C. Defaults can be overridden with `--min-ratio`, `--max-ratio`,
+`--min-delay`, `--window` and `--max-events`.
+
+Verified tiny-fixture local pairs (stable IDs reproduce on replay):
+
+| Bank | Detections | Incoming → outgoing |
+| --- | --- | --- |
+| A | 1 | p17 → p18 |
+| B | 4 | p06 → p07; p10 → p11; p15 → p16; p18 → p19 |
+| C | 3 | p11 → p12; p16 → p17; p19 → p20 |
+
+TODO: Isaac specifies the full-system baseline comparison in [evaluation.md](../evaluation.md).
 
 ## Open
 
-- TODO
+- TODO: team approval of rule defaults and chain/branching rules with Role 3.
+- TODO: token-index retention and recovery/deployment policy with Roles 3 and 6.
