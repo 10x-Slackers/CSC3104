@@ -1,0 +1,16 @@
+[project]
+name = "case"
+version = "0.1.0"
+description = "Role 5: bank-local cases, alerts, analyst UI and draft reports"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.2",
+    "fastapi>=0.162.0",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1,<2.14",
+]
