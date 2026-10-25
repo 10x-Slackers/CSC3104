@@ -1,0 +1,74 @@
+// Peer messages between bank privacy nodes. Contract: docs/contracts/protocol.md
+// Regenerate from the repo root:
+//   uv run python -m grpc_tools.protoc -I. --python_out=. --pyi_out=. --grpc_python_out=. apps/privacy_node/privacy_node.proto
+syntax = "proto3";
+
+package csc3104.privacy.v1;
+
+service PrivacyNode {
+  // Ask the bank at the other end of a transfer to confirm it and follow its local link.
+  rpc Trace(TraceRequest) returns (TraceReply);
+  // Push an assembled chain result to an involved bank (server-to-server callback).
+  rpc Deliver(ChainResult) returns (Ack);
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DOWNSTREAM = 1;  // token is the receiver's incoming transfer; follow money forward
+  UPSTREAM = 2;    // token is the receiver's outgoing transfer; follow money backward
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  CONFIRMED = 1;      // every link reached a natural end or closed a loop
+  NO_MATCH = 2;       // the peer does not hold this transfer
+  PARTIAL = 3;        // cut by the hop limit or branching cap; final
+  PENDING = 4;        // a needed bank was unreachable; retried after recovery
+  TIMED_OUT = 5;      // the search deadline passed
+  INVALID_CLAIM = 6;  // a claim failed verification; never stored as evidence
+}
+
+// A pair-scoped transfer token, e.g. pair "A-B".
+message TokenRef {
+  string pair = 1;
+  string token = 2;
+}
+
+message TraceRequest {
+  string query_id = 1;  // one per search leg; retries reuse it
+  string sender = 2;
+  string key_version = 3;
+  TokenRef ref = 4;
+  Direction direction = 5;
+  int32 hops_remaining = 6;  // further transfers this leg may add
+  string deadline = 7;       // absolute ISO 8601 UTC, never extended
+  repeated TokenRef visited = 8;
+}
+
+// Signed statement by one bank: "I hold in_ref and out_ref and my local rule links them".
+// A missing in_ref or out_ref means the chain starts or ends at this bank.
+message LinkClaim {
+  string signer = 1;
+  string recipient = 2;
+  string query_id = 3;
+  string key_version = 4;
+  TokenRef in_ref = 5;
+  TokenRef out_ref = 6;
+  bytes signature = 7;
+}
+
+message TraceReply {
+  State state = 1;
+  repeated LinkClaim claims = 2;  // in chain order, nearest bank first
+}
+
+message ChainResult {
+  string chain_digest = 1;  // "chain_id" is a forbidden evaluation label
+  string sender = 2;
+  State state = 3;
+  repeated LinkClaim claims = 4;  // whole chain in money-flow order
+}
+
+message Ack {
+  string chain_digest = 1;
+}

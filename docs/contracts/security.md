@@ -27,7 +27,7 @@ This is a laboratory model; see also [overview.md](../overview.md#trust-and-fail
 
 The protocol's hop count isn't the same field as the evaluation `hop` label. The protocol field needs a different name.
 
-`check_peer_payload(payload, allowed_fields)` walks dicts and lists recursively and raises `ValueError` for any key that is in `FORBIDDEN_FIELDS` or missing from `allowed_fields`. It checks **field names only**: it can't catch an account number hidden inside an allowed value. Zane's serialiser must also enforce the protobuf schema.
+`check_peer_payload(payload, allowed_fields)` walks dicts and lists recursively and raises `ValueError` for any key that is in `FORBIDDEN_FIELDS` or missing from `allowed_fields`, and `TypeError` for any value that isn't a dict, list, tuple or JSON scalar (convert protobuf messages with `MessageToDict(message, preserving_proto_field_name=True)` first). It checks **field names only**: it can't catch an account number hidden inside an allowed value. Zane's serialiser must also enforce the protobuf schema.
 
 ## Pairwise HMAC tokens
 
@@ -42,7 +42,7 @@ Every bank pair shares one independent random 32-byte key. Arbitrary per-bank ke
 `derive_token(payment_id, bank_a, bank_b, shared_key, key_version) -> str`:
 
 1. Bank IDs are distinct, exact, case-sensitive strings, sorted so that `(A, B)` and `(B, A)` give the same pair. Intra-bank transfers have no peer token and are rejected.
-2. `payment_id` is used exactly as given by [data.md](data.md), with no trimming or case folding.
+2. `payment_id` is a string, used exactly as given by [data.md](data.md), with no trimming or case folding.
 3. `key_version` must match `[A-Za-z0-9_-]+`, e.g. `k1`.
 4. The HMAC input is the ASCII JSON from `canonical_token_input`, written with no spaces:
 
@@ -68,7 +68,7 @@ The pair is bound into the HMAC input but isn't shown in the token. Lookups must
 
 - Each bank has its own signing key and is the only holder of its private key.
 - Verifiers look up the public key from trusted configuration keyed by `(bank, signing key version)`. They never trust a key carried inside the claim.
-- `sign(message_bytes, private_key)` signs exactly the bytes given. `verify(message_bytes, signature, public_key)` returns `False` for any bad signature, and the caller must then reject the claim without creating confirmed evidence.
+- `sign(message_bytes, private_key)` signs exactly the bytes given. `verify(message_bytes, signature, public_key)` returns `False` for any bad or non-bytes signature, and the caller must then reject the claim without creating confirmed evidence.
 - Zane defines the canonical claim bytes. They must cover every security-relevant field: domain, signer, recipient/context, query ID, tokens, and key versions.
 - A valid signature proves which bank sent the claim and that it wasn't altered. It does **not** prove the records are true, that the claim is fresh, or that the chain is complete. Replay protection and deadlines belong to the protocol.
 
@@ -81,6 +81,8 @@ Key helpers: `generate_signing_key`, `private_key_pem` (unencrypted PKCS8), `pub
 - Never put keys in manifests, Helm values or git. The local `.secrets/` folder is git-ignored.
 - `load_pairwise_keys(bank_id, {pair: path})` reads the raw bytes without stripping or base64 decoding. It rejects pairs that don't include this bank, pairs supplied twice, keys shorter than 32 bytes, and the same key reused across pairs.
 - Keys are read once at startup, so rotation needs a restart.
+
+From the repository root:
 
 ```python
 from apps.security.security import derive_token, load_pairwise_keys
@@ -108,6 +110,8 @@ The mount paths above are examples. Secret names and paths: TODO, with Isaac.
 | Ingestor, scorer | Own bank's Kafka | Broker ports |
 | Scorer, privacy node, case service | Own bank's PostgreSQL | Database port |
 | Bank workloads | Cluster DNS | DNS |
+| Operator-managed pods (e.g. CloudNativePG) | Kubernetes API server | TCP 443/6443 to the API server addresses only |
+| KEDA operator | Own bank's Kafka | Broker ports, to read consumer lag |
 | Monitoring | Explicit metrics endpoints | Metrics ports |
 
 Isaac owns the final policies in [deployment.md](deployment.md). The cluster's CNI must actually enforce them.
@@ -150,7 +154,7 @@ Integration evidence still needed, owned with Isaac and evaluated in [evaluation
 
 ## Open
 
-- [ ] Exact protobuf field allowlist for each message type (with Zane)
-- [ ] Canonical bytes for signed claims (with Zane)
+- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS`
+- [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes`
 - [ ] Secret names, mount paths, SAN-to-bank map (with Isaac)
 - [ ] Destination and inputs for the AI report (with Jia Rui)

@@ -23,17 +23,12 @@ DATASET = "ealtman2019/ibm-transactions-for-anti-money-laundering-aml/versions/8
 # Text, not int: bank IDs are zero-padded ("010"); the second "Account" header becomes "Account.1".
 ID_COLS = {"From Bank": str, "To Bank": str, "Account": str, "Account.1": str}
 SCENARIOS = ("mule_chain", "lookalike", "loop", "absent_link", "over_limit")
-HOP_LIMIT = (
-    4  # draft: pending future testing if we want more than 4 hops in a mule chain
-)
-FORWARD = (
-    0.90,
-    0.98,
-)  # % of amount forwarded to the next hop configurable if we want to change in future tests
-LOOKALIKE_FORWARD = (
-    0.20,
-    0.50,
-)  # benign tests still follows the same shape for mules, it should not flag these tests
+# Draft: most hops in a mule chain, pending testing of longer chains.
+HOP_LIMIT = 4
+# Share of the amount forwarded to the next hop.
+FORWARD = (0.90, 0.98)
+# Benign lookalikes follow the same shape as mule chains but must not be flagged.
+LOOKALIKE_FORWARD = (0.20, 0.50)
 DELAY_MIN = (1, 30)  # minutes between hops
 EVENT_COLS = ["payment_id", "event_time", "bank", "direction", "account", "counterparty_bank", "amount", "payment_format"]  # fmt: skip
 LABEL_COLS = ["payment_id", "altman_laundering", "chain_id", "hop", "scenario"]
@@ -131,7 +126,7 @@ def split(t):
         for d, (me, other) in sides.items()
     )
     # an intra-bank transfer's `out` stays ahead of its `in`
-    ev = ev.sort_values(["time", "payment_id"], kind="stable")
+    ev = ev.sort_values(["time", "payment_id"])
     ev["event_time"] = ev.time.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     labels = t.loc[(t.altman_laundering == 1) | t.chain_id.notna(), LABEL_COLS]
     return {b: ev.loc[ev.bank == b, EVENT_COLS] for b in "ABC"}, labels

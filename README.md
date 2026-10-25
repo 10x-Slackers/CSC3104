@@ -9,18 +9,19 @@ Privacy Preserving Detection of Cross Bank Money Mule Chains
 
 ## Project Scope
 
-- [link_to_source](link_to_source)
-  - scope_description
+- [docs/](docs/README.md): requirements, architecture and per-role contracts
 
 ## Usage
 
-### runtime_executable
-
 ```sh
-./runtime_executable <args> [optional]
+uv sync --all-packages --locked                                   # install every app
+uv run pytest                                                     # run all tests
+uv run apps/scorer/baseline.py apps/dataset/fixtures/tiny B       # local-only detections for Bank B
+deploy/k3d-up.sh && deploy/check-netpol.sh                        # local cluster, then policy check
 ```
 
-- runtime_executable_description
+- See each contract in `docs/contracts/` for app-specific commands.
+- `deploy/k3d-up.sh` needs Docker, k3d, kubectl and Helm. The Dev Container doesn't include them, so run it on the host.
 
 ## Getting Started
 
@@ -32,7 +33,7 @@ Privacy Preserving Detection of Cross Bank Money Mule Chains
   - [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension
 
 > [!WARNING]  
-> Do not use GitHub Desktop! All interactions (files, git, runtime, etc.) should be done through the Dev Container within VS Code.
+> Do not use GitHub Desktop! All interactions (files, git, runtime, etc.) should be done through the Dev Container within VS Code, except the k3d cluster (see Usage).
 
 ### Installation
 

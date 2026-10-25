@@ -1,0 +1,6 @@
+[project]
+name = "privacy-node"
+version = "0.1.0"
+description = "Role 3: peer-to-peer chain tracing over gRPC with signed link claims"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=50.0.2", "grpcio>=1.84.1", "protobuf>=7.35.1"]
