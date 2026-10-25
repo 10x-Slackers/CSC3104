@@ -11,18 +11,22 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Topic names | `bank-A-transactions`, `bank-B-transactions`, `bank-C-transactions` |
 | Event identity / dedup key | `(payment_id, direction, account)` within one bank; scorer deduplication lasts only while the event is retained |
 | Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters |
-| Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window` |
+| Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window`. Events are retained for twice `--window` so an accepted late event still finds its partner |
 
 The ingestor reads Role 1's JSONL replay from stdin using the event format in
 [data.md](data.md). It rejects invalid or wrong-bank events; the consumer also
 checks the topic and account key. Both accept `--bootstrap-servers` (default
 `localhost:9092`). Producer queue waits and final flush are each bounded at 30 seconds.
+The k3d Kafka has only an in-cluster listener, so run the scripts inside the
+cluster with `--bootstrap-servers kafka-kafka-bootstrap:9092`; a port-forward does
+not work because the broker advertises in-cluster addresses. The consumer may
+start before the topic exists: non-fatal Kafka errors are logged and retried.
 
 Scorer history is in memory: at most `--max-events` (default 10,000) globally,
-with time expiry per account. Capacity eviction removes the oldest arrival and
-forgets an account's watermark when none of its events remain. Consumer offsets
+with time expiry per account. Capacity eviction removes the oldest arrival; each
+account's watermark is kept, so late events stay ignored after eviction. Consumer offsets
 commit synchronously after optional indexing, scoring and output flush succeed;
-processing errors stop the consumer without committing the failed record.
+processing and fatal Kafka errors stop the consumer without committing the failed record.
 
 Restart/reassignment requires a full replay to rebuild state. Use a fresh
 `--group` (default `scorer-<bank>`); `auto.offset.reset=earliest` does not rewind

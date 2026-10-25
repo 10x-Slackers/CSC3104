@@ -88,7 +88,7 @@ def test_out_of_order_and_bounds():
     scorer = Scorer("B")
     scorer.process(event("out", "out", 95, "09:05:00"))
     assert len(scorer.process(event())) == 1
-    scorer.process(event("future", time="10:00:00"))
+    scorer.process(event("future", time="11:00:00"))
     assert scorer.process(event()) == []
     assert len(scorer.history) == 1
     scorer = Scorer("B", max_events=2)
@@ -110,7 +110,7 @@ def test_account_time_windows():
     )
     assert scorer.process(event()) == []
     assert scorer.process(outgoing) == []
-    scorer.process(event("bob-new", time="10:00:00"))
+    scorer.process(event("bob-new", time="11:00:00"))
     assert scorer.process(event()) == []
     assert set(scorer.accounts) == {"alice", "bob"}
     assert len(scorer.history) == 2
@@ -122,9 +122,24 @@ def test_interleaved_account_capacity_eviction():
     scorer.process(event())
     assert len(scorer.process(event("out", "out", 95, "09:05:00"))) == 1
     assert set(scorer.accounts) == {"bob"}
-    assert set(scorer.latest) == {"bob"}
+    assert set(scorer.latest) == {"alice", "bob"}
     assert len(scorer.history) == 2
     assert scorer.process(event()) == []
+
+
+def test_capacity_eviction_keeps_watermark():
+    scorer = Scorer("B", max_events=1)
+    scorer.process(event("x", time="12:00:00"))
+    scorer.process(event("y", account="alice", time="12:00:00"))
+    assert scorer.process(event()) == []
+    assert scorer.process(event("out", "out", 95, "09:05:00")) == []
+
+
+def test_late_event_finds_expired_window_partner():
+    scorer = Scorer("B")
+    scorer.process(event())
+    scorer.process(event("later", time="09:40:00"))
+    assert len(scorer.process(event("out", "out", 95, "09:20:00"))) == 1
 
 
 @pytest.mark.parametrize(
@@ -151,8 +166,7 @@ def test_tiny(bank, pairs):
 
 
 def test_ingest():
-    producer = Mock()
-    producer.flush.return_value = 0
+    producer = Mock(**{"flush.return_value": 0})
     ingest([json.dumps(event())], "B", producer)
     args, kwargs = producer.produce.call_args
     assert args == ("bank-B-transactions",)
@@ -164,8 +178,7 @@ def test_ingest():
 
 
 def test_delivery_failure():
-    producer = Mock()
-    producer.flush.return_value = 0
+    producer = Mock(**{"flush.return_value": 0})
 
     def fail(*args, **kwargs):
         kwargs["on_delivery"]("failed", None)
@@ -187,9 +200,10 @@ def message(e):
 
 
 def test_consumer():
-    consumer = Mock()
-    consumer.commit.return_value = []
+    consumer = Mock(**{"commit.return_value": []})
+    transient = KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART, "not created yet")
     consumer.poll.side_effect = [
+        Mock(**{"error.return_value": transient}),
         message(event()),
         message(event("out", "out", 95, "09:05:00")),
         KeyboardInterrupt,
@@ -207,14 +221,13 @@ def test_consumer():
     "failure", ["flush", "commit", "partition", "poll", "subscribe"]
 )
 def test_consumer_failures(failure):
-    consumer = Mock()
-    consumer.commit.return_value = []
+    consumer = Mock(**{"commit.return_value": []})
     consumer.poll.side_effect = [
         message(event()),
         AssertionError("polled after failure"),
     ]
     output = Mock()
-    error = KafkaError(KafkaError._FAIL, "test failure")
+    error = KafkaError(KafkaError._FAIL, "test failure", fatal=True)
     if failure == "flush":
         output.flush.side_effect = OSError("output failed")
     elif failure == "commit":
@@ -236,8 +249,7 @@ def test_consumer_failures(failure):
 
 @pytest.mark.parametrize("failure", ["flush_callback", "pending", "backpressure"])
 def test_producer_failures(failure):
-    producer = Mock()
-    producer.flush.return_value = 0
+    producer = Mock(**{"flush.return_value": 0})
     if failure == "pending":
         producer.flush.return_value = 1
     elif failure == "flush_callback":
@@ -282,7 +294,7 @@ def test_backpressure_recovers():
 
 
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])
-def test_complete_replay_after_restart(bank, count):
+def test_replay_is_repeatable(bank, count):
     replay = subprocess.run(
         [
             sys.executable,
@@ -299,8 +311,7 @@ def test_complete_replay_after_restart(bank, count):
     events = [json.loads(line) for line in replay.stdout.splitlines()]
 
     def run():
-        consumer = Mock()
-        consumer.commit.return_value = []
+        consumer = Mock(**{"commit.return_value": []})
         messages = [message(e) for e in events]
         for m in messages:
             m.topic.return_value = f"bank-{bank}-transactions"
@@ -445,8 +456,7 @@ def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
     index = TokenIndex("B", "k1", paths)
     scorer = Scorer("B")
     expected = [r for e in events for r in scorer.process(e)]
-    consumer = Mock()
-    consumer.commit.return_value = []
+    consumer = Mock(**{"commit.return_value": []})
     consumer.poll.side_effect = [
         *[message(e) for e in events for _ in range(2)],
         KeyboardInterrupt,
@@ -481,8 +491,7 @@ def test_index_failure_does_not_commit(failure, pair_key_paths):
 def test_late_unflagged_events_are_indexed(pair_key_paths):
     index = TokenIndex("B", "k1", {("A", "B"): pair_key_paths["A", "B"]})
     events = [event("new", time="12:00:00"), event(), event()]
-    consumer = Mock()
-    consumer.commit.return_value = []
+    consumer = Mock(**{"commit.return_value": []})
     consumer.poll.side_effect = [*[message(e) for e in events], KeyboardInterrupt]
     output = io.StringIO()
     with pytest.raises(KeyboardInterrupt):

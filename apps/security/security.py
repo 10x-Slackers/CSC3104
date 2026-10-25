@@ -45,6 +45,8 @@ def canonical_token_input(
     payment_id: str, bank_a: str, bank_b: str, key_version: str
 ) -> bytes:
     """Encode the domain, protocol, pair, key version and unchanged payment ID."""
+    if not isinstance(payment_id, str):
+        raise TypeError("Payment ID must be a string")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", key_version):
         raise ValueError("Key version must use ASCII letters, digits, '_' or '-'")
     return json.dumps(
@@ -136,7 +138,7 @@ def verify(
     """Return False for invalid signatures; callers must reject failed claims."""
     try:
         public_key.verify(signature, message_bytes)
-    except InvalidSignature:
+    except (InvalidSignature, TypeError):
         return False
     return True
 
@@ -155,3 +157,5 @@ def check_peer_payload(payload: object, allowed_fields: Collection[str]) -> None
     elif isinstance(payload, (list, tuple)):
         for value in payload:
             check_peer_payload(value, allowed_fields)
+    elif not isinstance(payload, (str, bytes, int, float, type(None))):
+        raise TypeError(f"Convert {type(payload).__name__} to dicts/lists first")

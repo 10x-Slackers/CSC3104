@@ -1,7 +1,16 @@
 from pathlib import Path
 
 import pandas as pd
-from prepare import FORWARD, HOP_LIMIT, plant, read_transfers, split
+import prepare
+from prepare import (
+    FORWARD,
+    HOP_LIMIT,
+    LOOKALIKE_FORWARD,
+    pid,
+    plant,
+    read_transfers,
+    split,
+)
 
 TINY = Path(__file__).parent / "fixtures/tiny"
 
@@ -25,6 +34,25 @@ def test_fixture_split():
     for b, e in banks.items():
         committed = pd.read_csv(TINY / f"bank_{b}.csv", dtype=str)
         assert committed.equals(e.astype(str).reset_index(drop=True))
+    assert labels.to_csv(index=False) == (TINY / "labels.csv").read_text()
+
+
+def test_altman(tmp_path, monkeypatch):
+    source = tmp_path / "HI-Small_Trans.csv"
+    source.write_text(
+        "Timestamp,From Bank,Account,To Bank,Account,Amount Received,Receiving Currency,Amount Paid,Payment Currency,Payment Format,Is Laundering\n"
+        "2022/09/05 09:00,010,8000A,0011,8000B,100,US Dollar,100,US Dollar,ACH,0\n"
+        "2022/09/05 09:01,010,8000A,0010,8000A,100,US Dollar,100,US Dollar,ACH,0\n"  # self-transfer
+        "2022/09/05 09:02,010,8000A,0011,8000B,100,Euro,100,Euro,ACH,0\n"
+        "2022/09/05 10:00,010,8000A,0011,8000B,100,US Dollar,100,US Dollar,ACH,0\n"  # slice end
+        "2022/09/05 09:03,011,8000A,010,8000A,50,US Dollar,50,US Dollar,Wire,1\n"
+    )  # fmt: skip
+    monkeypatch.setattr(prepare.kagglehub, "dataset_download", lambda *a, **k: source)
+    t = prepare.altman("2022-09-05 09:00", 1)
+    assert list(t.payment_id) == [pid("altman:0"), pid("altman:4")]
+    assert list(t.from_bank + t.from_account) == ["B10-8000A", "C11-8000A"]
+    assert list(t.to_bank + t.to_account) == ["C11-8000B", "B10-8000A"]
+    assert list(t.altman_laundering) == [0, 1]
 
 
 def test_plant():
@@ -41,6 +69,10 @@ def test_plant():
     chains = t[t.chain_id.notna()].sort_values(["chain_id", "hop"])
     assert (chains.from_bank != chains.to_bank).all()  # every hop crosses banks
     assert chains.time.max() <= bg.time.max()  # chains end inside the slice
+    midpoint = bg.time.min() + (bg.time.max() - bg.time.min()) / 2
+    assert chains.groupby("chain_id").time.min().max() <= midpoint
+    planted = set(chains.from_account) | set(chains.to_account)
+    assert planted <= set(bg.from_account) | set(bg.to_account)
     for (scenario, _), c in chains.groupby(["scenario", "chain_id"]):
         hops = list(c.hop)
         ratio = (c.amount.shift(-1) / c.amount).dropna()
@@ -50,7 +82,7 @@ def test_plant():
         assert hops == list(range(len(hops)))
         assert (c.to_account.iloc[:-1].values == c.from_account.iloc[1:].values).all()
         if scenario == "lookalike":
-            assert (ratio < FORWARD[0]).all()
+            assert ratio.between(*LOOKALIKE_FORWARD).all()
         else:
             assert ratio.between(*FORWARD).all()
         if scenario == "loop":

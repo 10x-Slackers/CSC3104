@@ -4,7 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-k3d cluster list csc3104 >/dev/null 2>&1 || k3d cluster create csc3104 --wait
+# The fixed subnet matches apiServerCIDRs in charts/bank/values.yaml.
+k3d cluster list csc3104 >/dev/null 2>&1 || k3d cluster create csc3104 --subnet 172.28.0.0/16 --wait
+kubectl config use-context k3d-csc3104
 
 helm upgrade --install --wait strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator --version 1.2.0 \
   -n strimzi --create-namespace --set watchAnyNamespace=true --set generateNetworkPolicy=false
@@ -17,4 +19,4 @@ helm upgrade --install --wait cert-manager oci://quay.io/jetstack/charts/cert-ma
 kubectl apply -f platform/ca.yaml
 
 for b in a b c; do helm upgrade --install "bank-$b" charts/bank -n "bank-$b" --create-namespace; done
-kubectl wait -A --all --for=condition=Ready --timeout=15m kafka,clusters.postgresql.cnpg.io
+kubectl wait -A --all --for=condition=Ready --timeout=15m kafka,clusters.postgresql.cnpg.io,certificates.cert-manager.io

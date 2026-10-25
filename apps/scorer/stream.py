@@ -72,7 +72,11 @@ def consume(consumer, scorer, output=sys.stdout, token_index=None):
             if message is None:
                 continue
             if message.error():
-                raise KafkaException(message.error())
+                # librdkafka retries transient errors (e.g. topic not created yet) itself.
+                if message.error().fatal():
+                    raise KafkaException(message.error())
+                print(message.error(), file=sys.stderr)
+                continue
             # Fail without committing malformed or wrongly routed records.
             event = validate(json.loads(message.value()), scorer.bank)
             if (
