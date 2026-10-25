@@ -25,7 +25,7 @@ def validate(event, bank):
     e = {key: event[key] for key in FIELDS}
     if any(not isinstance(e[k], str) or not e[k] for k in FIELDS if k != "amount"):
         raise ValueError("transaction fields must be nonempty strings")
-    if bank not in "ABC" or len(bank) != 1 or e["bank"] != bank:
+    if e["bank"] != bank or bank not in ("A", "B", "C"):
         raise ValueError("wrong bank")
     if e["counterparty_bank"] not in ("A", "B", "C") or e["direction"] not in (
         "in",
@@ -45,9 +45,10 @@ def validate(event, bank):
 class Scorer:
     """Match all local in/out pairs, without consuming an incoming payment.
 
-    Retain at most max_events globally and window seconds behind each account's
-    greatest timestamp. Late events match in either arrival order; older
-    events are ignored. Deduplication has the same retention bound. A payment's
+    Accept events up to window seconds behind each account's greatest timestamp
+    (never forgotten); older events are ignored. Retain events for twice the window,
+    so late events match in either arrival order, and at most max_events globally.
+    Deduplication has the same retention bound. A payment's
     in/out endpoints are distinct events. State is in memory, not checkpointed.
     """
 
@@ -84,7 +85,6 @@ class Scorer:
         del self.accounts[account][key]
         if not self.accounts[account]:
             del self.accounts[account]
-            self.latest.pop(account, None)
 
     def process(self, event):
         e = validate(event, self.bank)
@@ -92,15 +92,16 @@ class Scorer:
         now = datetime.fromisoformat(e["event_time"])
         latest = max(self.latest.get(account, now), now)
         cutoff = latest - timedelta(seconds=self.window)
+        # A late event at the cutoff can still pair with an event a window before it.
         for old_key, (timestamp, _) in list(self.accounts.get(account, {}).items()):
-            if timestamp < cutoff:
+            if timestamp < cutoff - timedelta(seconds=self.window):
                 self._remove(old_key)
         self.latest[account] = latest
-        key = (e["payment_id"], e["direction"], e["account"])
+        key = (e["payment_id"], e["direction"], account)
         if now < cutoff or key in self.history:
             return []
         results = []
-        for timestamp, previous in self.accounts[e["account"]].values():
+        for timestamp, previous in self.accounts[account].values():
             if previous["direction"] == e["direction"]:
                 continue
             incoming, outgoing = (
@@ -116,20 +117,14 @@ class Scorer:
                 self.min_delay <= delay <= self.window
                 and self.min_ratio <= ratio <= self.max_ratio
             ):
+                ids = [self.bank, incoming["payment_id"], outgoing["payment_id"]]
                 results.append(
                     {
                         "detection_id": hashlib.sha256(
-                            json.dumps(
-                                [
-                                    self.bank,
-                                    incoming["payment_id"],
-                                    outgoing["payment_id"],
-                                ],
-                                separators=(",", ":"),
-                            ).encode()
+                            json.dumps(ids, separators=(",", ":")).encode()
                         ).hexdigest(),
                         "bank": self.bank,
-                        "account": e["account"],
+                        "account": account,
                         "incoming_payment_id": incoming["payment_id"],
                         "outgoing_payment_id": outgoing["payment_id"],
                         "incoming_time": incoming["event_time"],
@@ -139,7 +134,7 @@ class Scorer:
                     }
                 )
         self.history[key] = (now, e)
-        self.accounts[e["account"]][key] = (now, e)
+        self.accounts[account][key] = (now, e)
         if len(self.history) > self.max_events:
             self._remove(next(iter(self.history)))
         return results

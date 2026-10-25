@@ -2,6 +2,7 @@ import csv
 import hashlib
 import hmac
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -83,6 +84,8 @@ def test_token_scopes_and_exact_identifiers():
     assert canonical_pair("B", "A") == ("A", "B")
     assert canonical_pair("a", "A") == ("A", "a")
     assert canonical_token_input("p\u00e9", "A", "B", "k1").endswith(b'"p\\u00e9"]')
+    with pytest.raises(TypeError):
+        derive_token(1, "A", "B", PAIR_KEYS["A", "B"], "k1")
 
 
 @pytest.mark.parametrize("bank_a,bank_b", [("A", "A"), ("", "B"), ("A", "")])
@@ -158,6 +161,7 @@ def test_signatures_authenticate_exact_bytes_and_signer():
     assert not verify(message, signature[:-1] + bytes([signature[-1] ^ 1]), public)
     assert not verify(message, b"malformed", public)
     assert not verify(message, b"", public)
+    assert not verify(message, signature.hex(), public)
 
 
 def test_signing_key_pem_roundtrip(tmp_path):
@@ -208,6 +212,9 @@ def test_nested_peer_allowlist():
     check_peer_payload(payload, allowed)
     with pytest.raises(ValueError):
         check_peer_payload({"metadata": {"unreviewed_field": "value"}}, allowed)
+    for unchecked in ({"token"}, iter([payload]), SimpleNamespace(token="t")):
+        with pytest.raises(TypeError):
+            check_peer_payload(unchecked, allowed)
 
 
 @pytest.mark.parametrize("field", sorted(PRIVATE_FIELDS))

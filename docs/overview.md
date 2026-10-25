@@ -48,6 +48,8 @@ A rule flags suspicion, not proven laundering.
 
 Every bank runs the same services in its own Kubernetes namespace (Bank A shown).
 
+This is the target design. The scorer currently keeps its token index in memory and runs one consumer per bank; see [streaming.md](contracts/streaming.md).
+
 ```mermaid
 flowchart LR
   subgraph A["namespace: bank A"]

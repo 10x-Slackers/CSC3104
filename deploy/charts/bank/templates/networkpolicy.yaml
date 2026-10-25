@@ -1,4 +1,4 @@
-# Deny everything, then allow: traffic inside this bank, DNS, the Kubernetes API, and the platform operators.
+# Deny everything, then allow: traffic inside this bank, DNS, the Kubernetes API, and the platform operators (KEDA reads Kafka lag).
 # TODO: narrow to per-service paths and add privacy node <-> other banks (docs/contracts/security.md).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -14,7 +14,7 @@ spec:
             matchExpressions:
               - key: kubernetes.io/metadata.name
                 operator: In
-                values: [strimzi, cnpg-system]
+                values: [strimzi, cnpg-system, keda]
   egress:
     - to:
         - podSelector: {}
@@ -25,6 +25,10 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
-    - ports:
+    - to:
+        {{- range .Values.apiServerCIDRs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}

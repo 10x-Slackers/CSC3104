@@ -87,9 +87,13 @@ Run each with `uv run apps/dataset/prepare.py <args>`. Outputs go to the git-ign
 
 **Held out:** dev covers 5–6 Sep with seed 1, and eval covers 7–8 Sep with seed 2. Tune only on dev.
 
+Use `--hours 5` or more: chains start in the first half of the slice and the longest (`over_limit`) spans up to 150 minutes.
+
 ## Fixture: `apps/dataset/fixtures/tiny`
 
-20 hand-written transfers covering every scenario. `test_prepare.py` checks that the committed bank files match `transfers.csv`.
+20 hand-written transfers covering every scenario. `test_prepare.py` checks that the committed bank files and `labels.csv` match `transfers.csv`.
+
+`--transfers` takes a CSV with the columns `payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,chain_id,hop,scenario` (the last three are empty for unplanted transfers), as in `fixtures/tiny/transfers.csv`.
 
 | Chain | Transfers | Banks | Expected (**draft**) |
 | --- | --- | --- | --- |

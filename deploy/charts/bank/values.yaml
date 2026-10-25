@@ -1,0 +1,3 @@
+# Kubernetes API server addresses that bank pods may reach (CloudNativePG instances need the API).
+# k3d-up.sh pins the k3d node network to 172.28.0.0/16; 10.43.0.1 is k3s's `kubernetes` Service.
+apiServerCIDRs: [172.28.0.0/16, 10.43.0.1/32]
