@@ -1,9 +1,10 @@
 """Analyst UI and JSON API for one bank's cases, with the outbox dispatcher running inside.
 
-    CASE_BANK=A CASE_DB=cases-a.db uv run apps/case/app.py
+    CASE_BANK=A CASE_DB=cases-a.db CASE_PUBLIC_KEYS=.secrets/public uv run python -m apps.case.app
 
-Settings (environment): CASE_BANK, CASE_DB, CASE_INTAKE_URL, PORT. Alerts and merges are
-delivered in-process to this UI's inbox; reports go to the mock intake (intake.py).
+Settings (environment): CASE_BANK, CASE_DB, CASE_PUBLIC_KEYS, CASE_INTAKE_URL, PORT.
+Chain results arrive from the bank's privacy node on POST /results. Alerts and merges
+are delivered in-process to this UI's inbox; reports go to the mock intake (intake.py).
 """
 
 import os
@@ -20,12 +21,14 @@ from typing import Annotated
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import uvicorn
-from case_store import DECISIONS, SqliteCaseStore, chain
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from outbox import LINK_FIELDS, route, run, webhook
-from report import TemplateClient, draft_report
 
+from apps.case.case_store import DECISIONS, STATES, SqliteCaseStore, neighbours
+from apps.case.evidence import load_public_keys, verify_result
+from apps.case.outbox import LINK_FIELDS, route, run, webhook
+from apps.case.report import TemplateClient, draft_report
+from apps.privacy_node import privacy_node_pb2 as pb
 from apps.security.security import check_peer_payload
 
 ACTIONS = dict(
@@ -40,7 +43,8 @@ ACTIONS = dict(
     )
 )
 # Everything a report may carry to the intake; checked before it leaves the bank.
-# ASSUMPTION: report fields until Caleb reviews them, replace when agreed.
+# DEPENDS ON Role 4 (security and privacy): review of these intake report fields
+# (security.md open item "Destination and inputs for the AI report"). Status: pending.
 REPORT_FIELDS = {"event_id", "kind", "case_id", "state", "merged_into", "raised_at"}
 REPORT_FIELDS |= {"links", "bank", *LINK_FIELDS}
 STYLE = """<style>
@@ -57,7 +61,9 @@ def when(timestamp):
 
 
 def short(token):
-    """Show a token's version prefix and the start of its digest."""
+    """Show a token's version prefix and the start of its digest; "-" for none."""
+    if not token:
+        return "-"
     return f"<code title='{escape(token)}'>{escape(token[:24])}…</code>"
 
 
@@ -68,7 +74,7 @@ def page(bank, title, body):
     )
 
 
-def create_app(db, bank, intake_url, interval=1.0, client=None):
+def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
     """interval=None skips the background dispatcher (tests call dispatch directly)."""
     client = client or TemplateClient()
 
@@ -137,13 +143,15 @@ def create_app(db, bank, intake_url, interval=1.0, client=None):
     def detail(case_id: str):
         case = load(case_id)
         links = "".join(
-            f"<tr><td>{i}<td>{escape(c.in_bank)} → <b>{escape(c.signer)}</b> → "
-            f"{escape(c.out_bank)}<td>{escape(c.signer)} ({escape(c.key_version)})"
+            f"<tr><td>{i}<td>{escape(start)} → <b>{escape(c.signer)}</b> → "
+            f"{escape(end)}<td>{escape(c.signer)}"
             f"<td>{short(c.in_token)}<td>{short(c.out_token)}"
-            for i, c in enumerate(chain(case["claims"]), 1)
+            for i, c in enumerate(case["claims"], 1)
+            for start, end in [neighbours(c.signer, c.in_pair, c.out_pair)]
         )
         results = "".join(
-            f"<li><code>{escape(q)}</code>: {escape(s)}" for q, s in case["results"]
+            f"<li>{escape(s)} from {escape(sender)} · digest <code>{escape(d[:16])}</code>"
+            for d, sender, s in case["results"]
         )
         decisions = "".join(
             f"<li>{when(t)}: {ACTIONS[a]}" for a, t in case["decisions"]
@@ -177,9 +185,9 @@ def create_app(db, bank, intake_url, interval=1.0, client=None):
             + f"<p>State: <b>{case['state']}</b> · Alert: {when(case['raised_at'])}"
             "<p class=muted>A rule flags suspicion, not proven laundering. Each link is "
             "confirmed by the signing bank; a signature doesn't prove its records are true."
-            "<h2>Links</h2><table><tr><th>#<th>Banks (incoming → confirming → outgoing)"
-            f"<th>Confirmed by (key)<th>Incoming token<th>Outgoing token</tr>{links}</table>"
-            f"<h2>Search results</h2><ul>{results}</ul>"
+            "<h2>Links</h2><table><tr><th>#<th>Banks (from → confirming → to)"
+            f"<th>Confirmed by<th>Incoming token<th>Outgoing token</tr>{links}</table>"
+            f"<h2>Chain results received</h2><ul>{results}</ul>"
             f"<h2>Decisions</h2><ul>{decisions or '<li>None yet'}</ul>"
             f"<form method=post action='/cases/{escape(case_id)}/decision'>{buttons}</form>"
             "<p class=muted>All actions are simulated."
@@ -211,6 +219,20 @@ def create_app(db, bank, intake_url, interval=1.0, client=None):
             raise HTTPException(409, "Report is not a pending draft")
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
+    @app.post("/results")
+    async def results(request: Request):
+        """Take one serialized ChainResult from this bank's privacy node; returns its Ack.
+
+        DEPENDS ON Role 3 (privacy node): posting every ChainResult it saves
+        (store.save_chain, for its own searches and for Deliver) to this endpoint.
+        Status: pending.
+        """
+        result = pb.ChainResult.FromString(await request.body())
+        if result.state not in STATES or not verify_result(result, public_keys, bank):
+            raise HTTPException(422, "Invalid chain result")
+        SqliteCaseStore(db).record(result)
+        return {"chain_digest": result.chain_digest}
+
     @app.post("/notifications", status_code=204)
     def notifications(message: dict):
         """Webhook receiver for another dispatcher; deduplicates on event_id."""
@@ -223,7 +245,7 @@ def create_app(db, bank, intake_url, interval=1.0, client=None):
     @app.get("/api/cases/{case_id}")
     def api_case(case_id: str):
         case = load(case_id)
-        return case | {"claims": [asdict(c) for c in chain(case["claims"])]}
+        return case | {"claims": [asdict(c) for c in case["claims"]]}
 
     return app
 
@@ -234,6 +256,7 @@ if __name__ == "__main__":
             os.environ.get("CASE_DB", "cases.db"),
             os.environ.get("CASE_BANK", "A"),
             os.environ.get("CASE_INTAKE_URL", "http://127.0.0.1:8001/reports"),
+            load_public_keys(os.environ.get("CASE_PUBLIC_KEYS", "/public")),
         ),
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),

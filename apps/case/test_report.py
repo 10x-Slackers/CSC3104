@@ -6,12 +6,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
-from app import create_app
-from case_store import SqliteCaseStore
 from fastapi.testclient import TestClient
-from report import ALLOWED, TemplateClient, draft_report, report_input
-from test_case_store import claim, result
 
+from apps.case.app import create_app
+from apps.case.case_store import SqliteCaseStore
+from apps.case.report import ALLOWED, TemplateClient, draft_report, report_input
+from apps.case.sample_chains import o1, public_keys, v1
+
+# DEPENDS ON Role 3 (privacy node): cases are built from its real ChainResults.
 PRIVATE = {"account": "A-m0", "amount": 10000.0, "payment_id": "p06", "note": "C-m2"}
 
 
@@ -28,7 +30,7 @@ class Recorder:
 @pytest.fixture
 def store(tmp_path):
     store = SqliteCaseStore(tmp_path / "cases.db")
-    store.record(result(claim("p10", "p11", "qB"), claim("p11", "p12", "qB")))
+    store.record(o1())  # loop A -> B -> C -> A, confirmed
     return store
 
 
@@ -44,6 +46,7 @@ def keys(value):
     return set()
 
 
+# DEPENDS ON Role 4 (security and privacy): ALLOWED is pending their review.
 def test_disallowed_fields_never_reach_report(store, monkeypatch):
     # A case carrying private fields, as if a future store change leaked them.
     leaky = store.get(case_id(store)) | PRIVATE
@@ -64,15 +67,18 @@ def test_template_report_is_a_labelled_draft(store):
     assert (report["source"], report["status"]) == ("template", "draft")
     body = report["body"]
     assert body.startswith("DRAFT: template report, not AI-generated.")
-    assert "banks A, B, C, confirmed by signed claims from B, C" in body
-    assert "1. A -> B -> C, confirmed by B" in body
-    assert "2. B -> C -> A, confirmed by C" in body
+    assert "4 signed link claim(s) across banks A, B, C, from A, B, C." in body
+    assert "1. start -> A -> B, confirmed by A" in body
+    assert "2. A -> B -> C, confirmed by B" in body
+    assert "3. B -> C -> A, confirmed by C" in body
+    assert "4. C -> A -> end, confirmed by A" in body
+    assert f"confirmed from B (digest {o1().chain_digest[:16]})" in body
     assert "not proven laundering" in body
     assert "links may be missing" not in body
 
 
 def test_partial_case_report_states_uncertainty(store):
-    partial = store.record(result(claim("p15", "p16", "q2"), status="partial"))
+    partial = store.record(v1()[0])
     draft_report(store, partial, TemplateClient())
     body = store.reports(partial)[0]["body"]
     assert "Alert raised: not raised" in body
@@ -97,7 +103,9 @@ def test_review_happens_once(store):
 
 
 def test_ui_generates_and_reviews_drafts(store, tmp_path):
-    client = TestClient(create_app(tmp_path / "cases.db", "B", "http://x", None))
+    client = TestClient(
+        create_app(tmp_path / "cases.db", "B", "http://x", public_keys(), None)
+    )
     cid = case_id(store)
     assert client.post(f"/cases/{cid}/report").status_code == 200  # after redirect
     page = client.get(f"/cases/{cid}").text

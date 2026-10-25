@@ -1,11 +1,11 @@
-"""Bank-local case store: verified search results, case identity and one alert per case.
+"""Bank-local case store: verified chain results, case identity and one alert per case.
 
 Holds only tokens, bank IDs and claim metadata; never accounts, amounts or payment IDs.
-Contract: docs/contracts/case.md. SQLite now; CaseStore is the seam for Postgres.
+Input is Role 3's ChainResult (apps/privacy_node/privacy_node.proto), already verified
+with evidence.verify_result. Contract: docs/contracts/case.md. SQLite now; CaseStore
+is the seam for Postgres.
 """
 
-import hashlib
-import json
 import os
 import sqlite3
 import time
@@ -13,12 +13,11 @@ from contextlib import contextmanager
 from dataclasses import astuple, dataclass, fields
 from typing import Protocol
 
-from apps.security.security import canonical_pair
+from apps.privacy_node import privacy_node_pb2 as pb
 
-# Weakest to strongest. A case takes the strongest state among its results, so a late
-# partial or timed-out result never downgrades a confirmed case.
-# ASSUMPTION: this ranking until protocol.md defines the states, replace when agreed.
-STATES = ("invalid-claim", "no-match", "timed-out", "partial", "confirmed")
+# Only confirmed and partial results become chains and are delivered (protocol.md).
+# A case is confirmed once any of its results is; nothing downgrades it.
+STATES = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
 # Simulated analyst actions; none touches a real account. "report" queues the case
 # evidence for the mock intake.
 DECISIONS = ("monitor", "suspend", "freeze", "report")
@@ -27,42 +26,35 @@ REVIEWS = ("draft", "approved", "rejected")
 
 @dataclass(frozen=True)
 class Claim:
-    """One bank's signed assertion that an incoming transfer moved on as an outgoing one.
+    """A stored LinkClaim: "signer holds in_ref and out_ref and its rule links them".
 
-    ASSUMPTION: claim fields until protocol.md defines the protobuf, replace when agreed.
+    An empty in or out token means the chain starts or ends at the signer.
     """
 
-    signer: str  # bank that confirmed the link
-    in_bank: str  # sender of the incoming transfer
-    in_token: str
-    out_bank: str  # receiver of the outgoing transfer
-    out_token: str
+    signer: str
+    recipient: str
     query_id: str
-    key_version: str  # signer's signing-key version
+    key_version: str
+    in_pair: str
+    in_token: str
+    out_pair: str
+    out_token: str
     signature: str  # hex
 
-
-@dataclass(frozen=True)
-class SearchResult:
-    """A search result delivered to this bank.
-
-    ASSUMPTION: result fields until protocol.md defines result delivery, replace when agreed.
-    """
-
-    query_id: str
-    status: str  # one of STATES
-    claims: tuple[Claim, ...] = ()
-
-    def __post_init__(self):
-        if self.status not in STATES:
-            raise ValueError(f"Unknown result status: {self.status}")
+    @classmethod
+    def from_pb(cls, c):
+        return cls(
+            c.signer, c.recipient, c.query_id, c.key_version, c.in_ref.pair,
+            c.in_ref.token, c.out_ref.pair, c.out_ref.token, c.signature.hex(),
+        )  # fmt: skip
 
 
 @dataclass(frozen=True)
 class AlertRule:
-    """When a case is complete enough to alert. Links are counted as transfers.
+    """When a confirmed case is complete enough to alert. Links are counted as transfers.
 
-    ASSUMPTION: a confirmed case with >= 2 transfers across >= 2 banks, replace when agreed.
+    DEPENDS ON Role 2 (streaming and scoring): the minimum chain length, still TODO in
+    streaming.md; until then >= 2 transfers across >= 2 banks. Status: pending.
     """
 
     min_transfers: int = int(os.environ.get("CASE_MIN_TRANSFERS", "2"))
@@ -70,7 +62,7 @@ class AlertRule:
 
 
 class CaseStore(Protocol):
-    def record(self, result: SearchResult) -> str | None: ...
+    def record(self, result: pb.ChainResult) -> str: ...
     def get(self, case_id: str) -> dict | None: ...
     def cases(self) -> list[dict]: ...
     def lease_due(self, now, lease, max_attempts) -> list[dict]: ...
@@ -80,36 +72,23 @@ class CaseStore(Protocol):
     def receive(self, message: dict) -> bool: ...
 
 
-def transfer_key(bank_x, bank_y, token):
-    """Tokens are only comparable within one bank pair, so the pair is part of the key."""
-    return "-".join(canonical_pair(bank_x, bank_y)) + ":" + token
-
-
 def transfers(claim):
-    return [
-        transfer_key(claim.in_bank, claim.signer, claim.in_token),
-        transfer_key(claim.signer, claim.out_bank, claim.out_token),
-    ]
+    """Transfer keys as Role 3's claims.key writes them: "<pair>|<token>"."""
+    refs = ((claim.in_pair, claim.in_token), (claim.out_pair, claim.out_token))
+    return [f"{pair}|{token}" for pair, token in refs if token]
 
 
-def chain(claims):
-    """Order claims along the chain: each claim's outgoing token is the next's incoming."""
-    by_in = {c.in_token: c for c in claims}
-    outs = {c.out_token for c in claims}
-    starts = [c for c in claims if c.in_token not in outs] or claims[:1]  # loop
-    ordered = []
-    for claim in starts:
-        while claim is not None and claim not in ordered:
-            ordered.append(claim)
-            claim = by_in.get(claim.out_token)
-    return ordered + [c for c in claims if c not in ordered]
+def banks(claim):
+    return {claim.signer, *claim.in_pair.split("-"), *claim.out_pair.split("-")} - {""}
 
 
-def derive_case_id(keys):
-    """SHA-256 of the sorted transfer keys first seen for a case, as compact JSON."""
-    return hashlib.sha256(
-        json.dumps(sorted(set(keys)), separators=(",", ":")).encode()
-    ).hexdigest()
+def neighbours(signer, in_pair, out_pair):
+    """Banks at the far end of the incoming and outgoing transfers; start/end if none."""
+
+    def other(pair, none):
+        return next((b for b in pair.split("-") if b != signer), none) if pair else none
+
+    return other(in_pair, "start"), other(out_pair, "end")
 
 
 CLAIM_COLUMNS = ", ".join(f.name for f in fields(Claim))
@@ -128,15 +107,16 @@ CREATE TABLE IF NOT EXISTS transfers (
 CREATE TABLE IF NOT EXISTS claims (
     {CLAIM_COLUMNS.replace(", ", " TEXT NOT NULL, ")} TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    PRIMARY KEY (signer, in_token, out_token)
+    PRIMARY KEY (signer, in_pair, in_token, out_pair, out_token)
 );
--- Every delivered result, once per (query, status); case_id is NULL without claims.
+-- Every delivered result, once per (digest, sending bank, state).
 CREATE TABLE IF NOT EXISTS results (
-    query_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    case_id TEXT,
+    chain_digest TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    state TEXT NOT NULL,
+    case_id TEXT NOT NULL,
     received_at REAL NOT NULL,
-    PRIMARY KEY (query_id, status)
+    PRIMARY KEY (chain_digest, sender, state)
 );
 -- The durable uniqueness rule: at most one alert per case at this bank.
 CREATE TABLE IF NOT EXISTS alerts (
@@ -211,16 +191,23 @@ class SqliteCaseStore:
         self.db.execute("COMMIT")
 
     def record(self, result):
-        """Store a result whose claims are already verified; return its case ID."""
-        keys = sorted({key for claim in result.claims for key in transfers(claim)})
+        """Store a verified ChainResult; return its case ID."""
+        if result.state not in STATES:
+            raise ValueError(f"Not a deliverable result: {pb.State.Name(result.state)}")
+        claims = [Claim.from_pb(c) for c in result.claims]
+        keys = sorted({key for claim in claims for key in transfers(claim)})
         with self._write() as db:
-            case_id = self._case_for(db, keys) if keys else None
+            case_id = self._case_for(db, keys, result.chain_digest)
             db.execute(
-                "INSERT INTO results VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (result.query_id, result.status, case_id, time.time()),
+                "INSERT INTO results VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (
+                    result.chain_digest,
+                    result.sender,
+                    STATES[result.state],
+                    case_id,
+                    time.time(),
+                ),
             )
-            if case_id is None:
-                return None
             db.executemany(
                 "INSERT INTO transfers VALUES (?, ?) ON CONFLICT DO NOTHING",
                 [(key, case_id) for key in keys],
@@ -229,30 +216,28 @@ class SqliteCaseStore:
                 f"INSERT INTO claims ({CLAIM_COLUMNS}, case_id)"
                 f" VALUES ({', '.join('?' * (len(fields(Claim)) + 1))})"
                 " ON CONFLICT DO NOTHING",
-                [astuple(claim) + (case_id,) for claim in result.claims],
+                [astuple(claim) + (case_id,) for claim in claims],
             )
-            statuses = db.execute(
-                "SELECT status FROM results WHERE case_id = ?", (case_id,)
-            )
-            state = max(
-                [result.status, *(row[0] for row in statuses)], key=STATES.index
-            )
+            confirmed = db.execute(
+                "SELECT 1 FROM results WHERE case_id = ? AND state = 'confirmed'",
+                (case_id,),
+            ).fetchone()
+            state = "confirmed" if confirmed else "partial"
             db.execute("UPDATE cases SET state = ? WHERE case_id = ?", (state, case_id))
             count = db.execute(
                 "SELECT COUNT(*) FROM transfers WHERE case_id = ?", (case_id,)
             ).fetchone()[0]
-            banks = {
+            involved = {
                 bank
                 for row in db.execute(
-                    "SELECT signer, in_bank, out_bank FROM claims WHERE case_id = ?",
-                    (case_id,),
+                    f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ?", (case_id,)
                 )
-                for bank in row
+                for bank in banks(Claim(*row))
             }
             if (
                 state == "confirmed"
                 and count >= self.rule.min_transfers
-                and len(banks) >= self.rule.min_banks
+                and len(involved) >= self.rule.min_banks
             ):
                 raised = db.execute(
                     "INSERT INTO alerts VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -262,8 +247,13 @@ class SqliteCaseStore:
                     notify(db, "alert", case_id)
         return case_id
 
-    def _case_for(self, db, keys):
-        """Find the case these transfers join, merging cases a result bridges."""
+    def _case_for(self, db, keys, digest):
+        """Find the case these transfers join, merging cases a result bridges.
+
+        A new case takes Role 3's chain_digest as its ID. Overlapping partial results
+        (e.g. over-limit v1, cut at different windows) share transfers, so they join
+        one case even though their digests differ.
+        """
         found = [
             row[0]
             for row in db.execute(
@@ -274,12 +264,11 @@ class SqliteCaseStore:
             )
         ]
         if not found:
-            case_id = derive_case_id(keys)
             db.execute(
                 "INSERT INTO cases (case_id, created_at, state) VALUES (?, ?, ?)",
-                (case_id, time.time(), STATES[0]),
+                (digest, time.time(), "partial"),
             )
-            return case_id
+            return digest
         # Merge into the oldest case, keeping its alert or adopting a merged one.
         case_id = found[0]
         for old in found[1:]:
@@ -309,13 +298,12 @@ class SqliteCaseStore:
         if row is None:
             return None
         claims = self.db.execute(
-            f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ?"
-            " ORDER BY signer, in_token, out_token",
+            f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ? ORDER BY rowid",
             (case_id,),
         )
         results = self.db.execute(
-            "SELECT query_id, status FROM results WHERE case_id = ?"
-            " ORDER BY received_at, query_id, status",
+            "SELECT chain_digest, sender, state FROM results WHERE case_id = ?"
+            " ORDER BY received_at, chain_digest, sender",
             (case_id,),
         )
         decisions = self.db.execute(

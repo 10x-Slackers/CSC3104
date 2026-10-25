@@ -40,9 +40,9 @@ Each owner fills in their own row.
 | Ingestor | Cindy | | | | | |
 | Scorer | Cindy | | | | | |
 | Privacy node | Zane | `privacy-node:dev` from `apps/privacy_node/Dockerfile` (build context: repo root) | gRPC 50051 (Service `privacy-node`) | TCP probe on 50051 (readiness 5 s, liveness 10 s) | requests 50m CPU / 128Mi; limit 256Mi | Secret `privacy-node-keys` (`<pair>.key` for its two pairs, `signing.pem`); ConfigMap `bank-public-keys` (`A.pem`, `B.pem`, `C.pem`); `emptyDir` `/data` for SQLite (M2). Enabled with `--set privacyNode.enabled=true`; setup in `deploy/privacy-node-up.sh` |
-| Case service / UI | Jia Rui | | | | | |
-| Report service | Jia Rui | | | | | |
-| Mock intake | Jia Rui | | | | | |
+| Case service / UI | Jia Rui | `case-service:dev` from `apps/case/Dockerfile` (build context: repo root) | HTTP 8000 (`PORT`): UI, `/api/cases`, `POST /results`, `POST /notifications` | TODO (no Helm template yet) | TODO | `CASE_BANK`, `CASE_DB` (SQLite path), `CASE_PUBLIC_KEYS` (folder with `A.pem`…; can mount ConfigMap `bank-public-keys`), `CASE_INTAKE_URL`, `CASE_MIN_TRANSFERS`, `CASE_MIN_BANKS`, `CASE_NOTIFY_MAX_ATTEMPTS` |
+| Report service | Jia Rui | None: template reports run inside the case service ([decisions/0001](../decisions/0001-template-only-report.md)) | | | | |
+| Mock intake | Jia Rui | Same image, command `python -m apps.case.intake` | HTTP 8001 (`PORT`) | TODO | TODO | `INTAKE_DB` (SQLite path) |
 
 ## Namespaces and network paths
 

@@ -1,4 +1,5 @@
 import json
+import logging
 import socket
 import sys
 import threading
@@ -11,19 +12,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 import uvicorn
-from app import create_app
-from case_store import SqliteCaseStore, chain
 from fastapi.testclient import TestClient
-from intake import create_app as create_intake
-from outbox import dispatch
-from test_case_store import claim, result
+from test_evidence import forged
+
+from apps.case.app import create_app
+from apps.case.case_store import SqliteCaseStore
+from apps.case.intake import create_app as create_intake
+from apps.case.outbox import dispatch
+from apps.case.sample_chains import leaks, m1, o1, public_keys, v1
+from apps.privacy_node import privacy_node_pb2 as pb
+
+DOWN = "http://127.0.0.1:9/reports"  # nothing listens here
+# DEPENDS ON Role 3 (privacy node): cases and /results use its real ChainResults.
 
 
 @pytest.fixture
 def db(tmp_path):
     store = SqliteCaseStore(tmp_path / "cases.db")
-    store.record(result(claim("p06", "p07", "q1")))  # m1, confirmed
-    store.record(result(claim("p15", "p16", "q2"), status="partial"))  # v1 piece
+    store.record(m1())  # confirmed
+    for result in v1():  # partial
+        store.record(result)
     return tmp_path / "cases.db"
 
 
@@ -49,21 +57,11 @@ def intake(tmp_path):
 
 @pytest.fixture
 def client(db):
-    return TestClient(create_app(db, "B", "http://127.0.0.1:9/reports", interval=None))
+    return TestClient(create_app(db, "B", DOWN, public_keys(), interval=None))
 
 
 def m1_id(db):
     return SqliteCaseStore(db).cases()[0]["case_id"]
-
-
-def test_chain_orders_links_and_handles_loops():
-    o1 = [claim("p11", "p12"), claim("p10", "p11")]
-    assert chain(o1) == o1[::-1]
-    v1 = [claim("p17", "p18"), claim("p15", "p16"), claim("p16", "p17")]
-    assert chain(v1) == [v1[1], v1[2], v1[0]]
-    # A full loop has no start; it is walked from the first claim and still ends.
-    loop = [claim("p10", "p11"), claim("p11", "p12"), claim("p12", "p10")]
-    assert chain(loop) == loop
 
 
 def test_index_lists_cases_with_alert_state(client, db):
@@ -75,8 +73,9 @@ def test_index_lists_cases_with_alert_state(client, db):
 
 def test_detail_shows_which_bank_confirmed_each_link(client, db):
     page = client.get(f"/cases/{m1_id(db)}").text
+    assert "start → <b>A</b> → B" in page  # A sent the first transfer
     assert "A → <b>B</b> → C" in page
-    assert "B (s1)" in page
+    assert "B → <b>C</b> → end" in page
     for private in ("p06", "p07", "A-m0", "B-m1", "C-m2", "10000"):
         assert private not in page
     assert client.get("/cases/nope").status_code == 404
@@ -109,7 +108,7 @@ def test_alert_notification_shows_once(client, db):
 
 
 def test_report_reaches_intake_once(db, intake):
-    client = TestClient(create_app(db, "B", intake, interval=None))
+    client = TestClient(create_app(db, "B", intake, public_keys(), interval=None))
     case_id = m1_id(db)
     for _ in range(2):
         client.post(f"/cases/{case_id}/decision", data={"action": "report"})
@@ -120,7 +119,7 @@ def test_report_reaches_intake_once(db, intake):
     assert len(received) == 1
     body = received[0]["body"]
     assert body["bank"] == "B" and body["case_id"] == case_id
-    assert body["links"][0]["signer"] == "B"
+    assert [link["signer"] for link in body["links"]] == ["A", "B", "C"]
     assert received[0]["received_at"] >= received[0]["raised_at"]
     for private in ("p06", "p07", "A-m0", "B-m1", "C-m2"):
         assert private not in str(body)
@@ -135,7 +134,7 @@ def test_undelivered_report_is_shown(client, db):
 
 
 def test_background_dispatcher_delivers_alerts(db):
-    with TestClient(create_app(db, "B", "http://127.0.0.1:9/reports", 0.01)):
+    with TestClient(create_app(db, "B", DOWN, public_keys(), 0.01)):
         deadline = time.time() + 5
         while not SqliteCaseStore(db).notifications() and time.time() < deadline:
             time.sleep(0.01)
@@ -146,4 +145,44 @@ def test_json_api(client, db):
     cases = client.get("/api/cases").json()
     assert [c["state"] for c in cases] == ["confirmed", "partial"]
     case = client.get(f"/api/cases/{m1_id(db)}").json()
-    assert case["claims"][0]["signer"] == "B" and case["raised_at"] is not None
+    assert case["claims"][1]["signer"] == "B" and case["raised_at"] is not None
+
+
+def test_results_endpoint_verifies_before_storing(tmp_path):
+    client = TestClient(
+        create_app(tmp_path / "cases.db", "B", DOWN, public_keys(), interval=None)
+    )
+    for result in (o1("B"), o1("C"), o1("B")):  # two starts, then a redelivery
+        reply = client.post("/results", content=result.SerializeToString())
+        assert reply.json() == {"chain_digest": o1().chain_digest}
+    pending, tampered = m1(), m1()
+    pending.state = pb.PENDING
+    forged(tampered)
+    for bad in (pending, tampered):
+        reply = client.post("/results", content=bad.SerializeToString())
+        assert reply.status_code == 422
+    assert [c["case_id"] for c in client.get("/api/cases").json()] == [
+        o1().chain_digest
+    ]
+
+
+def test_nothing_sensitive_in_api_responses_pages_or_logs(db, intake, caplog, capfd):
+    caplog.set_level(logging.DEBUG)
+    client = TestClient(create_app(db, "B", intake, public_keys(), interval=None))
+    texts = [client.post("/results", content=o1().SerializeToString()).text]
+    store = SqliteCaseStore(db)
+    for case in store.cases():
+        case_id = case["case_id"]
+        client.post(f"/cases/{case_id}/decision", data={"action": "report"})
+        client.post(f"/cases/{case_id}/report")
+        texts += [client.get(f"/cases/{case_id}").text]
+        texts += [client.get(f"/api/cases/{case_id}").text]
+    # m1, v1 and o1: 3 reports, plus alerts for the two confirmed cases
+    assert dispatch(store, client.app.state.senders(store)) == 5
+    texts += [client.get("/").text, client.get("/api/cases").text]
+    with urllib.request.urlopen(intake) as reply:
+        texts.append(reply.read().decode())
+    out, err = capfd.readouterr()
+    logs = caplog.text + out + err
+    assert "POST" in logs  # requests were logged, so the log check is not empty
+    assert leaks("\n".join(texts) + logs) == set()

@@ -21,7 +21,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    """ASSUMPTION: retry and lease timings, replace when agreed."""
+    """Role 5 delivery timings (case.md); no other role sets them."""
 
     max_attempts: int = int(os.environ.get("CASE_NOTIFY_MAX_ATTEMPTS", "10"))
     backoff: float = 1.0  # seconds before the first retry, doubling each attempt
@@ -29,7 +29,7 @@ class RetryPolicy:
     lease: float = 30.0  # how long a send may take before another dispatcher retries
 
 
-LINK_FIELDS = ("signer", "in_bank", "in_token", "out_bank", "out_token")
+LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token")
 
 
 def message(store, event):
@@ -97,7 +97,7 @@ def main():
     args = parser.parse_args()
     # Direct script execution puts apps/case, rather than the repo root, on sys.path.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from case_store import SqliteCaseStore
+    from apps.case.case_store import SqliteCaseStore
 
     try:
         run(

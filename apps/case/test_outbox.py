@@ -10,10 +10,12 @@ from urllib.error import HTTPError
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
-from case_store import SqliteCaseStore
-from outbox import RetryPolicy, dispatch, run, webhook
-from test_case_store import claim, result
 
+from apps.case.case_store import SqliteCaseStore
+from apps.case.outbox import RetryPolicy, dispatch, message, run, webhook
+from apps.case.sample_chains import as_partial, bridged, m1, o1, piece, v1
+
+# DEPENDS ON Role 3 (privacy node): cases are built from its real ChainResults.
 POLICY = RetryPolicy(max_attempts=3, backoff=10, max_backoff=100, lease=30)
 
 
@@ -27,23 +29,23 @@ def later(seconds):
 
 
 def test_alert_queues_one_event(store):
-    case_id = store.record(result(claim("p06", "p07", "q1")))
-    store.record(result(claim("p06", "p07", "q2")))
-    store.record(result(claim("p06", "p07", "q3"), status="partial"))
+    case_id = store.record(m1())
+    store.record(m1())
+    store.record(as_partial(m1()))
     assert [(e["event_id"], e["kind"]) for e in store.outbox()] == [
         (f"alert:{case_id}", "alert")
     ]
 
 
 def test_partial_case_queues_nothing_until_confirmed(store):
-    case_id = store.record(result(claim("p06", "p07", "q1"), status="partial"))
+    case_id = store.record(as_partial(m1()))
     assert store.outbox() == []
-    store.record(result(claim("p06", "p07", "q2")))
+    store.record(m1())
     assert [e["case_id"] for e in store.outbox()] == [case_id]
 
 
 def test_delivered_once_and_acked(store):
-    case_id = store.record(result(claim("p06", "p07")))
+    case_id = store.record(m1())
     sent = []
     assert dispatch(store, sent.append, POLICY) == 1
     assert dispatch(store, sent.append, POLICY) == 0
@@ -60,7 +62,7 @@ def test_delivered_once_and_acked(store):
 
 
 def test_failures_back_off_then_stop(store):
-    store.record(result(claim("p06", "p07")))
+    store.record(m1())
 
     def down(message):
         raise ConnectionError("unreachable")
@@ -79,7 +81,7 @@ def test_failures_back_off_then_stop(store):
 
 
 def test_retry_succeeds_and_receiver_sees_one_alert(store):
-    store.record(result(claim("p06", "p07")))
+    store.record(m1())
     inbox = {}
 
     def flaky(message):
@@ -94,7 +96,7 @@ def test_retry_succeeds_and_receiver_sees_one_alert(store):
 
 
 def test_crash_before_ack_redelivers_after_lease(store):
-    store.record(result(claim("p06", "p07")))
+    store.record(m1())
     store.lease_due(time.time(), POLICY.lease, POLICY.max_attempts)  # then crash
     received = {}
     assert dispatch(store, lambda m: received.update({m["event_id"]: m}), POLICY) == 0
@@ -109,18 +111,30 @@ def test_crash_before_ack_redelivers_after_lease(store):
     assert received == received_again and len(received) == 1
 
 
+def test_lost_ack_and_retry_show_one_alert(store):
+    """The alert reaches the analyst's inbox, but the ack is lost (crash before ack)."""
+    store.record(m1())
+    [event] = store.lease_due(time.time(), POLICY.lease, POLICY.max_attempts)
+    assert store.receive(message(store, event))  # delivered and shown
+    # ... no ack recorded. After the lease, the dispatcher sends it again.
+    assert dispatch(store, store.receive, POLICY, later(POLICY.lease + 1)) == 1
+    assert len(store.notifications()) == 1  # the redelivery was deduplicated
+    assert store.outbox()[0]["acked_at"] is not None
+    assert dispatch(store, store.receive, POLICY, later(1000)) == 0
+
+
 def test_pending_events_survive_restart(tmp_path):
     path = tmp_path / "cases.db"
-    case_id = SqliteCaseStore(path).record(result(claim("p06", "p07")))
+    case_id = SqliteCaseStore(path).record(m1())
     sent = []
     assert dispatch(SqliteCaseStore(path), sent.append, POLICY) == 1
     assert sent[0]["case_id"] == case_id
 
 
 def test_merge_of_alerted_case_is_announced(store):
-    old = store.record(result(claim("p15", "p16", "q1")))
-    new = store.record(result(claim("p18", "p19", "q2")))
-    store.record(result(claim("p16", "p17", "q3"), claim("p17", "p18", "q3")))
+    first, second, whole = bridged()
+    old, new = store.record(first), store.record(second)
+    store.record(whole)
     sent = []
     dispatch(store, sent.append, POLICY)
     assert [(m["kind"], m["case_id"], m["merged_into"]) for m in sent] == [
@@ -133,8 +147,8 @@ def test_merge_of_alerted_case_is_announced(store):
 def test_concurrent_dispatchers_send_each_event_once(tmp_path):
     path = tmp_path / "cases.db"
     store = SqliteCaseStore(path)
-    for i, (a, b) in enumerate([("p06", "p07"), ("p10", "p11"), ("p15", "p16")]):
-        store.record(result(claim(a, b, f"q{i}")))
+    for result in (m1(), o1(), piece(v1()[0], 0, 3, m1().state)):
+        store.record(result)
     sent, lock = [], threading.Lock()
 
     def send(message):
@@ -156,7 +170,7 @@ def test_concurrent_dispatchers_send_each_event_once(tmp_path):
 
 def test_run_loop_stops(tmp_path):
     path = tmp_path / "cases.db"
-    SqliteCaseStore(path).record(result(claim("p06", "p07")))
+    SqliteCaseStore(path).record(m1())
     sent, stop = [], threading.Event()
     thread = threading.Thread(
         target=lambda: run(SqliteCaseStore(path), sent.append, stop, POLICY, 0.01)

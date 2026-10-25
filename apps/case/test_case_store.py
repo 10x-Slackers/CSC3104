@@ -1,4 +1,3 @@
-import csv
 import sys
 import threading
 from pathlib import Path
@@ -7,42 +6,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
-from case_store import (
-    AlertRule,
-    Claim,
-    SearchResult,
-    SqliteCaseStore,
-    derive_case_id,
-    transfers,
-)
 
-from apps.security.security import derive_token
+from apps.case.case_store import AlertRule, Claim, SqliteCaseStore, transfers
+from apps.case.outbox import dispatch
+from apps.case.report import TemplateClient, draft_report
+from apps.case.sample_chains import as_partial, bridged, leaks, m1, o1, v1
+from apps.privacy_node import privacy_node_pb2 as pb
+from apps.privacy_node.claims import key
 
-TINY = Path(__file__).parents[1] / "dataset/fixtures/tiny"
-# Predictable secrets belong only to tests; deployments generate independent keys.
-PAIR_KEYS = {("A", "B"): b"A" * 32, ("A", "C"): b"B" * 32, ("B", "C"): b"C" * 32}
-# Payment ID -> (sender bank, receiver bank), from the tiny fixture.
-ROUTES = {
-    "p06": "AB", "p07": "BC", "p10": "AB", "p11": "BC", "p12": "CA",
-    "p15": "AB", "p16": "BC", "p17": "CA", "p18": "AB", "p19": "BC", "p20": "CA",
-}  # fmt: skip
-
-
-def token(payment_id):
-    pair = tuple(sorted(ROUTES[payment_id]))
-    return derive_token(payment_id, *pair, PAIR_KEYS[pair], "k1")
-
-
-def claim(incoming, outgoing, query="q1"):
-    """The signer is the bank between the two transfers."""
-    (in_bank, signer), (_, out_bank) = ROUTES[incoming], ROUTES[outgoing]
-    return Claim(
-        signer, in_bank, token(incoming), out_bank, token(outgoing), query, "s1", "00"
-    )
-
-
-def result(*claims, status="confirmed"):
-    return SearchResult(claims[0].query_id if claims else "q0", status, claims)
+# DEPENDS ON Role 3 (privacy node): every test here uses real ChainResults from its
+# nodes (sample_chains.py), so a change to privacy_node.proto affects them all.
 
 
 @pytest.fixture
@@ -50,71 +23,120 @@ def store(tmp_path):
     return SqliteCaseStore(tmp_path / "cases.db")
 
 
-def test_case_id_ignores_order_and_duplicates():
-    keys = transfers(claim("p10", "p11")) + transfers(claim("p11", "p12"))
-    assert derive_case_id(keys) == derive_case_id(reversed(keys + keys))
-    assert derive_case_id(keys) != derive_case_id(keys[:2])
+def alerts(store):
+    return store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
 
 
-def test_single_claim_alerts_mule_chain(store):
-    # m1: A -> B -> C. B's one claim covers two transfers across three banks.
-    case_id = store.record(result(claim("p06", "p07")))
-    case = store.get(case_id)
-    assert case["raised_at"] is not None
-    assert case["claims"] == [claim("p06", "p07")]
-    assert case_id == derive_case_id(transfers(claim("p06", "p07")))
+def test_transfer_keys_match_role3():
+    start, link, _ = m1().claims
+    assert transfers(Claim.from_pb(link)) == [key(link.in_ref), key(link.out_ref)]
+    assert transfers(Claim.from_pb(start)) == [key(start.out_ref)]  # chain starts at A
 
 
+def test_case_id_is_role3_chain_digest(store):
+    result = m1()
+    assert store.record(result) == result.chain_digest
+    case = store.get(result.chain_digest)
+    assert [c.signer for c in case["claims"]] == ["A", "B", "C"]
+    assert case["state"] == "confirmed" and case["raised_at"] is not None
+
+
+# DEPENDS ON Role 2 (streaming and scoring): the minimum chain length is theirs to set.
 def test_rule_comes_from_config(tmp_path):
     store = SqliteCaseStore(tmp_path / "cases.db", AlertRule(min_transfers=3))
-    case_id = store.record(result(claim("p10", "p11")))
-    assert store.get(case_id)["raised_at"] is None
-    assert store.record(result(claim("p11", "p12"))) == case_id
-    assert store.get(case_id)["raised_at"] is not None
+    assert store.get(store.record(m1()))["raised_at"] is None  # 2 transfers
+    assert store.get(store.record(o1()))["raised_at"] is not None  # 3 transfers
 
 
 def test_overlapping_searches_share_one_case_and_alert(store):
-    # o1 loop seen from B's search (both claims) and C's search (its own claim only).
-    first = store.record(result(claim("p10", "p11", "qB"), claim("p11", "p12", "qB")))
-    raised = store.get(first)["raised_at"]
-    assert store.record(result(claim("p11", "p12", "qC"))) == first
-    assert store.record(result(claim("p10", "p11", "qB"))) == first  # redelivery
-    assert store.cases() == [
-        {
-            "case_id": first,
-            "created_at": store.get(first)["created_at"],
-            "state": "confirmed",
-            "raised_at": raised,
-        }
-    ]
-    assert len(store.get(first)["claims"]) == 2
+    # o1 loop searched from B and from C: Role 3 gives both the same digest.
+    first = store.record(o1("B"))
+    assert store.record(o1("C")) == first
+    assert store.record(o1("B")) == first  # redelivery
+    assert [c["case_id"] for c in store.cases()] == [first]
+    assert len(store.get(first)["results"]) == 2
+    assert alerts(store) == 1
+
+
+def test_overlapping_partials_join_one_case_without_alert(store):
+    # Over-limit v1: five partial results with two digests, all sharing transfers.
+    results = v1()
+    assert len(results) == 5 and len({r.chain_digest for r in results}) == 2
+    assert len({store.record(r) for r in results}) == 1
+    [case] = store.cases()
+    assert case["state"] == "partial" and case["raised_at"] is None
+    # C's two searches return the same digest, so they are one (digest, sender) row.
+    assert len(store.get(case["case_id"])["results"]) == 4
+
+
+def test_partial_upgrades_to_confirmed_and_alerts_once(store):
+    case_id = store.record(as_partial(m1()))
+    assert store.get(case_id)["state"] == "partial"
+    assert store.get(case_id)["raised_at"] is None
+    assert store.record(m1()) == case_id
+    raised = store.get(case_id)["raised_at"]
+    assert store.get(case_id)["state"] == "confirmed" and raised is not None
+    store.record(as_partial(m1()))  # never downgrades
+    assert store.get(case_id)["state"] == "confirmed"
+    assert store.get(case_id)["raised_at"] == raised
+
+
+# The five result types from the workload split, plus Role 3's PENDING. Only CONFIRMED
+# and PARTIAL are ever delivered (protocol.md); the rest must never become evidence.
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        (pb.CONFIRMED, ("confirmed", True)),
+        (pb.PARTIAL, ("partial", False)),
+        (pb.NO_MATCH, None),
+        (pb.TIMED_OUT, None),
+        (pb.INVALID_CLAIM, None),
+        (pb.PENDING, None),
+    ],
+)
+def test_each_result_type(store, state, expected):
+    result = m1()
+    result.state = state
+    if expected is None:
+        with pytest.raises(ValueError):
+            store.record(result)
+        assert store.cases() == [] and store.outbox() == []
+        return
+    case = store.get(store.record(result))
+    assert (case["state"], case["raised_at"] is not None) == expected
+
+
+def test_same_claim_submitted_twice_is_stored_once(store):
+    case_id = store.record(m1())
+    store.record(m1())
+    case = store.get(case_id)
+    assert len(case["claims"]) == 3 and len(case["results"]) == 1
+    # o1 from B and from C: the same four links, signed for different queries.
+    loop = store.record(o1("B"))
+    store.record(o1("C"))
+    assert len(store.get(loop)["claims"]) == 4
+    assert len(store.get(loop)["results"]) == 2
 
 
 def test_bridging_result_merges_into_oldest_case(store):
-    # v1 over-limit chain: two searches find disjoint pieces, a third spans both.
-    old = store.record(result(claim("p15", "p16", "q1")))
-    new = store.record(result(claim("p18", "p19", "q2"), status="partial"))
+    first, second, whole = bridged()
+    old, new = store.record(first), store.record(second)
     assert old != new
-    assert (
-        store.record(result(claim("p16", "p17", "q3"), claim("p17", "p18", "q3")))
-        == old
-    )
+    assert store.record(whole) == old
     assert [c["case_id"] for c in store.cases()] == [old]
     assert store.get(new)["merged_into"] == old
     assert store.get(new)["raised_at"] is None
-    assert len(store.get(old)["claims"]) == 4
-    assert {r[0] for r in store.get(old)["results"]} == {"q1", "q2", "q3"}
-    assert store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 1
+    assert len(store.get(old)["claims"]) == 6
+    assert alerts(store) == 1
 
 
 def test_concurrent_writers_create_one_case(tmp_path):
     path = tmp_path / "cases.db"
     SqliteCaseStore(path)
-    results = [result(claim("p10", "p11")), result(claim("p11", "p12"))] * 8
     ids = []
     threads = [
         threading.Thread(target=lambda r=r: ids.append(SqliteCaseStore(path).record(r)))
-        for r in results
+        for r in [o1("B"), o1("C")] * 8
     ]
     for t in threads:
         t.start()
@@ -122,62 +144,61 @@ def test_concurrent_writers_create_one_case(tmp_path):
         t.join()
     store = SqliteCaseStore(path)
     assert len(set(ids)) == 1 and len(store.cases()) == 1
-    assert store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 1
+    assert alerts(store) == 1
+
+
+def test_close_and_reopen_keeps_cases_alerts_and_pending_outbox(tmp_path):
+    path = tmp_path / "cases.db"
+    store = SqliteCaseStore(path)
+    confirmed = store.record(m1())
+    for result in v1():
+        store.record(result)
+    store.decide(confirmed, "report")
+    before = store.cases()
+    store.db.close()
+
+    reopened = SqliteCaseStore(path)
+    assert reopened.cases() == before
+    assert reopened.get(confirmed)["raised_at"] is not None
+    pending = [(e["kind"], e["acked_at"]) for e in reopened.outbox()]
+    assert pending == [("alert", None), ("report", None)]
+    sent = []
+    assert dispatch(reopened, sent.append) == 2
+    assert dispatch(reopened, sent.append) == 0
+    assert [m["kind"] for m in sent] == ["alert", "report"]
 
 
 def test_alert_survives_restart(tmp_path):
     path = tmp_path / "cases.db"
-    case_id = SqliteCaseStore(path).record(result(claim("p06", "p07")))
+    case_id = SqliteCaseStore(path).record(m1())
     raised = SqliteCaseStore(path).get(case_id)["raised_at"]
     reopened = SqliteCaseStore(path)
-    assert reopened.record(result(claim("p06", "p07", "retry"))) == case_id
+    assert reopened.record(m1()) == case_id
     assert reopened.get(case_id)["raised_at"] == raised
 
 
-def test_partial_case_alerts_once_confirmed(store):
-    # m1 while C is offline: partial, so no alert; C recovers and the search confirms.
-    case_id = store.record(result(claim("p06", "p07", "q1"), status="partial"))
-    assert store.get(case_id)["state"] == "partial"
-    assert store.get(case_id)["raised_at"] is None
-    assert store.record(result(claim("p06", "p07", "q2"))) == case_id
-    assert store.get(case_id)["state"] == "confirmed"
-    assert store.get(case_id)["raised_at"] is not None
+def test_leak_check_catches_planted_values():
+    assert leaks('{"account": "A-m0", "payment": "p06", "amount": 120.0}') == {
+        "A-m0",
+        "p06",
+        "120.0",
+    }
+    assert leaks("created_at 1793000120.05, pair A-B, Wired") == set()
 
 
-@pytest.mark.parametrize("late", ["partial", "timed-out", "no-match", "invalid-claim"])
-def test_late_weaker_result_keeps_confirmed_state(store, late):
-    case_id = store.record(result(claim("p06", "p07", "q1")))
-    store.record(result(claim("p06", "p07", "q2"), status=late))
-    assert store.get(case_id)["state"] == "confirmed"
-    assert store.get(case_id)["results"] == [("q1", "confirmed"), ("q2", late)]
-
-
-@pytest.mark.parametrize("status", ["no-match", "timed-out", "invalid-claim"])
-def test_result_without_claims_creates_no_case(store, status):
-    assert store.record(SearchResult("q1", status)) is None
-    assert store.cases() == []
-    row = store.db.execute("SELECT query_id, status, case_id FROM results").fetchone()
-    assert tuple(row) == ("q1", status, None)
-
-
-def test_unknown_status_rejected():
-    with pytest.raises(ValueError):
-        SearchResult("q1", "matched")
-
-
-def test_no_private_fields_stored(store):
-    store.record(result(claim("p06", "p07")))
-    store.record(result(claim("p10", "p11"), claim("p11", "p12")))
-    # Text columns only: timestamps are floats that could contain an amount by chance.
+def test_nothing_sensitive_in_any_stored_table(store):
+    for result in [m1(), o1(), *v1()]:
+        store.record(result)
+    case_id = store.cases()[0]["case_id"]
+    store.decide(case_id, "report")
+    draft_report(store, case_id, TemplateClient())
+    dispatch(store, store.receive)  # every event into the inbox table too
+    tables = [row[0] for row in store.db.execute("SELECT name FROM sqlite_master")]
     dump = "\n".join(
-        value
-        for table in ("cases", "transfers", "claims", "results", "alerts")
+        str(value)
+        for table in tables
+        if not table.startswith("sqlite_")
         for row in store.db.execute(f"SELECT * FROM {table}")
         for value in row
-        if isinstance(value, str)
     )
-    for bank in "ABC":
-        with (TINY / f"bank_{bank}.csv").open() as source:
-            for row in csv.DictReader(source):
-                for field in ("payment_id", "account", "amount"):
-                    assert row[field] not in dump
+    assert "reports" in tables and dump and leaks(dump) == set()

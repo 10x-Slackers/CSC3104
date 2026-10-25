@@ -8,27 +8,27 @@ Decision: docs/decisions/0001-template-only-report.md.
 from datetime import UTC, datetime
 from typing import Protocol
 
-from case_store import chain
-
+from apps.case.case_store import neighbours
 from apps.security.security import check_peer_payload
 
-LINK_FIELDS = ("signer", "in_bank", "in_token", "out_bank", "out_token", "key_version")
+LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token", "key_version")
 # Everything a report client may see. Signatures, accounts, amounts and payment IDs
 # are not listed, so they can never reach a report.
-# ASSUMPTION: report input fields until Caleb reviews them, replace when agreed.
+# DEPENDS ON Role 4 (security and privacy): review of these report input fields
+# (security.md open item "Destination and inputs for the AI report"). Status: pending.
 ALLOWED = {
     "case_id", "state", "raised_at", "merged_into", "links", "results", "decisions",
-    "query_id", "status", "action", "decided_at", *LINK_FIELDS,
+    "chain_digest", "sender", "action", "decided_at", *LINK_FIELDS,
 }  # fmt: skip
 
 
 def report_input(case):
     """Copy only allow-listed fields from a case, then re-check the result."""
     data = {k: case[k] for k in ("case_id", "state", "raised_at", "merged_into")}
-    data["links"] = [
-        {f: getattr(c, f) for f in LINK_FIELDS} for c in chain(case["claims"])
+    data["links"] = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
+    data["results"] = [
+        {"chain_digest": d, "sender": s, "state": st} for d, s, st in case["results"]
     ]
-    data["results"] = [{"query_id": q, "status": s} for q, s in case["results"]]
     data["decisions"] = [{"action": a, "decided_at": t} for a, t in case["decisions"]]
     check_peer_payload(data, ALLOWED)
     return data
@@ -53,9 +53,8 @@ class TemplateClient:
 
     def draft(self, data):
         links = data["links"]
-        banks = sorted(
-            {b for link in links for b in (link["in_bank"], link["out_bank"])}
-        )
+        pairs = [link[p] for link in links for p in ("in_pair", "out_pair")]
+        banks = sorted({b for pair in pairs if pair for b in pair.split("-")})
         signers = sorted({link["signer"] for link in links})
         lines = [
             "DRAFT: template report, not AI-generated. Pending analyst review.",
@@ -69,20 +68,23 @@ class TemplateClient:
         lines += [
             "",
             (
-                f"Summary: {len(links)} linked transfer pair(s) across banks {', '.join(banks)},"
-                f" confirmed by signed claims from {', '.join(signers)}."
+                f"Summary: {len(links)} signed link claim(s) across banks"
+                f" {', '.join(banks)}, from {', '.join(signers)}."
             ),
             "",
-            "Links (incoming bank -> confirming bank -> outgoing bank):",
+            "Links in money-flow order (from bank -> confirming bank -> to bank):",
         ]
+        for i, link in enumerate(links, 1):
+            start, end = neighbours(link["signer"], link["in_pair"], link["out_pair"])
+            lines.append(
+                f"  {i}. {start} -> {link['signer']} -> {end}, confirmed by"
+                f" {link['signer']}: {link['in_token'] or '-'} -> {link['out_token'] or '-'}"
+            )
+        lines += ["", "Chain results received:"]
         lines += [
-            f"  {i}. {link['in_bank']} -> {link['signer']} -> {link['out_bank']},"
-            f" confirmed by {link['signer']} (key {link['key_version']}):"
-            f" {link['in_token']} -> {link['out_token']}"
-            for i, link in enumerate(links, 1)
+            f"  {r['state']} from {r['sender']} (digest {r['chain_digest'][:16]})"
+            for r in data["results"]
         ]
-        lines += ["", "Search results:"]
-        lines += [f"  {r['query_id']}: {r['status']}" for r in data["results"]]
         lines += ["", "Analyst decisions so far:"]
         lines += [
             f"  {when(d['decided_at'])}: {d['action']}" for d in data["decisions"]
