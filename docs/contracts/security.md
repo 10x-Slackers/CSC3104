@@ -154,7 +154,7 @@ Integration evidence still needed, owned with Isaac and evaluated in [evaluation
 
 ## Open
 
-- [ ] Exact protobuf field allowlist for each message type (with Zane)
-- [ ] Canonical bytes for signed claims (with Zane)
+- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS`
+- [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes`
 - [ ] Secret names, mount paths, SAN-to-bank map (with Isaac)
 - [ ] Destination and inputs for the AI report (with Jia Rui)
