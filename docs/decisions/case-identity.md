@@ -21,10 +21,9 @@ Role numbers follow the workload split: 2 streaming and scoring, 3 privacy node 
 
 | Item | Role | Status | Role 5 file and line | Their file and line |
 | --- | --- | --- | --- | --- |
-| Minimum chain length for an alert (today ≥ 2 transfers across ≥ 2 banks) | Role 2 (streaming and scoring) | pending | `apps/case/case_store.py:56` | `docs/contracts/streaming.md:45` "Minimum chain length \| TODO" |
-| The privacy node posts every `ChainResult` it saves to the case service's `POST /results` | Role 3 (privacy node) | pending | `apps/case/app.py:226` | `apps/privacy_node/node.py:183` and `:247` (`store.save_chain`) |
+| Minimum chain length for an alert (today ≥ 2 transfers across ≥ 2 banks) | Role 2 (streaming and scoring) | pending | `apps/case/case_store.py:53` | `docs/contracts/streaming.md:45` "Minimum chain length \| TODO" |
+| The privacy node posts every `ChainResult` it saves to the case service's `POST /results` | Role 3 (privacy node) | pending | `apps/case/app.py:201` | `apps/privacy_node/node.py:183` and `:247` (`store.save_chain`) |
 | Public keys keyed by bank only (Role 3's code) vs by (bank, signing key version) (Role 4's contract) | Role 4 (security and privacy) | pending | `apps/case/evidence.py:17` | `apps/privacy_node/claims.py:53,56`; `docs/contracts/security.md:70` |
-| Review of the report input fields | Role 4 (security and privacy) | pending | `apps/case/report.py:17` | `docs/contracts/security.md:26`, `:160` |
-| Review of the fields sent to the mock intake | Role 4 (security and privacy) | pending | `apps/case/app.py:46` | `docs/contracts/security.md:26`, `:160` |
+| Review of the report fields (draft reports, and the intake payload, which is built from the same `report_input`) | Role 4 (security and privacy) | pending | `apps/case/report.py:16` | `docs/contracts/security.md:26`, `:160` |
 
 Resolved by Role 3's merged code (assumptions removed): claim fields, result fields, result states, signed claim bytes and claim verification now use `privacy_node.proto` and `claims.py`. The outbox retry timings are a Role 5 choice, so no dependency is recorded for them.
