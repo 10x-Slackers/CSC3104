@@ -40,7 +40,7 @@ def main():
         nodes, servers = start_banks(workload, key_dir)
         for bank, node in nodes.items():
             for d, r in zip(node.local.detections, node.search_detections()):
-                route = " -> ".join(f"{c.signer}" for c in r.claims)
+                route = " -> ".join(c.signer for c in r.claims)
                 print(
                     f"search from {bank} on {d['incoming_payment_id']}->"
                     f"{d['outgoing_payment_id']}: {pb.State.Name(r.state):9} "

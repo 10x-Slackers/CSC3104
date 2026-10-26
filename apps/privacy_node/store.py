@@ -49,7 +49,7 @@ class Store:
             reply.SerializeToString(),
         )
 
-    def put_search(self, search_id, incoming, outgoing, state, chain_digest=""):
+    def put_search(self, search_id, incoming, outgoing, state, chain_digest):
         self._run(
             "INSERT INTO searches VALUES (?,?,?,?,?) ON CONFLICT (search_id) "
             "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest",
@@ -72,7 +72,6 @@ class Store:
 
         The chain row and its outbox rows are written in one transaction, so a
         crash can't leave a stored result that is never delivered.
-        Returns True if the row is new or upgraded.
         """
         blob = result.SerializeToString()
         with self.lock, self.db:
@@ -95,7 +94,6 @@ class Store:
                     " DO UPDATE SET result=excluded.result, acked=0",
                     (result.chain_digest, bank, blob),
                 )
-        return changed == 1
 
     def chains(self):
         rows = self._run("SELECT result FROM chains ORDER BY chain_digest")

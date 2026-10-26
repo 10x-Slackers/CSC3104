@@ -37,9 +37,9 @@ def searches():
                 for d, r in zip(node.local.detections, node.search_detections())
             }
             payments = {
-                key(node.local.ref(*ref)): ref[0]
+                key(token): ref[0]
                 for node in nodes.values()
-                for ref in node.local.refs
+                for ref, token in node.local.refs.items()
             }
         finally:
             for server in servers.values():
@@ -84,7 +84,7 @@ def o1(start="B"):
 
 
 def v1():
-    """Over-limit chain: five partial results, cut at different 5-transfer windows."""
+    """Over-limit chain: five partial results; each names the transfer at its cut."""
     return [
         result(*k) for k in searches()[0] if k[1] in {"p15", "p16", "p17", "p18", "p19"}
     ]

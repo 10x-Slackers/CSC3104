@@ -26,6 +26,7 @@ enum State {
   PENDING = 4;        // a needed bank was unreachable; retried after recovery
   TIMED_OUT = 5;      // the search deadline passed
   INVALID_CLAIM = 6;  // a claim failed verification; never stored as evidence
+  FAILED = 7;         // a peer rejected or failed the query; final, not retried
 }
 
 // A pair-scoped transfer token, e.g. pair "A-B".
@@ -46,7 +47,8 @@ message TraceRequest {
 }
 
 // Signed statement by one bank: "I hold in_ref and out_ref and my local rule links them".
-// A missing in_ref or out_ref means the chain starts or ends at this bank.
+// A missing in_ref or out_ref means the chain starts or ends at this bank. A chain whose
+// end ref appears nowhere else in it was cut there (hop limit).
 message LinkClaim {
   string signer = 1;
   string recipient = 2;

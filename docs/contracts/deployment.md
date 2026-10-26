@@ -39,7 +39,7 @@ Each owner fills in their own row.
 | Replay Job | Macarius | | | | | |
 | Ingestor | Cindy | | | | | |
 | Scorer | Cindy | | | | | |
-| Privacy node | Zane | `privacy-node:dev` from `apps/privacy_node/Dockerfile` (build context: repo root) | gRPC 50051 (Service `privacy-node`) | TCP probe on 50051 (readiness 5 s, liveness 10 s) | requests 50m CPU / 128Mi; limit 256Mi | Secret `privacy-node-keys` (`<pair>.key` for its two pairs, `signing.pem`); ConfigMap `bank-public-keys` (`A.pem`, `B.pem`, `C.pem`); `emptyDir` `/data` for SQLite (M2). Enabled with `--set privacyNode.enabled=true`; setup in `deploy/privacy-node-up.sh` |
+| Privacy node | Zane | | | | | |
 | Case service / UI | Jia Rui | | | | | |
 | Report service | Jia Rui | | | | | |
 | Mock intake | Jia Rui | | | | | |
@@ -49,8 +49,6 @@ Each owner fills in their own row.
 One namespace per bank: `bank-a`, `bank-b`, `bank-c`, each a release of the `deploy/charts/bank` Helm chart.
 
 Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443 to the chart's `apiServerCIDRs` only; `k3d-up.sh` pins the k3d node subnet to match, and EKS needs its own value), and ingress from the `strimzi`, `cnpg-system` and `keda` operators. k3s applies a new pod's egress policy a few seconds after the pod starts, so its first connections can bypass it. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
-
-The privacy node adds `privacy-node-peers` (in `templates/privacy-node.yaml`): ingress and egress between `app: privacy-node` pods in the other bank namespaces on TCP 50051 only. Needs review by Isaac and Caleb, and an enforcement check on k3d and EKS.
 
 TODO with Caleb: narrow this to the per-service paths in [security.md](security.md#mtls-and-networkpolicy), and allow privacy node ↔ privacy node once the protocol port is known. Test enforcement in both environments.
 

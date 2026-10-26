@@ -6,8 +6,7 @@ from itertools import pairwise
 
 from google.protobuf.json_format import MessageToDict
 
-from apps.privacy_node import privacy_node_pb2 as pb
-from apps.security.security import check_peer_payload, sign, verify
+from apps.security.security import check_peer_payload, verify
 
 # Every field name that may appear in a serialized peer message. Caleb reviews this.
 ALLOWED_FIELDS = frozenset(
@@ -33,26 +32,13 @@ def claim_bytes(c):
     ).encode("ascii")
 
 
-def make_claim(bank, private_key, recipient, query_id, key_version, in_ref, out_ref):
-    c = pb.LinkClaim(
-        signer=bank,
-        recipient=recipient,
-        query_id=query_id,
-        key_version=key_version,
-        in_ref=in_ref,
-        out_ref=out_ref,
-    )
-    c.signature = sign(claim_bytes(c), private_key)
-    return c
-
-
 def valid_claim(c, public_keys):
     """Signature checks out and the signer is an endpoint of every ref it vouches for."""
-    refs = [r for r in (c.in_ref, c.out_ref) if r.token]
+    vouched = refs([c])
     return (
         c.signer in public_keys
-        and bool(refs)
-        and all(c.signer in r.pair.split("-") for r in refs)
+        and bool(vouched)
+        and all(c.signer in r.pair.split("-") for r in vouched)
         and verify(claim_bytes(c), c.signature, public_keys[c.signer])
     )
 
@@ -64,13 +50,33 @@ def valid_chain(claims, public_keys):
     )
 
 
+def bound(claims, recipient, query_id):
+    """Each claim was signed for the bank that asked for it, all in one query."""
+    recipients = [recipient] + [c.signer for c in claims[:-1]]
+    return all(
+        c.query_id == query_id and c.recipient == r for c, r in zip(claims, recipients)
+    )
+
+
+def refs(claims):
+    """Every non-empty TokenRef in the claims, in order."""
+    return [r for c in claims for r in (c.in_ref, c.out_ref) if r.token]
+
+
+def complete(claims):
+    """Both chain ends are a natural start/end or close a loop, not a cut."""
+    keys = [key(r) for r in refs(claims)]
+    ends = key(claims[0].in_ref), key(claims[-1].out_ref)
+    return all(end == "" or keys.count(end) > 1 for end in ends)
+
+
 def chain_digest(claims):
     """Canonical chain identity: hash of the sorted transfer tokens it covers.
 
     Searches started at different banks on the same transfers get the same ID.
     """
-    refs = sorted({key(r) for c in claims for r in (c.in_ref, c.out_ref)} - {""})
-    return hashlib.sha256(json.dumps(refs).encode()).hexdigest()
+    tokens = sorted({key(r) for r in refs(claims)})
+    return hashlib.sha256(json.dumps(tokens).encode()).hexdigest()
 
 
 def check_payload(message):

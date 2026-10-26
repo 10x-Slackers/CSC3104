@@ -4,12 +4,12 @@ Owner: Jia Rui (Role 5) · Date: 2026-10-25 · Status: **draft**, needs review b
 
 ## Context
 
-The workload split asks Role 5 to "define when a chain is complete enough to alert and how overlapping searches identify the same chain", using "a durable bank-local uniqueness rule for that agreed case identity". Role 3 proposed its `chain_digest` as the case identity ([protocol.md](../contracts/protocol.md), Open), and asked how overlapping **partial** chains should merge: over-limit `v1` gives five partial results with two digests.
+The workload split asks Role 5 to "define when a chain is complete enough to alert and how overlapping searches identify the same chain", using "a durable bank-local uniqueness rule for that agreed case identity". Role 3 proposed its `chain_digest` as the case identity ([protocol.md](../contracts/protocol.md), Open), and asked how overlapping **partial** chains should merge. Over-limit `v1` used to give five partial results with two digests; since the cut claim names the unfollowed transfer, it gives one, but a chain longer than 6 transfers still gives different windows from different starts.
 
 ## Decision
 
 - **Case ID = Role 3's `chain_digest`** (`apps/privacy_node/claims.py`) of the first result that creates the case. Searches from different banks over the same transfers already share it (loop `o1` from B and C).
-- **Join on a shared transfer.** Each transfer, keyed `<pair>|<token>` like `claims.key`, belongs to one case. A result that shares any transfer with a case joins it; a result that spans several cases merges them into the oldest, which keeps exactly one alert. This answers Role 3's question: the five `v1` partials join one case, even though they have two digests.
+- **Join on a shared transfer.** Each transfer, keyed `<pair>|<token>` like `claims.key`, belongs to one case. A result that shares any transfer with a case joins it; a result that spans several cases merges them into the oldest, which keeps exactly one alert. This answers Role 3's question: overlapping partials join one case even when their digests differ.
 - **One alert per case at each bank:** `alerts.case_id` is the primary key, written in the same transaction as the claims and its inbox entry; reports to the intake use a transactional outbox.
 - **Only `CONFIRMED` and `PARTIAL` results are accepted**, matching what the privacy node delivers. A case is confirmed once any of its results is, and is never downgraded. Only a confirmed case can alert.
 

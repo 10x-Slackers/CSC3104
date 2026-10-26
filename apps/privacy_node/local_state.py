@@ -11,10 +11,7 @@ from pathlib import Path
 from apps.privacy_node import privacy_node_pb2 as pb
 from apps.scorer.score import Scorer
 from apps.scorer.token_index import TokenIndex
-
-
-def pair_name(pair):
-    return "-".join(pair)
+from apps.security.security import canonical_pair
 
 
 class LocalBank:
@@ -22,7 +19,7 @@ class LocalBank:
         self.bank = bank
         self.index = TokenIndex(bank, key_version, key_paths)
         scorer = Scorer(bank, **rule)
-        self.refs = {}  # (payment_id, direction) -> (pair name, token)
+        self.refs = {}  # (payment_id, direction) -> TokenRef
         self.counterparty = {}  # (payment_id, direction) -> peer bank
         self.onward = {}  # incoming payment_id -> [outgoing payment_id]
         self.backward = {}  # outgoing payment_id -> [incoming payment_id]
@@ -31,14 +28,16 @@ class LocalBank:
             token = self.index.add(event)
             key = (event["payment_id"], event["direction"])
             if token:
-                pair = sorted((bank, event["counterparty_bank"]))
-                self.refs[key] = (pair_name(pair), token)
+                pair = "-".join(canonical_pair(bank, event["counterparty_bank"]))
+                self.refs[key] = pb.TokenRef(pair=pair, token=token)
                 self.counterparty[key] = event["counterparty_bank"]
             for d in scorer.process(event):
                 i, o = d["incoming_payment_id"], d["outgoing_payment_id"]
-                self.onward.setdefault(i, []).append(o)
-                self.backward.setdefault(o, []).append(i)
-                self.detections.append(d)
+                # Intra-bank legs have no token, so there is nothing to trace.
+                if (i, "in") in self.refs and (o, "out") in self.refs:
+                    self.onward.setdefault(i, []).append(o)
+                    self.backward.setdefault(o, []).append(i)
+                    self.detections.append(d)
 
     @classmethod
     def from_workload(cls, workload, bank, key_version, key_paths, **rule):
@@ -56,7 +55,3 @@ class LocalBank:
         """Local rule links: from an incoming payment (downstream) or into an outgoing one."""
         table = self.onward if direction == "in" else self.backward
         return sorted(table.get(payment_id, []))
-
-    def ref(self, payment_id, direction):
-        pair, token = self.refs[payment_id, direction]
-        return pb.TokenRef(pair=pair, token=token)

@@ -22,6 +22,7 @@ class State(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     PENDING: _ClassVar[State]
     TIMED_OUT: _ClassVar[State]
     INVALID_CLAIM: _ClassVar[State]
+    FAILED: _ClassVar[State]
 DIRECTION_UNSPECIFIED: Direction
 DOWNSTREAM: Direction
 UPSTREAM: Direction
@@ -32,6 +33,7 @@ PARTIAL: State
 PENDING: State
 TIMED_OUT: State
 INVALID_CLAIM: State
+FAILED: State
 
 class TokenRef(_message.Message):
     __slots__ = ("pair", "token")
