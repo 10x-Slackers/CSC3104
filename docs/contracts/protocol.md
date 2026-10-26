@@ -103,7 +103,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 - A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps the claims other banks gave, and no chain row is created. Searches that don't need that bank keep going.
 - **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search, then redelivers every unacknowledged outbox row. An error in one pass is logged and the next pass runs as normal. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
-- **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, provided the store survives. In M2 the store is an `emptyDir`, which survives a container restart but not pod deletion; M3 moves it to PostgreSQL.
+- **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, provided the store file survives (`--db`); M3 moves it to PostgreSQL.
 - **Retained-state lifetimes:** TODO. Stored replies can expire after the search deadline plus a margin; outbox rows are kept until acknowledged.
 - **"Exactly one alert"** holds for eventual recovery with intact storage, not permanent data loss. The protocol side gives one `chains` row per digest at each bank, tested under repeated searches and redelivery.
 - Concurrent replicas will share query state in PostgreSQL (`INSERT ... ON CONFLICT DO NOTHING`). Until then, run one replica per bank.
@@ -113,8 +113,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 ```sh
 uv run pytest apps/privacy_node                 # 14 protocol tests on the tiny fixture
 uv run python -m apps.privacy_node.demo         # three banks on localhost, prints each trace
-uv run python -m apps.privacy_node.keys .secrets  # lab keys for k3d (git-ignored)
-deploy/privacy-node-up.sh                       # after deploy/k3d-up.sh
+uv run python -m apps.privacy_node.keys .secrets  # lab keys (git-ignored)
 ```
 
 Regenerate the stubs after editing the `.proto` (from the repo root):

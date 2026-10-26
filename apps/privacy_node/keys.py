@@ -3,7 +3,7 @@
   uv run python -m apps.privacy_node.keys .secrets
 
 Writes pairs/<X>-<Y>.key (32 random bytes per bank pair), signing/<X>.pem and
-public/<X>.pem. Load them into Kubernetes Secrets; never commit them.
+public/<X>.pem. Never commit them.
 """
 
 import os
