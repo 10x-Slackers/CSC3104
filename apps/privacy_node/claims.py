@@ -64,6 +64,21 @@ def valid_chain(claims, public_keys):
     )
 
 
+def bound(claims, recipient, query_id):
+    """Each claim was signed for the bank that asked for it, all in one query."""
+    recipients = [recipient] + [c.signer for c in claims[:-1]]
+    return all(
+        c.query_id == query_id and c.recipient == r for c, r in zip(claims, recipients)
+    )
+
+
+def complete(claims):
+    """Both chain ends are a natural start/end or close a loop, not a cut."""
+    refs = [key(r) for c in claims for r in (c.in_ref, c.out_ref)]
+    ends = key(claims[0].in_ref), key(claims[-1].out_ref)
+    return all(end == "" or refs.count(end) > 1 for end in ends)
+
+
 def chain_digest(claims):
     """Canonical chain identity: hash of the sorted transfer tokens it covers.
 

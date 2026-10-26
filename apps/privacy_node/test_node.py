@@ -14,9 +14,12 @@ from apps.privacy_node.claims import (
     ALLOWED_FIELDS,
     chain_digest,
     check_payload,
+    complete,
     valid_chain,
 )
 from apps.privacy_node.demo import start_banks
+from apps.privacy_node.keys import make_keys, pair_paths
+from apps.privacy_node.local_state import LocalBank
 from apps.privacy_node.node import HOP_LIMIT, now, serve
 from apps.privacy_node.store import Store
 from apps.security.security import check_peer_payload
@@ -78,11 +81,13 @@ def test_fixture_scenarios(banks):
     assert o1_b.chain_digest == o1_c.chain_digest
     assert len(transfers(o1_b)) == 3
 
-    # Over-limit v1 (6 transfers): every search is cut at HOP_LIMIT + 1 transfers.
+    # Over-limit v1 (6 transfers): every search follows HOP_LIMIT + 1 transfers and
+    # names the unfollowed one at the cut, so all starts agree on one digest.
     v1 = [r for k, r in results.items() if k[1] in {"p15", "p16", "p17", "p18", "p19"}]
     assert len(v1) == 5
-    assert all(r.state == pb.PARTIAL for r in v1)
-    assert all(len(transfers(r)) == HOP_LIMIT + 1 for r in v1)
+    assert all(r.state == pb.PARTIAL and not complete(r.claims) for r in v1)
+    assert all(len(transfers(r)) == HOP_LIMIT + 2 for r in v1)
+    assert len({r.chain_digest for r in v1}) == 1
 
 
 def test_one_chain_row_per_bank_after_repeats(banks):
@@ -91,7 +96,7 @@ def test_one_chain_row_per_bank_after_repeats(banks):
     run_all(nodes)  # repeated searches and deliveries
     for node in nodes.values():
         chains = node.store.chains()
-        assert len(chains) == len({c.chain_digest for c in chains}) == 4
+        assert len(chains) == len({c.chain_digest for c in chains}) == 3
         assert node.store.pending_deliveries() == []
     digests = [{c.chain_digest for c in n.store.chains()} for n in nodes.values()]
     assert digests[0] == digests[1] == digests[2]
@@ -109,6 +114,7 @@ def test_peer_messages_carry_no_raw_fields(banks):
 def test_tampered_or_wrongly_signed_claims_rejected(banks):
     nodes, _ = banks
     result = nodes["B"].search("p06", "p07")
+    nodes["B"].deliver_pending()
     keys = nodes["B"].public_keys
     assert valid_chain(result.claims, keys)
 
@@ -162,9 +168,54 @@ def test_visited_token_closes_loop_without_forwarding(banks):
 
 def test_hop_budget_exhausted_is_partial(banks):
     nodes, _ = banks
-    reply = trace(nodes["B"], "p15", pb.DOWNSTREAM, "A", hops_remaining=0)
+    b = nodes["B"]
+    reply = trace(b, "p15", pb.DOWNSTREAM, "A", hops_remaining=0)
     assert reply.state == pb.PARTIAL
-    assert not reply.claims[0].out_ref.token
+    assert reply.claims[0].out_ref == b.local.ref("p16", "out")  # cut, not an end
+    assert not complete(reply.claims)
+
+
+def test_delivered_state_is_checked(banks):
+    nodes, _ = banks
+    deliver = nodes["B"].Deliver
+    result = nodes["B"].search("p15", "p16")
+    nodes["B"].store = Store()
+    result.state = pb.CONFIRMED  # sender lies about a cut chain
+    deliver(result, None)
+    assert [c.state for c in nodes["B"].store.chains()] == [pb.PARTIAL]
+
+    class Aborted(Exception):
+        pass
+
+    class Context:
+        def abort(self, code, details):
+            raise Aborted(code)
+
+    result.state = pb.PENDING  # only final states are stored
+    with pytest.raises(Aborted):
+        deliver(result, Context())
+
+
+def test_peer_error_fails_search_without_retry(banks, monkeypatch):
+    nodes, _ = banks
+    monkeypatch.setattr(nodes["C"], "follow", lambda request: 1 / 0)
+    assert nodes["B"].search("p06", "p07").state == pb.FAILED
+    assert nodes["B"].store.unfinished_searches() == []
+
+
+def test_intra_bank_detection_is_not_searched(tmp_path):
+    make_keys(tmp_path)
+    event = {"bank": "B", "account": "B-x", "payment_format": "Wire"}
+    events = [
+        event
+        | {"payment_id": "q1", "direction": "in", "counterparty_bank": "B"}
+        | {"event_time": "2022-09-05T09:00:00Z", "amount": "100"},
+        event
+        | {"payment_id": "q2", "direction": "out", "counterparty_bank": "C"}
+        | {"event_time": "2022-09-05T09:05:00Z", "amount": "95"},
+    ]
+    local = LocalBank("B", "k1", pair_paths(tmp_path, "B"), events)
+    assert local.onward == {"q1": ["q2"]} and local.detections == []
 
 
 def test_offline_bank_leaves_search_pending_then_recovers(banks):

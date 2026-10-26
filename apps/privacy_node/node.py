@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import threading
 import time
+import traceback
 import uuid
 from concurrent import futures
 from datetime import UTC, datetime, timedelta
@@ -23,8 +24,10 @@ import grpc
 from apps.privacy_node import privacy_node_pb2 as pb
 from apps.privacy_node import privacy_node_pb2_grpc as pb_grpc
 from apps.privacy_node.claims import (
+    bound,
     chain_digest,
     check_payload,
+    complete,
     key,
     make_claim,
     valid_chain,
@@ -35,17 +38,12 @@ from apps.security.security import load_signing_key, load_verification_key
 
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
 BRANCH_CAP = 1  # linear chains only; extra local links make the result PARTIAL
-RETRIES = 3  # attempts per peer call, with backoff, inside the search deadline
 SEARCH_SECONDS = 10  # whole-search deadline, carried unchanged by every hop
-# Reconnect quickly after a peer restarts, so a retry isn't stuck in gRPC's backoff.
-CHANNEL_OPTIONS = [
-    ("grpc.initial_reconnect_backoff_ms", 100),
-    ("grpc.min_reconnect_backoff_ms", 100),
-    ("grpc.max_reconnect_backoff_ms", 1000),
-]
 # Worst state wins when two results are combined.
-SEVERITY = [pb.CONFIRMED, pb.PARTIAL, pb.NO_MATCH, pb.PENDING, pb.TIMED_OUT]
-SEVERITY.append(pb.INVALID_CLAIM)
+SEVERITY = [
+    *(pb.CONFIRMED, pb.PARTIAL, pb.NO_MATCH, pb.PENDING, pb.TIMED_OUT),
+    *(pb.FAILED, pb.INVALID_CLAIM),
+]
 
 
 def now():
@@ -59,7 +57,9 @@ def worst(*states):
 def failure_state(error):
     if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
         return pb.TIMED_OUT
-    return pb.PENDING  # unreachable bank: retried after recovery
+    if error.code() == grpc.StatusCode.UNAVAILABLE:
+        return pb.PENDING  # unreachable bank: retried after recovery
+    return pb.FAILED  # the peer rejected or failed the query: retrying won't help
 
 
 class Node(pb_grpc.PrivacyNodeServicer):
@@ -68,27 +68,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
         self.peers, self.key_version = peers, key_version
-        self.stubs = {}
 
     # ---- outgoing calls -------------------------------------------------
 
     def call(self, bank, method, request, deadline):
-        """Call a peer with bounded retries; raises grpc.RpcError when out of tries."""
+        """Call a peer once; housekeeping retries searches and deliveries that fail."""
         check_payload(request)
-        if bank not in self.stubs:
-            channel = grpc.insecure_channel(
-                self.peers[bank], CHANNEL_OPTIONS
-            )  # M3: mTLS
-            self.stubs[bank] = pb_grpc.PrivacyNodeStub(channel)
-        for attempt in range(RETRIES):
+        with grpc.insecure_channel(self.peers[bank]) as channel:  # M3: mTLS
+            stub = pb_grpc.PrivacyNodeStub(channel)
             timeout = (deadline - now()).total_seconds()
-            try:
-                return getattr(self.stubs[bank], method)(request, timeout=timeout)
-            except grpc.RpcError as error:
-                retryable = error.code() == grpc.StatusCode.UNAVAILABLE
-                if not retryable or attempt == RETRIES - 1:
-                    raise
-                time.sleep(0.1 * 2**attempt)
+            return getattr(stub, method)(request, timeout=timeout)
 
     def claim(self, recipient, query_id, in_ref, out_ref):
         return make_claim(
@@ -148,8 +137,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         next_ref = self.local.ref(nexts[0], there)
         if key(next_ref) in {key(r) for r in request.visited}:  # loop closed
             return pb.TraceReply(state=state, claims=[claim(next_ref)])
-        if request.hops_remaining <= 0:  # hop limit reached
-            return pb.TraceReply(state=pb.PARTIAL, claims=[claim(pb.TokenRef())])
+        if request.hops_remaining <= 0:  # hop limit: next_ref is left unfollowed
+            return pb.TraceReply(state=pb.PARTIAL, claims=[claim(next_ref)])
         forward = pb.TraceRequest(
             query_id=request.query_id,
             sender=self.bank,
@@ -173,13 +162,21 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     def Deliver(self, request, context):
         """Store a chain result pushed by the bank that assembled it."""
-        signers = {c.signer for c in request.claims}
+        claims, sender = list(request.claims), request.sender
+        own = [i for i, c in enumerate(claims) if c.signer == c.recipient == sender]
+        up, down = (claims[: own[0]][::-1], claims[own[0] + 1 :]) if own else ([], [])
         if (
-            self.bank not in signers
-            or chain_digest(request.claims) != request.chain_digest
-            or not valid_chain(request.claims, self.public_keys)
+            not own
+            or request.state not in (pb.CONFIRMED, pb.PARTIAL)
+            or self.bank not in {c.signer for c in claims}
+            or chain_digest(claims) != request.chain_digest
+            or not valid_chain(claims, self.public_keys)
+            or not all(bound(leg, sender, leg[0].query_id) for leg in (up, down) if leg)
         ):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid chain result")
+        # A cut chain is never confirmed, whatever the sender says.
+        if not complete(claims):
+            request.state = pb.PARTIAL
         self.store.save_chain(request)
         return pb.Ack(chain_digest=request.chain_digest)
 
@@ -206,15 +203,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
         except grpc.RpcError as error:
             return failure_state(error), []
         claims = list(reply.claims)
-        recipients = [self.bank] + [c.signer for c in claims[:-1]]
-        fresh = all(
-            c.query_id == query_id and c.recipient == r
-            for c, r in zip(claims, recipients)
-        )
+        fresh = bound(claims, self.bank, query_id)
         return (reply.state if fresh else pb.INVALID_CLAIM), claims
 
     def search(self, incoming, outgoing):
-        """Trace both ways from a local detection, assemble, store and deliver."""
+        """Trace both ways from a local detection, assemble and store for delivery."""
         search_id = hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode())
         search_id = search_id.hexdigest()
         deadline = now() + timedelta(seconds=SEARCH_SECONDS)
@@ -233,11 +226,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
             pb.UPSTREAM, incoming, in_ref, budget - len(new), deadline, visited
         )
         claims = [*reversed(up), own, *down]
-        state = worst(down_state, up_state)
-        if not valid_chain(claims, self.public_keys):
-            state = pb.INVALID_CLAIM
+        valid = valid_chain(claims, self.public_keys)
+        state = worst(down_state, up_state) if valid else pb.INVALID_CLAIM
         result = pb.ChainResult(
-            chain_digest=chain_digest(claims),
+            chain_digest=chain_digest(claims) if valid else "",
             sender=self.bank,
             state=state,
             claims=claims,
@@ -245,15 +237,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if state in (pb.CONFIRMED, pb.PARTIAL):
             others = {c.signer for c in claims} - {self.bank}
             self.store.save_chain(result, deliver_to=sorted(others))
-            self.deliver_pending()
         self.store.put_search(search_id, incoming, outgoing, state, result.chain_digest)
         return result
 
     def search_detections(self):
-        return [
+        results = [
             self.search(d["incoming_payment_id"], d["outgoing_payment_id"])
             for d in self.local.detections
         ]
+        self.deliver_pending()
+        return results
 
     # ---- housekeeping ---------------------------------------------------
 
@@ -313,7 +306,10 @@ def main():
     def loop():
         while True:
             time.sleep(args.housekeeping_seconds)
-            node.housekeeping()
+            try:
+                node.housekeeping()
+            except Exception:  # noqa: BLE001 - log and retry on the next pass
+                traceback.print_exc()
 
     threading.Thread(target=loop, daemon=True).start()
     server.wait_for_termination()

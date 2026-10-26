@@ -38,7 +38,9 @@ class LocalBank:
                 i, o = d["incoming_payment_id"], d["outgoing_payment_id"]
                 self.onward.setdefault(i, []).append(o)
                 self.backward.setdefault(o, []).append(i)
-                self.detections.append(d)
+                # Intra-bank legs have no token, so there is nothing to trace.
+                if (i, "in") in self.refs and (o, "out") in self.refs:
+                    self.detections.append(d)
 
     @classmethod
     def from_workload(cls, workload, bank, key_version, key_paths, **rule):
