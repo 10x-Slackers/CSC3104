@@ -49,14 +49,14 @@ def test_overlapping_searches_share_one_case_and_alert(store):
 
 
 def test_overlapping_partials_join_one_case_without_alert(store):
-    # Over-limit v1: five partial results with two digests, all sharing transfers.
+    # Over-limit v1: five partial results from three banks, all sharing transfers.
     results = v1()
-    assert len(results) == 5 and len({r.chain_digest for r in results}) == 2
+    assert len(results) == 5 and len({r.chain_digest for r in results}) == 1
     assert len({store.record(r) for r in results}) == 1
     [case] = store.cases()
     assert case["state"] == "partial" and case["raised_at"] is None
-    # C's two searches return the same digest, so they are one (digest, sender) row.
-    assert len(store.get(case["case_id"])["results"]) == 4
+    # One digest, so each sending bank's searches are one (digest, sender) row.
+    assert len(store.get(case["case_id"])["results"]) == 3
 
 
 def test_partial_upgrades_to_confirmed_and_alerts_once(store):
@@ -81,6 +81,7 @@ def test_partial_upgrades_to_confirmed_and_alerts_once(store):
         (pb.NO_MATCH, None),
         (pb.TIMED_OUT, None),
         (pb.INVALID_CLAIM, None),
+        (pb.FAILED, None),
         (pb.PENDING, None),
     ],
 )

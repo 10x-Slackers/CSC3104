@@ -64,5 +64,5 @@ def test_missing_bank_case_waits_then_confirms(banks, tmp_path):
     case = store.get(store.record(confirmed))
     assert case["state"] == "confirmed" and case["raised_at"] is not None
     b = nodes["B"].local  # this run's own keys, so look its tokens up here
-    expected = {key(b.ref("p06", "in")), key(b.ref("p07", "out"))}
+    expected = {key(b.refs["p06", "in"]), key(b.refs["p07", "out"])}
     assert {k for c in case["claims"] for k in transfers(c)} == expected
