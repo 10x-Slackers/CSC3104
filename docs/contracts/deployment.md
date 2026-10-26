@@ -52,7 +52,7 @@ Current baseline (`bank-baseline` policy): deny all, then allow traffic within t
 
 The privacy node adds `privacy-node-peers` (in `templates/privacy-node.yaml`): ingress and egress between `app: privacy-node` pods in the other bank namespaces on TCP 50051 only. Needs review by Isaac and Caleb, and an enforcement check on k3d and EKS.
 
-TODO with Caleb: narrow this to the per-service paths in [security.md](security.md#mtls-and-networkpolicy), and allow privacy node ↔ privacy node once the protocol port is known. Test enforcement in both environments.
+TODO with Caleb: narrow this to the per-service paths in [security.md](security.md#mtls-and-networkpolicy). Test enforcement in both environments.
 
 ## Open
 

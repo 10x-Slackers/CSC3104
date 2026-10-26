@@ -11,7 +11,12 @@ import sys
 from itertools import combinations
 from pathlib import Path
 
-from apps.security.security import generate_signing_key, private_key_pem, public_key_pem
+from apps.security.security import (
+    canonical_pair,
+    generate_signing_key,
+    private_key_pem,
+    public_key_pem,
+)
 
 BANKS = ("A", "B", "C")
 
@@ -33,7 +38,7 @@ def pair_paths(root, bank):
     """{(bank, peer): path} for load_pairwise_keys / TokenIndex."""
     root = Path(root)
     return {
-        (bank, peer): root / "pairs" / "{}-{}.key".format(*sorted((bank, peer)))
+        (bank, peer): root / "pairs" / "{}-{}.key".format(*canonical_pair(bank, peer))
         for peer in BANKS
         if peer != bank
     }

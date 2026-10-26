@@ -111,7 +111,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 ## Running and testing
 
 ```sh
-uv run pytest apps/privacy_node                 # 15 protocol tests on the tiny fixture
+uv run pytest apps/privacy_node                 # 14 protocol tests on the tiny fixture
 uv run python -m apps.privacy_node.demo         # three banks on localhost, prints each trace
 uv run python -m apps.privacy_node.keys .secrets  # lab keys for k3d (git-ignored)
 deploy/privacy-node-up.sh                       # after deploy/k3d-up.sh

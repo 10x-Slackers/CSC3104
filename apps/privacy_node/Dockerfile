@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
 COPY apps ./apps
-RUN uv sync --all-packages --locked --no-dev
+RUN uv sync --package privacy-node --locked --no-dev
 ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1
 EXPOSE 50051
 ENTRYPOINT ["python", "-m", "apps.privacy_node.node"]

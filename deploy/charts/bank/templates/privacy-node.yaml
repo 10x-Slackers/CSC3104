@@ -84,7 +84,7 @@ spec:
     matchLabels: {app: privacy-node}
   policyTypes: [Ingress, Egress]
   ingress:
-    - from:
+    - from: &peers
         {{- range $peers }}
         - namespaceSelector:
             matchLabels: {kubernetes.io/metadata.name: bank-{{ lower . }}}
@@ -94,13 +94,7 @@ spec:
       ports:
         - {protocol: TCP, port: 50051}
   egress:
-    - to:
-        {{- range $peers }}
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: bank-{{ lower . }}}
-          podSelector:
-            matchLabels: {app: privacy-node}
-        {{- end }}
+    - to: *peers
       ports:
         - {protocol: TCP, port: 50051}
 {{- end }}

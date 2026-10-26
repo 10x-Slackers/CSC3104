@@ -9,7 +9,6 @@ import grpc
 import pytest
 
 from apps.privacy_node import privacy_node_pb2 as pb
-from apps.privacy_node import privacy_node_pb2_grpc as pb_grpc
 from apps.privacy_node.claims import (
     ALLOWED_FIELDS,
     chain_digest,
@@ -22,6 +21,7 @@ from apps.privacy_node.keys import make_keys, pair_paths
 from apps.privacy_node.local_state import LocalBank
 from apps.privacy_node.node import HOP_LIMIT, now, serve
 from apps.privacy_node.store import Store
+from apps.scorer.score import Scorer
 from apps.security.security import check_peer_payload
 
 TINY = Path(__file__).parents[1] / "dataset/fixtures/tiny"
@@ -50,7 +50,7 @@ def transfers(result):
 def trace(node, payment, direction, sender, **changes):
     side = "in" if direction == pb.DOWNSTREAM else "out"
     if "ref" not in changes:
-        changes["ref"] = node.local.ref(payment, side)
+        changes["ref"] = node.local.refs[payment, side]
     fields = {
         "query_id": "q1",
         "sender": sender,
@@ -67,8 +67,7 @@ def test_fixture_scenarios(banks):
     results = run_all(nodes)
     # Only planted mule-chain transfers are locally suspicious (lookalike l1, absent x1 are not).
     started = {p for key in results for p in key[1:]}
-    assert not started & {"p01", "p02", "p03", "p04", "p05", "p08", "p09", "p13"}
-    assert not started & {"p14"}
+    assert not started & {"p01", "p02", "p03", "p04", "p05", "p08", "p09", "p13", "p14"}
 
     m1 = results["B", "p06", "p07"]
     assert m1.state == pb.CONFIRMED
@@ -147,7 +146,7 @@ def test_unknown_token_wrong_sender_and_deadline(banks):
     nodes, _ = banks
     c = nodes["C"]
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
-    inbound = c.local.ref("p07", "in")
+    inbound = c.local.refs["p07", "in"]
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
     late = (now() - timedelta(seconds=1)).isoformat()
     assert (
@@ -159,7 +158,7 @@ def test_unknown_token_wrong_sender_and_deadline(banks):
 def test_visited_token_closes_loop_without_forwarding(banks):
     nodes, _ = banks
     b = nodes["B"]
-    seen = b.local.ref("p11", "out")
+    seen = b.local.refs["p11", "out"]
     reply = trace(b, "p10", pb.DOWNSTREAM, "A", visited=[seen])
     assert reply.state == pb.CONFIRMED
     assert [c.signer for c in reply.claims] == ["B"]
@@ -171,29 +170,22 @@ def test_hop_budget_exhausted_is_partial(banks):
     b = nodes["B"]
     reply = trace(b, "p15", pb.DOWNSTREAM, "A", hops_remaining=0)
     assert reply.state == pb.PARTIAL
-    assert reply.claims[0].out_ref == b.local.ref("p16", "out")  # cut, not an end
+    assert reply.claims[0].out_ref == b.local.refs["p16", "out"]  # cut, not an end
     assert not complete(reply.claims)
 
 
 def test_delivered_state_is_checked(banks):
     nodes, _ = banks
-    deliver = nodes["B"].Deliver
     result = nodes["B"].search("p15", "p16")
-    nodes["B"].store = Store()
+    nodes["C"].store = Store()
+    deadline = now() + timedelta(seconds=5)
     result.state = pb.CONFIRMED  # sender lies about a cut chain
-    deliver(result, None)
-    assert [c.state for c in nodes["B"].store.chains()] == [pb.PARTIAL]
-
-    class Aborted(Exception):
-        pass
-
-    class Context:
-        def abort(self, code, details):
-            raise Aborted(code)
+    nodes["B"].call("C", "Deliver", result, deadline)
+    assert [c.state for c in nodes["C"].store.chains()] == [pb.PARTIAL]
 
     result.state = pb.PENDING  # only final states are stored
-    with pytest.raises(Aborted):
-        deliver(result, Context())
+    with pytest.raises(grpc.RpcError):
+        nodes["B"].call("C", "Deliver", result, deadline)
 
 
 def test_peer_error_fails_search_without_retry(banks, monkeypatch):
@@ -214,8 +206,10 @@ def test_intra_bank_detection_is_not_searched(tmp_path):
         | {"payment_id": "q2", "direction": "out", "counterparty_bank": "C"}
         | {"event_time": "2022-09-05T09:05:00Z", "amount": "95"},
     ]
+    scorer = Scorer("B")
+    assert [d for e in events for d in scorer.process(e)]  # the rule does flag it
     local = LocalBank("B", "k1", pair_paths(tmp_path, "B"), events)
-    assert local.onward == {"q1": ["q2"]} and local.detections == []
+    assert local.onward == {} and local.detections == []
 
 
 def test_offline_bank_leaves_search_pending_then_recovers(banks):
@@ -257,18 +251,3 @@ def test_messages_pass_allowlist_and_reject_forbidden_fields():
     check_payload(pb.TraceRequest(query_id="q", sender="A"))
     with pytest.raises(ValueError):
         check_peer_payload({"amount": 1}, ALLOWED_FIELDS)
-
-
-def test_service_stub_round_trip(banks):
-    nodes, _ = banks
-    stub = pb_grpc.PrivacyNodeStub(grpc.insecure_channel(nodes["A"].peers["C"]))
-    request = pb.TraceRequest(
-        query_id="q2",
-        sender="B",
-        key_version="k1",
-        ref=nodes["C"].local.ref("p07", "in"),
-        direction=pb.DOWNSTREAM,
-        hops_remaining=3,
-        deadline=(now() + timedelta(seconds=5)).isoformat(),
-    )
-    assert stub.Trace(request, timeout=5).state == pb.CONFIRMED
