@@ -2,8 +2,7 @@
 
 Holds only tokens, bank IDs and claim metadata; never accounts, amounts or payment IDs.
 Input is Role 3's ChainResult (apps/privacy_node/privacy_node.proto), already verified
-with evidence.verify_result. Contract: docs/contracts/case.md. SQLite now; CaseStore
-is the seam for Postgres.
+with evidence.verify_result. Contract: docs/contracts/case.md. SQLite for now.
 """
 
 import os
@@ -11,7 +10,6 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import astuple, dataclass, fields
-from typing import Protocol
 
 from apps.privacy_node import privacy_node_pb2 as pb
 
@@ -21,7 +19,6 @@ STATES = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
 # Simulated analyst actions; none touches a real account. "report" queues the case
 # evidence for the mock intake.
 DECISIONS = ("monitor", "suspend", "freeze", "report")
-REVIEWS = ("draft", "approved", "rejected")
 
 
 @dataclass(frozen=True)
@@ -59,17 +56,6 @@ class AlertRule:
 
     min_transfers: int = int(os.environ.get("CASE_MIN_TRANSFERS", "2"))
     min_banks: int = int(os.environ.get("CASE_MIN_BANKS", "2"))
-
-
-class CaseStore(Protocol):
-    def record(self, result: pb.ChainResult) -> str: ...
-    def get(self, case_id: str) -> dict | None: ...
-    def cases(self) -> list[dict]: ...
-    def lease_due(self, now, lease, max_attempts) -> list[dict]: ...
-    def ack(self, event_id: str) -> None: ...
-    def retry(self, event_id: str, at: float, error: str) -> None: ...
-    def decide(self, case_id: str, action: str) -> None: ...
-    def receive(self, message: dict) -> bool: ...
 
 
 def transfers(claim):
@@ -123,11 +109,11 @@ CREATE TABLE IF NOT EXISTS alerts (
     case_id TEXT PRIMARY KEY,
     raised_at REAL NOT NULL
 );
--- Transactional outbox: written with the change it announces, delivered at least once.
--- event_id is "<kind>:<case_id>", so receivers deduplicate redeliveries on it.
+-- Transactional outbox for reports to the mock intake, written with the decision and
+-- delivered at least once. event_id is "report:<case_id>:<decision>", so the intake
+-- deduplicates redeliveries on it while a later report decision still sends.
 CREATE TABLE IF NOT EXISTS outbox (
     event_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
     case_id TEXT NOT NULL,
     created_at REAL NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -141,12 +127,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     action TEXT NOT NULL,
     decided_at REAL NOT NULL
 );
--- The analyst's inbox: deduplicates redelivered events, so each shows once.
+-- The analyst's inbox, written in the same transaction as the alert or merge it
+-- announces; event_id "<kind>:<case_id>" keeps each one to a single row.
 CREATE TABLE IF NOT EXISTS notifications (
     event_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    received_at REAL NOT NULL
+    created_at REAL NOT NULL
 );
 -- Generated reports: drafts until an analyst approves or rejects them.
 CREATE TABLE IF NOT EXISTS reports (
@@ -162,12 +149,10 @@ CREATE TABLE IF NOT EXISTS reports (
 
 
 def notify(db, kind, case_id):
-    """Queue one event per (kind, case); repeats are ignored."""
-    now = time.time()
+    """Add one inbox entry per (kind, case); repeats are ignored."""
     db.execute(
-        "INSERT INTO outbox (event_id, kind, case_id, created_at, next_at)"
-        " VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        (f"{kind}:{case_id}", kind, case_id, now, now),
+        "INSERT INTO notifications VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        (f"{kind}:{case_id}", kind, case_id, time.time()),
     )
 
 
@@ -198,15 +183,10 @@ class SqliteCaseStore:
         keys = sorted({key for claim in claims for key in transfers(claim)})
         with self._write() as db:
             case_id = self._case_for(db, keys, result.chain_digest)
+            row = (result.chain_digest, result.sender, STATES[result.state], case_id)
             db.execute(
                 "INSERT INTO results VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (
-                    result.chain_digest,
-                    result.sender,
-                    STATES[result.state],
-                    case_id,
-                    time.time(),
-                ),
+                (*row, time.time()),
             )
             db.executemany(
                 "INSERT INTO transfers VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -269,20 +249,24 @@ class SqliteCaseStore:
                 (digest, time.time(), "partial"),
             )
             return digest
-        # Merge into the oldest case, keeping its alert or adopting a merged one.
+        # Merge into the oldest case: evidence, analyst history and pending reports move
+        # with it, and it keeps its alert or adopts a merged one.
         case_id = found[0]
         for old in found[1:]:
             # Tell the analyst an alerted case now lives on under the surviving case.
             if db.execute("SELECT 1 FROM alerts WHERE case_id = ?", (old,)).fetchone():
                 notify(db, "merged", old)
-            for table in ("transfers", "claims", "results"):
+            for table in ("transfers", "claims", "results", "decisions", "reports"):
                 db.execute(
                     f"UPDATE {table} SET case_id = ? WHERE case_id = ?", (case_id, old)
                 )
             db.execute(
-                "UPDATE alerts SET case_id = ? WHERE case_id = ? AND NOT EXISTS"
-                " (SELECT 1 FROM alerts WHERE case_id = ?)",
-                (case_id, old, case_id),
+                "UPDATE outbox SET case_id = ? WHERE case_id = ? AND acked_at IS NULL",
+                (case_id, old),
+            )
+            db.execute(
+                "UPDATE OR IGNORE alerts SET case_id = ? WHERE case_id = ?",
+                (case_id, old),
             )
             db.execute("DELETE FROM alerts WHERE case_id = ?", (old,))
             db.execute(
@@ -321,11 +305,16 @@ class SqliteCaseStore:
         if action not in DECISIONS:
             raise ValueError(f"Unknown decision: {action}")
         with self._write() as db:
-            db.execute(
-                "INSERT INTO decisions VALUES (?, ?, ?)", (case_id, action, time.time())
-            )
+            now = time.time()
+            decision = db.execute(
+                "INSERT INTO decisions VALUES (?, ?, ?)", (case_id, action, now)
+            ).lastrowid
             if action == "report":
-                notify(db, "report", case_id)
+                db.execute(
+                    "INSERT INTO outbox (event_id, case_id, created_at, next_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (f"report:{case_id}:{decision}", case_id, now, now),
+                )
 
     def save_report(self, case_id, source, body):
         """Store a generated report as a draft pending analyst review; return its ID."""
@@ -334,15 +323,15 @@ class SqliteCaseStore:
             (case_id, source, body, time.time()),
         ).lastrowid
 
-    def review_report(self, report_id, status):
-        """Approve or reject a draft once; return False if it was already reviewed."""
-        if status not in REVIEWS[1:]:
+    def review_report(self, case_id, report_id, status):
+        """Approve or reject a case's draft once; False if it isn't a pending draft."""
+        if status not in ("approved", "rejected"):
             raise ValueError(f"Unknown review: {status}")
         return bool(
             self.db.execute(
                 "UPDATE reports SET status = ?, reviewed_at = ?"
-                " WHERE report_id = ? AND status = 'draft'",
-                (status, time.time(), report_id),
+                " WHERE case_id = ? AND report_id = ? AND status = 'draft'",
+                (status, time.time(), case_id, report_id),
             ).rowcount
         )
 
@@ -355,62 +344,46 @@ class SqliteCaseStore:
             )
         ]
 
-    def receive(self, message):
-        """Record a delivered event once; return False for a redelivery."""
-        return bool(
-            self.db.execute(
-                "INSERT INTO notifications VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (message["event_id"], message["kind"], message["case_id"], time.time()),
-            ).rowcount
-        )
-
-    def notifications(self, limit=20):
+    def notifications(self):
         return [
             dict(row)
             for row in self.db.execute(
-                "SELECT * FROM notifications ORDER BY received_at DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20"
             )
         ]
 
-    def lease_due(self, now, lease, max_attempts, limit=100):
-        """Take due, unacked events; the lease stops other dispatchers resending them."""
-        with self._write() as db:
-            events = [
-                dict(row)
-                for row in db.execute(
-                    "SELECT event_id, kind, case_id, attempts FROM outbox"
-                    " WHERE acked_at IS NULL AND attempts < ? AND next_at <= ?"
-                    " ORDER BY created_at, event_id LIMIT ?",
-                    (max_attempts, now, limit),
-                )
-            ]
-            db.executemany(
-                "UPDATE outbox SET attempts = attempts + 1, next_at = ?"
-                " WHERE event_id = ?",
-                [(now + lease, event["event_id"]) for event in events],
+    def due(self, now, max_attempts):
+        """Unacked reports whose next attempt is due, oldest first."""
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT event_id, case_id, attempts FROM outbox"
+                " WHERE acked_at IS NULL AND attempts < ? AND next_at <= ?"
+                " ORDER BY created_at, event_id",
+                (max_attempts, now),
             )
-        return events
+        ]
 
     def ack(self, event_id):
-        """Idempotent: the first acknowledgement time is kept."""
         self.db.execute(
-            "UPDATE outbox SET acked_at = COALESCE(acked_at, ?), error = NULL"
-            " WHERE event_id = ?",
+            "UPDATE outbox SET acked_at = ?, error = NULL WHERE event_id = ?",
             (time.time(), event_id),
         )
 
-    def retry(self, event_id, at, error):
+    def failed(self, event_id, at, error):
         self.db.execute(
-            "UPDATE outbox SET next_at = ?, error = ?"
-            " WHERE event_id = ? AND acked_at IS NULL",
+            "UPDATE outbox SET attempts = attempts + 1, next_at = ?, error = ?"
+            " WHERE event_id = ?",
             (at, error, event_id),
         )
 
-    def outbox(self):
+    def outbox(self, pending=False):
+        where = " WHERE acked_at IS NULL" if pending else ""
         return [
             dict(row)
-            for row in self.db.execute("SELECT * FROM outbox ORDER BY created_at")
+            for row in self.db.execute(
+                f"SELECT * FROM outbox{where} ORDER BY created_at"
+            )
         ]
 
     def cases(self):
@@ -418,8 +391,9 @@ class SqliteCaseStore:
         return [
             dict(row)
             for row in self.db.execute(
-                "SELECT case_id, created_at, state, raised_at FROM cases"
-                " LEFT JOIN alerts USING (case_id) WHERE merged_into IS NULL"
-                " ORDER BY created_at, case_id"
+                "SELECT case_id, created_at, state, raised_at, (SELECT action FROM"
+                " decisions d WHERE d.case_id = cases.case_id ORDER BY decided_at DESC"
+                " LIMIT 1) AS decision FROM cases LEFT JOIN alerts USING (case_id)"
+                " WHERE merged_into IS NULL ORDER BY created_at, case_id"
             )
         ]

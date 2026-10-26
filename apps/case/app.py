@@ -1,10 +1,10 @@
-"""Analyst UI and JSON API for one bank's cases, with the outbox dispatcher running inside.
+"""Analyst UI and JSON API for one bank's cases, with the report dispatcher running inside.
 
     CASE_BANK=A CASE_DB=cases-a.db CASE_PUBLIC_KEYS=.secrets/public uv run python -m apps.case.app
 
 Settings (environment): CASE_BANK, CASE_DB, CASE_PUBLIC_KEYS, CASE_INTAKE_URL, PORT.
 Chain results arrive from the bank's privacy node on POST /results. Alerts and merges
-are delivered in-process to this UI's inbox; reports go to the mock intake (intake.py).
+go straight to this UI's inbox; reports go to the mock intake (intake.py).
 """
 
 import os
@@ -12,7 +12,6 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 from typing import Annotated
@@ -22,42 +21,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from apps.case.case_store import DECISIONS, STATES, SqliteCaseStore, neighbours
+from apps.case.case_store import SqliteCaseStore, neighbours
 from apps.case.evidence import load_public_keys, verify_result
-from apps.case.outbox import LINK_FIELDS, route, run, webhook
-from apps.case.report import TemplateClient, draft_report
+from apps.case.outbox import run, webhook
+from apps.case.report import TemplateClient, draft_report, when
 from apps.privacy_node import privacy_node_pb2 as pb
-from apps.security.security import check_peer_payload
 
-ACTIONS = dict(
-    zip(
-        DECISIONS,
-        (
-            "Continue monitoring",
-            "Suspend outgoing transactions",
-            "Freeze accounts",
-            "Report to authorities",
-        ),
-    )
-)
-# Everything a report may carry to the intake; checked before it leaves the bank.
-# DEPENDS ON Role 4 (security and privacy): review of these intake report fields
-# (security.md open item "Destination and inputs for the AI report"). Status: pending.
-REPORT_FIELDS = {"event_id", "kind", "case_id", "state", "merged_into", "raised_at"}
-REPORT_FIELDS |= {"links", "bank", *LINK_FIELDS}
+ACTIONS = {  # keys are case_store.DECISIONS
+    "monitor": "Continue monitoring",
+    "suspend": "Suspend outgoing transactions",
+    "freeze": "Freeze accounts",
+    "report": "Report to authorities",
+}
 STYLE = """<style>
 body { font: 15px system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem }
 table { border-collapse: collapse; width: 100% } td, th { border-bottom: 1px solid #ccc;
 padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color: #666 }
 </style>"""
-
-
-def when(timestamp):
-    if timestamp is None:
-        return "-"
-    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def short(token):
@@ -77,24 +59,21 @@ def page(bank, title, body):
 def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
     """interval=None skips the background dispatcher (tests call dispatch directly)."""
     client = client or TemplateClient()
+    send = webhook(intake_url)
+    local = threading.local()
 
-    def send_report(msg):
-        msg = msg | {"bank": bank}
-        check_peer_payload(msg, REPORT_FIELDS)
-        webhook(intake_url)(msg)
-
-    def senders(store):
-        return route(
-            {"alert": store.receive, "merged": store.receive, "report": send_report}
-        )
+    def store():
+        """One connection per thread: a SQLite connection belongs to its thread."""
+        if not hasattr(local, "store"):
+            local.store = SqliteCaseStore(db)
+        return local.store
 
     @asynccontextmanager
     async def lifespan(app):
         stop = threading.Event()
 
         def dispatcher():
-            store = SqliteCaseStore(db)  # opened in the thread that uses it
-            run(store, senders(store), stop, None, interval)
+            run(store(), send, bank, stop, interval)  # this thread's own connection
 
         if interval is not None:
             threading.Thread(target=dispatcher, daemon=True).start()
@@ -102,32 +81,33 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
         stop.set()
 
     app = FastAPI(title=f"Bank {bank} cases", lifespan=lifespan)
-    app.state.senders = senders
+
+    @app.exception_handler(ValueError)
+    async def invalid(request, exc):  # the store rejects unknown actions and states
+        return JSONResponse({"detail": str(exc)}, 422)
 
     def load(case_id):
-        case = SqliteCaseStore(db).get(case_id)
+        case = store().get(case_id)
         if case is None:
             raise HTTPException(404, "No such case")
         return case
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        store = SqliteCaseStore(db)
         rows = "".join(
             f"<tr><td><a href='/cases/{c['case_id']}'><code>{c['case_id'][:16]}</code></a>"
             f"<td>{c['state']}<td>{'ALERT ' + when(c['raised_at']) if c['raised_at'] else '-'}"
-            f"<td>{ACTIONS[d[-1][0]] if (d := store.get(c['case_id'])['decisions']) else '-'}"
-            for c in reversed(store.cases())
+            f"<td>{ACTIONS[c['decision']] if c['decision'] else '-'}"
+            for c in reversed(store().cases())
         )
         inbox = "".join(
-            f"<li>{when(n['received_at'])}: {escape(n['kind'])} "
+            f"<li>{when(n['created_at'])}: {escape(n['kind'])} "
             f"<a href='/cases/{escape(n['case_id'])}'><code>{escape(n['case_id'][:16])}</code></a>"
-            for n in store.notifications()
+            for n in store().notifications()
         )
         pending = "".join(
             f"<li>{escape(e['event_id'][:24])}: {e['attempts']} attempts, {escape(e['error'] or 'waiting')}"
-            for e in store.outbox()
-            if e["acked_at"] is None
+            for e in store().outbox(pending=True)
         )
         return page(
             bank,
@@ -167,7 +147,7 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
                 if r["status"] == "draft"
                 else ""
             )
-            for r in SqliteCaseStore(db).reports(case_id)
+            for r in store().reports(case_id)
         )
         buttons = "".join(
             f"<button name=action value={a}>{label}</button> "
@@ -200,22 +180,17 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
     @app.post("/cases/{case_id}/decision")
     def decide(case_id: str, action: Annotated[str, Form()]):
         load(case_id)
-        if action not in ACTIONS:
-            raise HTTPException(422, "Unknown action")
-        SqliteCaseStore(db).decide(case_id, action)
+        store().decide(case_id, action)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
     @app.post("/cases/{case_id}/report")
     def generate(case_id: str):
-        load(case_id)
-        draft_report(SqliteCaseStore(db), case_id, client)
+        draft_report(store(), load(case_id), client)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
     @app.post("/cases/{case_id}/reports/{report_id}/review")
     def review(case_id: str, report_id: int, status: Annotated[str, Form()]):
-        if status not in ("approved", "rejected"):
-            raise HTTPException(422, "Unknown review")
-        if not SqliteCaseStore(db).review_report(report_id, status):
+        if not store().review_report(case_id, report_id, status):
             raise HTTPException(409, "Report is not a pending draft")
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
@@ -228,19 +203,14 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
         Status: pending.
         """
         result = pb.ChainResult.FromString(await request.body())
-        if result.state not in STATES or not verify_result(result, public_keys, bank):
+        if not verify_result(result, public_keys, bank):
             raise HTTPException(422, "Invalid chain result")
-        SqliteCaseStore(db).record(result)
+        store().record(result)  # raises ValueError (422) unless confirmed or partial
         return {"chain_digest": result.chain_digest}
-
-    @app.post("/notifications", status_code=204)
-    def notifications(message: dict):
-        """Webhook receiver for another dispatcher; deduplicates on event_id."""
-        SqliteCaseStore(db).receive(message)
 
     @app.get("/api/cases")
     def api_cases():
-        return SqliteCaseStore(db).cases()
+        return store().cases()
 
     @app.get("/api/cases/{case_id}")
     def api_case(case_id: str):

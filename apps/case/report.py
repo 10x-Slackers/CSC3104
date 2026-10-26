@@ -6,7 +6,6 @@ Decision: docs/decisions/0001-template-only-report.md.
 """
 
 from datetime import UTC, datetime
-from typing import Protocol
 
 from apps.case.case_store import neighbours
 from apps.security.security import check_peer_payload
@@ -34,15 +33,9 @@ def report_input(case):
     return data
 
 
-class ReportClient(Protocol):
-    source: str  # stored with every report, e.g. "template"
-
-    def draft(self, data: dict) -> str: ...
-
-
-def when(timestamp):
+def when(timestamp, none="-"):
     if timestamp is None:
-        return "not raised"
+        return none
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
@@ -61,7 +54,7 @@ class TemplateClient:
             "",
             f"Case: {data['case_id']}",
             f"State: {data['state']}",
-            f"Alert raised: {when(data['raised_at'])}",
+            f"Alert raised: {when(data['raised_at'], 'not raised')}",
         ]
         if data["merged_into"]:
             lines.append(f"Merged into case: {data['merged_into']}")
@@ -105,7 +98,10 @@ class TemplateClient:
         return "\n".join(lines)
 
 
-def draft_report(store, case_id, client):
-    """Filter, draft and store as a draft; return the new report ID."""
-    data = report_input(store.get(case_id))
-    return store.save_report(case_id, client.source, client.draft(data))
+def draft_report(store, case, client):
+    """Filter, draft and store as a draft; return the new report ID.
+
+    A client has a `source` label (stored with the report) and `draft(data) -> str`.
+    """
+    data = report_input(case)
+    return store.save_report(case["case_id"], client.source, client.draft(data))

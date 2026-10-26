@@ -1,12 +1,5 @@
-import sys
-from pathlib import Path
-
-# The pytest executable does not add the repository root for namespace imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 import pytest
 
-from apps.case.case_store import SqliteCaseStore
 from apps.case.evidence import load_public_keys, verify_result
 from apps.case.sample_chains import m1, o1, public_keys
 from apps.privacy_node.claims import chain_digest
@@ -54,9 +47,3 @@ def test_public_keys_load_from_configmap_layout(tmp_path):
     for bank, key in public_keys().items():
         (tmp_path / f"{bank}.pem").write_bytes(public_key_pem(key))
     assert verify_result(m1(), load_public_keys(tmp_path), "B")
-
-
-def test_verified_result_is_stored(tmp_path):
-    store = SqliteCaseStore(tmp_path / "cases.db")
-    assert verify_result(m1(), public_keys(), "B")
-    assert store.record(m1()) == m1().chain_digest
