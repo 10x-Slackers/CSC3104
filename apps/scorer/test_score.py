@@ -3,6 +3,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -10,9 +11,9 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
-from confluent_kafka import KafkaError, KafkaException
+from confluent_kafka import KafkaError, KafkaException, TopicPartition
 from score import Scorer, validate
-from stream import consume, ingest
+from stream import consume, ingest, require_full_replay
 from token_index import TokenIndex
 
 from apps.security.security import canonical_pair, derive_token
@@ -551,3 +552,86 @@ def test_package_imports_and_cli(module):
             capture_output=True,
             text=True,
         )
+
+
+@pytest.mark.parametrize(
+    "offset,low,partitions,accepted",
+    [
+        (-1001, 0, 1, True),
+        (0, 0, 1, True),
+        (15, 0, 1, False),
+        (-1001, 5, 1, False),
+        (-1001, 0, 2, False),
+    ],
+)
+def test_integrated_replay_assignment(offset, low, partitions, accepted):
+    consumer = Mock()
+    consumer.list_topics.return_value.topics = {
+        "bank-B-transactions": Mock(partitions=dict.fromkeys(range(partitions)))
+    }
+    consumer.get_watermark_offsets.return_value = (low, 15)
+    consumer.committed.return_value = [TopicPartition("bank-B-transactions", 0, offset)]
+    assignment = [TopicPartition("bank-B-transactions", 0)]
+    if accepted:
+        require_full_replay(consumer, assignment)
+    else:
+        with pytest.raises(RuntimeError):
+            require_full_replay(consumer, assignment)
+
+
+def test_restart_guard_stops_before_processing():
+    consumer = Mock()
+    consumer.list_topics.return_value.topics = {
+        "bank-B-transactions": Mock(partitions={0: None})
+    }
+    consumer.get_watermark_offsets.return_value = (0, 15)
+    consumer.committed.return_value = [TopicPartition("bank-B-transactions", 0, 15)]
+
+    def subscribe(topics, on_assign):
+        on_assign(consumer, [TopicPartition(topics[0], 0)])
+
+    consumer.subscribe.side_effect = subscribe
+    with pytest.raises(RuntimeError, match="fresh group"):
+        consume(consumer, Scorer("B"), require_replay=True)
+    consumer.poll.assert_not_called()
+    consumer.commit.assert_not_called()
+    consumer.close.assert_called_once()
+
+
+def test_shutdown_finishes_current_handoff():
+    stop = threading.Event()
+    consumer = Mock()
+    consumer.poll.return_value = message(event())
+    consumer.commit.return_value = []
+
+    def process(e):
+        stop.set()
+        return []
+
+    consume(
+        consumer, Scorer("B"), io.StringIO(), process_event=process, stop_event=stop
+    )
+    consumer.poll.assert_called_once()
+    consumer.commit.assert_called_once()
+    consumer.close.assert_called_once()
+
+
+def test_token_capacity_never_evicts(pair_key_paths):
+    index = TokenIndex(
+        "B", "k1", {("A", "B"): pair_key_paths["A", "B"]}, max_references=1
+    )
+    token = index.add(event())
+    assert index.add(event()) == token
+    consumer = Mock()
+    consumer.poll.side_effect = [
+        message(event()),
+        message(event("out", "out", 95, "09:05:00")),
+    ]
+    consumer.commit.return_value = []
+    with pytest.raises(RuntimeError, match="no records were evicted"):
+        consume(consumer, Scorer("B"), io.StringIO(), token_index=index)
+    assert len(index.lookup(("A", "B"), "k1", token)) == 1
+    assert consumer.commit.call_count == 1
+    consumer.close.assert_called_once()
+    with pytest.raises(ValueError, match="positive"):
+        TokenIndex("B", "k1", {("A", "B"): pair_key_paths["A", "B"]}, max_references=0)

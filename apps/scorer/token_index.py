@@ -5,10 +5,14 @@ from apps.security.security import canonical_pair, derive_token, load_pairwise_k
 
 
 class TokenIndex:
-    def __init__(self, bank, key_version, key_paths):
+    def __init__(self, bank, key_version, key_paths, max_references=None):
         if bank not in ("A", "B", "C"):
             raise ValueError("Invalid local bank")
         self.bank = bank
+        if max_references is not None and max_references < 1:
+            raise ValueError("Token reference limit must be positive")
+        self.max_references = max_references
+        self._reference_count = 0
         self.key_version = key_version
         self._keys = load_pairwise_keys(bank, key_paths)
         if not self._keys:
@@ -29,7 +33,17 @@ class TokenIndex:
         token = derive_token(e["payment_id"], *pair, self._keys[pair], self.key_version)
         scope = (pair, self.key_version, token)
         reference = (e["payment_id"], e["direction"], e["account"])
+        if reference in self._entries.get(scope, ()):
+            return token
+        if (
+            self.max_references is not None
+            and self._reference_count >= self.max_references
+        ):
+            raise RuntimeError(
+                "Token index reference limit reached; no records were evicted"
+            )
         self._entries.setdefault(scope, set()).add(reference)
+        self._reference_count += 1
         return token
 
     def lookup(self, bank_pair, key_version, token):

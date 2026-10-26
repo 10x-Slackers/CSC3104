@@ -8,12 +8,15 @@ Run one per bank, e.g.:
     --public-key A .secrets/public/A.pem --public-key B .secrets/public/B.pem \
     --public-key C .secrets/public/C.pem \
     --peer A localhost:50051 --peer C localhost:50053 --db .secrets/B.db --search
+
+For live Kafka state, replace --workload with --bootstrap-servers <brokers>
+and use a fresh --group to rebuild state. --search starts live candidates.
 """
 
 import argparse
 import hashlib
+import signal
 import threading
-import time
 import traceback
 import uuid
 from concurrent import futures
@@ -35,6 +38,7 @@ from apps.privacy_node.claims import (
 )
 from apps.privacy_node.local_state import LocalBank
 from apps.privacy_node.store import Store
+from apps.scorer.stream import consume
 from apps.security.security import load_signing_key, load_verification_key, sign
 
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
@@ -64,11 +68,25 @@ def failure_state(error):
 
 
 class Node(pb_grpc.PrivacyNodeServicer):
-    def __init__(self, local, store, signing_key, public_keys, peers, key_version):
+    def __init__(
+        self,
+        local,
+        store,
+        signing_key,
+        public_keys,
+        peers,
+        key_version,
+        ingestion_grace_seconds=0,
+    ):
         self.bank = local.bank
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
         self.peers, self.key_version = peers, key_version
+        self._started_detections = set()
+        if ingestion_grace_seconds < 0:
+            raise ValueError("Ingestion grace must be nonnegative")
+        self.ingestion_grace_seconds = ingestion_grace_seconds
+        self._ingestion_deadlines = {}
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -210,6 +228,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """Trace both ways from a local detection, assemble and store for delivery."""
         search_id = hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode())
         search_id = search_id.hexdigest()
+        retry_until = self._ingestion_deadlines.setdefault(
+            search_id, now() + timedelta(seconds=self.ingestion_grace_seconds)
+        )
         deadline = now() + timedelta(seconds=SEARCH_SECONDS)
         in_ref = self.local.refs[incoming, "in"]
         out_ref = self.local.refs[outgoing, "out"]
@@ -229,6 +250,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         valid = valid_chain(claims, self.public_keys)
         cut = pb.CONFIRMED if complete(claims) else pb.PARTIAL
         state = worst(down_state, up_state, cut) if valid else pb.INVALID_CLAIM
+        if state == pb.NO_MATCH and now() < retry_until:
+            # Fresh query IDs let delayed ingestion be checked again.
+            state = pb.PENDING
         result = pb.ChainResult(
             chain_digest=chain_digest(claims) if valid else "",
             sender=self.bank,
@@ -249,21 +273,43 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.deliver_pending()
         return results
 
+    def search_new_detections(self, stop=None):
+        """Start each live candidate once; housekeeping owns pending retries."""
+        results = []
+        for detection in self.local.detections:
+            if stop is not None and stop.is_set():
+                break
+            identity = detection["detection_id"]
+            if identity not in self._started_detections:
+                results.append(
+                    self.search(
+                        detection["incoming_payment_id"],
+                        detection["outgoing_payment_id"],
+                    )
+                )
+                self._started_detections.add(identity)
+        self.deliver_pending(stop=stop)
+        return results
+
     # ---- housekeeping ---------------------------------------------------
 
-    def deliver_pending(self):
+    def deliver_pending(self, stop=None):
         for bank, result in self.store.pending_deliveries():
+            if stop is not None and stop.is_set():
+                break
             try:
                 self.call(bank, "Deliver", result, now() + timedelta(seconds=5))
                 self.store.ack(result.chain_digest, bank)
             except grpc.RpcError:
                 pass  # stays in the outbox until the bank is back
 
-    def housekeeping(self):
+    def housekeeping(self, stop=None):
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
         for incoming, outgoing in self.store.unfinished_searches():
+            if stop is not None and stop.is_set():
+                break
             self.search(incoming, outgoing)
-        self.deliver_pending()
+        self.deliver_pending(stop=stop)
 
 
 def serve(node, port=0):
@@ -278,7 +324,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bank", required=True, choices="ABC")
     parser.add_argument("--port", type=int, default=50051)
-    parser.add_argument("--workload", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--workload", help="standalone CSV initialization")
+    source.add_argument("--bootstrap-servers", help="integrated bank-local Kafka mode")
+    parser.add_argument(
+        "--group", help="Kafka group; use a fresh group to rebuild state"
+    )
+    parser.add_argument("--min-ratio", default="0.90")
+    parser.add_argument("--max-ratio", default="0.98")
+    parser.add_argument("--min-delay", type=float, default=60)
+    parser.add_argument("--window", type=float, default=1800)
+    parser.add_argument("--max-events", type=int, default=10000)
+    parser.add_argument("--max-token-references", type=int)
     parser.add_argument("--key-version", default="k1")
     parser.add_argument("--pairwise-key", nargs=2, action="append", default=[])
     parser.add_argument("--signing-key", required=True)
@@ -287,9 +344,33 @@ def main():
     parser.add_argument("--db", default=":memory:")
     parser.add_argument("--search", action="store_true", help="trace local detections")
     parser.add_argument("--housekeeping-seconds", type=float, default=10)
+    parser.add_argument(
+        "--ingestion-grace-seconds",
+        type=float,
+        default=0,
+        help="retry NO_MATCH for this bounded period; default: disabled",
+    )
     args = parser.parse_args()
-    keys = {(args.bank, peer): path for peer, path in args.pairwise_key}
-    local = LocalBank.from_workload(args.workload, args.bank, args.key_version, keys)
+    if args.housekeeping_seconds <= 0 or args.ingestion_grace_seconds < 0:
+        parser.error(
+            "Housekeeping interval must be positive and ingestion grace nonnegative"
+        )
+    keys = {}
+    for peer, path in args.pairwise_key:
+        if (args.bank, peer) in keys:
+            parser.error("Duplicate peer key configuration")
+        keys[args.bank, peer] = path
+    rule = {
+        name: getattr(args, name)
+        for name in ("min_ratio", "max_ratio", "min_delay", "window", "max_events")
+    }
+    rule["max_token_references"] = args.max_token_references
+    if args.bootstrap_servers:
+        local = LocalBank(args.bank, args.key_version, keys, **rule)
+    else:
+        local = LocalBank.from_workload(
+            args.workload, args.bank, args.key_version, keys, **rule
+        )
     node = Node(
         local,
         Store(args.db),
@@ -297,23 +378,60 @@ def main():
         {bank: load_verification_key(path) for bank, path in args.public_key},
         dict(args.peer),
         args.key_version,
+        ingestion_grace_seconds=args.ingestion_grace_seconds,
     )
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
-    if args.search:
+    if args.search and args.workload:
         for result in node.search_detections():
             print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
 
+    stop = threading.Event()
+    handlers = {
+        sig: signal.signal(sig, lambda *_: stop.set())
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
+
     def loop():
-        while True:
-            time.sleep(args.housekeeping_seconds)
+        while not stop.wait(args.housekeeping_seconds):
             try:
-                node.housekeeping()
+                if args.search and args.bootstrap_servers:
+                    node.search_new_detections(stop=stop)
+                node.housekeeping(stop=stop)
             except Exception:  # noqa: BLE001 - log and retry on the next pass
                 traceback.print_exc()
 
-    threading.Thread(target=loop, daemon=True).start()
-    server.wait_for_termination()
+    worker = threading.Thread(target=loop, daemon=True)
+    worker.start()
+    try:
+        if args.bootstrap_servers:
+            from confluent_kafka import Consumer
+
+            consumer = Consumer(
+                {
+                    "bootstrap.servers": args.bootstrap_servers,
+                    "group.id": args.group or f"privacy-node-{args.bank}",
+                    "auto.offset.reset": "earliest",
+                    "enable.auto.commit": False,
+                }
+            )
+            consume(
+                consumer,
+                local.scorer,
+                process_event=local.process,
+                stop_event=stop,
+                require_replay=True,
+            )
+        else:
+            while not stop.is_set():
+                if not server.wait_for_termination(timeout=1):
+                    break
+    finally:
+        stop.set()
+        server.stop(0)
+        worker.join(timeout=SEARCH_SECONDS + 5)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

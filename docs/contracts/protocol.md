@@ -136,7 +136,7 @@ Each bank stores 3 chains (2 confirmed, 1 partial) after all searches.
 ## Open
 
 - [ ] Caleb: review the claim bytes, `ALLOWED_FIELDS` and the `chain_id` → `chain_digest` rename.
-- [ ] Cindy: confirm `BRANCH_CAP = 1` and `HOP_LIMIT = 4`. Search handoff: the node currently rebuilds the scorer and token index from the bank's event file (`local_state.py`). For M3, the scorer should write local links and token entries to PostgreSQL and the node should read them.
+- [ ] Cindy: confirm `BRANCH_CAP = 1` and `HOP_LIMIT = 4`. Kafka mode now shares Role 2's live scorer/token index in the privacy-node process; CSV initialization remains standalone. See [streaming.md](streaming.md). Durable shared state and multi-replica recovery still need agreement with Role 6.
 - [ ] Jia Rui: adopt `chain_digest` as case identity, or propose another. Decide how overlapping **partial** chains merge: over-limit `v1` gives one digest on the fixture, but a chain longer than 6 transfers would still give different windows from different starts.
 - [ ] mTLS (M3): use `privacy-node-tls`, map the client certificate's SAN to a bank, and reject requests whose `sender` doesn't match. Today `sender` is trusted from the message.
 - [ ] Move `store.py` to PostgreSQL, then test two replicas per bank.
