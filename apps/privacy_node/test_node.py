@@ -1,6 +1,13 @@
+import csv
+import io
+import json
+import signal
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 # The pytest executable does not add the repository root for namespace imports.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -8,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import grpc
 import pytest
 
+from apps.case.case_store import SqliteCaseStore
+from apps.case.evidence import verify_result
+from apps.privacy_node import node as node_module
 from apps.privacy_node import privacy_node_pb2 as pb
 from apps.privacy_node.claims import (
     ALLOWED_FIELDS,
@@ -19,10 +29,15 @@ from apps.privacy_node.claims import (
 from apps.privacy_node.demo import start_banks
 from apps.privacy_node.keys import make_keys, pair_paths
 from apps.privacy_node.local_state import LocalBank
-from apps.privacy_node.node import HOP_LIMIT, now, serve
+from apps.privacy_node.node import HOP_LIMIT, Node, now, serve
 from apps.privacy_node.store import Store
 from apps.scorer.score import Scorer
-from apps.security.security import check_peer_payload
+from apps.scorer.stream import consume
+from apps.security.security import (
+    check_peer_payload,
+    load_signing_key,
+    load_verification_key,
+)
 
 TINY = Path(__file__).parents[1] / "dataset/fixtures/tiny"
 
@@ -251,3 +266,383 @@ def test_messages_pass_allowlist_and_reject_forbidden_fields():
     check_payload(pb.TraceRequest(query_id="q", sender="A"))
     with pytest.raises(ValueError):
         check_peer_payload({"amount": 1}, ALLOWED_FIELDS)
+
+
+def kafka_message(event):
+    return Mock(
+        **{
+            "value.return_value": json.dumps(event).encode(),
+            "key.return_value": event["account"].encode(),
+            "topic.return_value": f"bank-{event['bank']}-transactions",
+            "error.return_value": None,
+        }
+    )
+
+
+def feed(local, events):
+    consumer = Mock()
+    consumer.commit.return_value = []
+    consumer.poll.side_effect = [*[kafka_message(e) for e in events], KeyboardInterrupt]
+    output = io.StringIO()
+    with pytest.raises(KeyboardInterrupt):
+        consume(consumer, local.scorer, output, process_event=local.process)
+    assert consumer.commit.call_count == len(events)
+    consumer.close.assert_called_once()
+    return [json.loads(line) for line in output.getvalue().splitlines()]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_kafka_state_drives_real_peer_search(tmp_path, monkeypatch, reverse):
+    events = {}
+    for bank in "ABC":
+        with (TINY / f"bank_{bank}.csv").open() as source:
+            events[bank] = list(csv.DictReader(source))
+    monkeypatch.setattr(
+        LocalBank,
+        "from_workload",
+        Mock(side_effect=AssertionError("CSV reconstruction")),
+    )
+    make_keys(tmp_path)
+    public = {b: load_verification_key(tmp_path / f"public/{b}.pem") for b in "ABC"}
+    nodes, servers, ports = {}, {}, {}
+    try:
+        for bank in "ABC":
+            local = LocalBank(bank, "k1", pair_paths(tmp_path, bank))
+            nodes[bank] = Node(
+                local,
+                Store(),
+                load_signing_key(tmp_path / f"signing/{bank}.pem"),
+                public,
+                {},
+                "k1",
+            )
+            servers[bank], ports[bank] = serve(nodes[bank])
+        for bank, node in nodes.items():
+            node.peers.update(
+                {b: f"localhost:{port}" for b, port in ports.items() if b != bank}
+            )
+            ordered = events[bank][::-1] if reverse else events[bank]
+            expected_scorer = Scorer(bank)
+            expected = [d for e in ordered for d in expected_scorer.process(e)]
+            actual = feed(node.local, [e for e in ordered for _ in range(2)])
+            assert actual == expected == node.local.detections
+            for e in ordered:
+                if e["counterparty_bank"] != bank:
+                    ref = node.local.refs[e["payment_id"], e["direction"]]
+                    assert (
+                        node.local.lookup(ref.pair, "k1", ref.token, e["direction"])
+                        == e["payment_id"]
+                    )
+            with pytest.raises(ValueError, match="unrelated"):
+                node.local.lookup(
+                    "-".join(b for b in "ABC" if b != bank), "k1", "token", "in"
+                )
+        results = {
+            (b, d["incoming_payment_id"], d["outgoing_payment_id"]): r
+            for b, node in nodes.items()
+            for d, r in zip(node.local.detections, node.search_new_detections())
+        }
+        assert len(results) == 8
+        assert results["B", "p06", "p07"].state == pb.CONFIRMED
+        assert results["B", "p10", "p11"].state == pb.CONFIRMED
+        assert results["C", "p11", "p12"].state == pb.CONFIRMED
+        assert all(
+            r.state == pb.PARTIAL
+            for k, r in results.items()
+            if k[1] in {"p15", "p16", "p17", "p18", "p19"}
+        )
+        for result in results.values():
+            check_payload(result)
+            assert b"B-m1" not in result.SerializeToString()
+        for bank, node in nodes.items():
+            identities = {d["detection_id"] for d in node.local.detections}
+            feed(node.local, events[bank])
+            assert {d["detection_id"] for d in node.local.detections} == identities
+            assert node.search_new_detections() == []
+    finally:
+        for server in servers.values():
+            server.stop(0)
+
+
+@pytest.mark.parametrize("failure", ["handoff", "output", "commit", "missing_key"])
+def test_live_processing_failure_boundaries(tmp_path, failure):
+    make_keys(tmp_path)
+    paths = pair_paths(tmp_path, "B")
+    if failure == "missing_key":
+        paths = {("B", "C"): paths["B", "C"]}
+    local = LocalBank("B", "k1", paths)
+    with (TINY / "bank_B.csv").open() as source:
+        events = [
+            e for e in csv.DictReader(source) if e["payment_id"] in ("p06", "p07")
+        ]
+    consumer = Mock()
+    consumer.poll.side_effect = [
+        *[kafka_message(e) for e in events],
+        AssertionError("continued after failure"),
+    ]
+    consumer.commit.side_effect = (
+        [[], RuntimeError("commit failed")] if failure == "commit" else None
+    )
+    consumer.commit.return_value = []
+    output = Mock()
+    if failure == "output":
+        output.flush.side_effect = [None, OSError("output failed")]
+
+    def process(event):
+        results = local.process(event)
+        if results and failure == "handoff":
+            raise RuntimeError("handoff failed")
+        return results
+
+    with pytest.raises((RuntimeError, OSError, ValueError)):
+        consume(consumer, local.scorer, output, process_event=process)
+    assert consumer.commit.call_count == {"missing_key": 0, "commit": 2}.get(failure, 1)
+    consumer.close.assert_called_once()
+    if failure != "missing_key":
+        rebuilt = LocalBank("B", "k1", paths)
+        feed(rebuilt, events)
+        assert rebuilt.detections == local.detections
+
+
+def test_kafka_cli_does_not_load_workload(tmp_path, monkeypatch):
+    make_keys(tmp_path)
+    monkeypatch.setattr(
+        LocalBank,
+        "from_workload",
+        Mock(side_effect=AssertionError("CSV reconstruction")),
+    )
+    with (TINY / "bank_B.csv").open() as source:
+        events = list(csv.DictReader(source))
+    consumer = Mock()
+    consumer.commit.return_value = []
+    finished = threading.Event()
+    searches = []
+
+    def search(incoming, outgoing):
+        searches.append((incoming, outgoing))
+        if len(searches) == 4:
+            finished.set()
+        return pb.ChainResult(state=pb.CONFIRMED)
+
+    monkeypatch.setattr(Node, "search", staticmethod(search))
+    messages = iter(kafka_message(e) for e in events)
+
+    def poll(timeout):
+        try:
+            return next(messages)
+        except StopIteration:
+            assert finished.wait(2), "live searches did not start"
+            raise RuntimeError("end of test") from None
+
+    consumer.poll.side_effect = poll
+    constructor = Mock(return_value=consumer)
+    monkeypatch.setattr("confluent_kafka.Consumer", constructor)
+    nodes = []
+    server = Mock()
+
+    def capture(node, port):
+        nodes.append(node)
+        return server, port
+
+    monkeypatch.setattr(node_module, "serve", capture)
+    args = [
+        "node",
+        "--bank",
+        "B",
+        "--bootstrap-servers",
+        "test-broker:9092",
+        "--group",
+        "fresh-bank-B",
+        "--search",
+        "--housekeeping-seconds",
+        "0.01",
+        "--signing-key",
+        str(tmp_path / "signing/B.pem"),
+    ]
+    for (_, peer), path in pair_paths(tmp_path, "B").items():
+        args += ["--pairwise-key", peer, str(path)]
+    monkeypatch.setattr(sys, "argv", args)
+    with pytest.raises(RuntimeError, match="end of test"):
+        node_module.main()
+    assert len(nodes[0].local.detections) == 4
+    assert len(nodes[0].local.refs) == 13
+    assert consumer.commit.call_count == 15
+    assert set(searches) == {
+        ("p06", "p07"),
+        ("p10", "p11"),
+        ("p15", "p16"),
+        ("p18", "p19"),
+    }
+    assert constructor.call_args.args[0]["enable.auto.commit"] is False
+    assert constructor.call_args.args[0]["group.id"] == "fresh-bank-B"
+    server.stop.assert_called_once_with(0)
+
+
+def fixture_rows(bank):
+    with (TINY / f"bank_{bank}.csv").open() as source:
+        return list(csv.DictReader(source))
+
+
+def delay_c(nodes, key_dir):
+    nodes["B"].local = LocalBank(
+        "B",
+        "k1",
+        pair_paths(key_dir, "B"),
+        [e for e in fixture_rows("B") if e["payment_id"] in ("p06", "p07")],
+    )
+    nodes["C"].local = LocalBank("C", "k1", pair_paths(key_dir, "C"))
+
+
+def test_delayed_peer_without_grace_stays_final(banks, tmp_path):
+    nodes, _ = banks
+    delay_c(nodes, tmp_path)
+    assert nodes["B"].search_new_detections()[0].state == pb.NO_MATCH
+    feed(nodes["C"].local, [e for e in fixture_rows("C") if e["payment_id"] == "p07"])
+    nodes["B"].housekeeping()
+    assert nodes["B"].search_new_detections() == []
+    assert nodes["B"].store.chains() == []
+    assert nodes["B"].search("p06", "p07").state == pb.CONFIRMED
+
+
+@pytest.mark.parametrize("arrives", [False, True])
+def test_bounded_delayed_peer_retry(banks, tmp_path, monkeypatch, arrives):
+    nodes, _ = banks
+    delay_c(nodes, tmp_path)
+    bank = nodes["B"]
+    bank.ingestion_grace_seconds = 5
+    clock = [now()]
+    monkeypatch.setattr(node_module, "now", lambda: clock[0])
+    assert bank.search_new_detections()[0].state == pb.PENDING
+    assert bank.store.unfinished_searches() == [("p06", "p07")]
+    if arrives:
+        feed(
+            nodes["C"].local, [e for e in fixture_rows("C") if e["payment_id"] == "p07"]
+        )
+        clock[0] += timedelta(seconds=1)
+    else:
+        clock[0] += timedelta(seconds=6)
+    bank.housekeeping()
+    assert bank.store.unfinished_searches() == []
+    expected = pb.CONFIRMED if arrives else pb.NO_MATCH
+    assert bank.store._run("SELECT state FROM searches") == [(expected,)]
+    if arrives:
+        assert bank.store.chains()[0].state == pb.CONFIRMED
+    else:
+        assert bank.store.chains() == []
+        monkeypatch.setattr(
+            bank, "search", Mock(side_effect=AssertionError("unbounded retry"))
+        )
+        bank.housekeeping()
+
+
+def test_replay_rebuilds_state_and_repeated_result_alerts_once(banks, tmp_path):
+    nodes, _ = banks
+    old = nodes["B"]
+    path = tmp_path / "protocol.db"
+    old.store = Store(path)
+    first = old.search("p06", "p07")
+    old_ref = old.local.refs["p06", "in"]
+    restarted = Node(
+        LocalBank("B", "k1", pair_paths(tmp_path, "B")),
+        Store(path),
+        old.signing_key,
+        old.public_keys,
+        old.peers,
+        "k1",
+    )
+    assert restarted.local.detections == []
+    assert restarted.local.lookup(old_ref.pair, "k1", old_ref.token, "in") is None
+    assert restarted.store.chains()[0].chain_digest == first.chain_digest
+    rows = fixture_rows("B")
+    feed(restarted.local, [e for e in rows for _ in range(2)])
+    assert restarted.local.detections == old.local.detections
+    assert restarted.local.lookup(old_ref.pair, "k1", old_ref.token, "in") == "p06"
+    replayed = restarted.search("p06", "p07")
+    assert first.chain_digest == replayed.chain_digest
+    case = SqliteCaseStore(tmp_path / "cases.db")
+    for result in (first, replayed, first):
+        assert verify_result(result, old.public_keys, "B")
+        case.record(result)
+    assert len(case.cases()) == len(case.notifications()) == 1
+    assert case.cases()[0]["raised_at"] is not None
+
+
+def test_concurrent_state_reads_and_old_token_retention(tmp_path):
+    make_keys(tmp_path)
+    local = LocalBank("B", "k1", pair_paths(tmp_path, "B"))
+    rows = fixture_rows("B")
+
+    def write():
+        for _ in range(20):
+            for e in rows:
+                local.process(e)
+
+    def read():
+        for _ in range(200):
+            for d in local.detections:
+                ref = local.refs[d["incoming_payment_id"], "in"]
+                assert (
+                    local.lookup(ref.pair, "k1", ref.token, "in")
+                    == d["incoming_payment_id"]
+                )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(write), executor.submit(read)]
+        for future in futures:
+            future.result()
+    assert len(local.detections) == 4
+    ref = local.refs["p06", "in"]
+    local.process(
+        rows[3] | {"payment_id": "later", "event_time": "2022-09-06T12:00:00Z"}
+    )
+    assert local.lookup(ref.pair, "k1", ref.token, "in") == "p06"
+
+
+def test_kafka_cli_sigterm_closes_consumer(tmp_path, monkeypatch):
+    make_keys(tmp_path)
+    consumer = Mock()
+    consumer.poll.side_effect = lambda timeout: signal.raise_signal(signal.SIGTERM)
+    monkeypatch.setattr("confluent_kafka.Consumer", Mock(return_value=consumer))
+    server = Mock()
+    monkeypatch.setattr(node_module, "serve", lambda node, port: (server, port))
+    args = [
+        "node",
+        "--bank",
+        "B",
+        "--bootstrap-servers",
+        "broker:9092",
+        "--signing-key",
+        str(tmp_path / "signing/B.pem"),
+    ]
+    for (_, peer), path in pair_paths(tmp_path, "B").items():
+        args += ["--pairwise-key", peer, str(path)]
+    monkeypatch.setattr(sys, "argv", args)
+    previous = signal.getsignal(signal.SIGTERM)
+    node_module.main()
+    assert signal.getsignal(signal.SIGTERM) == previous
+    consumer.close.assert_called_once()
+    consumer.commit.assert_not_called()
+    server.stop.assert_called_once_with(0)
+
+
+@pytest.mark.parametrize("operation", ["search", "delivery"])
+def test_shutdown_stops_between_queued_operations(banks, monkeypatch, operation):
+    nodes, _ = banks
+    bank = nodes["B"]
+    bank.search("p06", "p07")  # queues deliveries to A and C
+    stop = threading.Event()
+    if operation == "search":
+        bank.store.put_search("first", "p06", "p07", pb.PENDING, "")
+        bank.store.put_search("second", "p10", "p11", pb.PENDING, "")
+        search = Mock(side_effect=lambda *_: stop.set())
+        monkeypatch.setattr(bank, "search", search)
+        bank.housekeeping(stop=stop)
+        search.assert_called_once()
+        assert len(bank.store.unfinished_searches()) == 2
+        assert len(bank.store.pending_deliveries()) == 2
+    else:
+        call = Mock(side_effect=lambda *_: stop.set())
+        monkeypatch.setattr(bank, "call", call)
+        bank.deliver_pending(stop=stop)
+        call.assert_called_once()
+        assert len(bank.store.pending_deliveries()) == 1

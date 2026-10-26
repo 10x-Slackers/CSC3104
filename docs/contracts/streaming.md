@@ -33,6 +33,16 @@ Restart/reassignment requires a full replay to rebuild state. Use a fresh
 existing committed offsets. Replay requires the original records to remain in
 Kafka. Output and commits are not atomic; repeated detections are possible.
 There is no durable state or multi-replica recovery; use one consumer per bank.
+Integrated mode rejects resumed committed offsets, history missing offset zero,
+and multi-partition topics at assignment. Use a fresh group to rebuild state;
+reassignment after commits also stops rather than trusting incomplete memory.
+This guard does not make replicas safe: an idle replica can still have no state
+while receiving gRPC traffic. Kafka lag alone is not readiness.
+
+SIGINT/SIGTERM finish the current local handoff/commit and close the consumer.
+The search worker stops between operations, leaving pending searches/deliveries
+for recovery; the server stops and the worker has a bounded shutdown wait.
+In-memory candidates and token/link state are not checkpointed.
 
 ## Detection rule
 
@@ -76,12 +86,44 @@ local `(payment_id, direction, account)` references. `lookup(pair, version, toke
 returns those references in deterministic order and rejects unrelated pairs.
 Duplicate replay adds no duplicate references. The index and lookup results stay
 bank-local; Role 3 must not send them as peer responses. There is currently no
-expiry or size cap: TODO, agree tracing/retry lifetime and retention with Roles
-3 and 6 before discarding records, including unmatched payments.
+expiry, and the default size is unlimited: TODO, agree tracing/retry lifetime
+and retention with Roles 3 and 6 before discarding records, including unmatched
+payments. Optional `--max-token-references` stops processing at capacity without
+evicting references or committing the failed event. Duplicate references remain
+acceptable at capacity. This is a fail-stop resource bound, not an expiry policy.
 
 ## Search handoff
 
-TODO: what the scorer passes to the privacy node to start a search.
+Integrated mode runs Role 2's consumer inside the privacy-node process. Use
+`uv run python -m apps.privacy_node.node --bank B --bootstrap-servers <brokers>
+--group <fresh-group> --search` with the existing pairwise, signing, public-key
+and peer options from [protocol.md](protocol.md). `--workload` selects the existing
+standalone CSV mode instead; the two input modes are mutually exclusive.
+
+The consumer calls `LocalBank.process(event)`, which uses the existing `Scorer`
+and `TokenIndex` under one local lock and publishes token references and local
+links before returning candidates. Kafka offsets commit only after this update
+and candidate output succeed. Integrated mode does not read CSV. The node's
+search loop starts each traceable candidate once per process using its stable
+`detection_id`; intra-bank legs have no peer token and are not searched. Existing
+gRPC messages contain tokens/claims, never these raw local references.
+
+Candidates and token/link state remain in memory, not in the node's SQLite
+protocol store. A crash after offset commit but before search requires full
+replay with a fresh group; there is no atomic durable handoff or exactly-once
+guarantee. Role 3's existing pending/timed-out search retries and result outbox
+are unchanged. TODO: agree persistence/recovery with Role 6 and a grace/retry
+policy when a peer has not ingested an event yet (currently `NO_MATCH`).
+
+Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
+`PENDING` until a fixed deadline from that search's first attempt. Retries use
+fresh query IDs; peer replies, claim verification and message schemas are
+unchanged. After the deadline, an absent record becomes final `NO_MATCH` and
+missing-record retries stop. Default `0` preserves existing behavior; enabling
+it and choosing a duration still require team agreement. Grace deadlines are
+in memory and restart on a new process. Existing unavailable-peer retries are
+separate and unchanged. This does not resolve a peer mistaking an ingested
+incoming transfer for an endpoint before its outgoing leg arrives.
 
 ## Scaling
 
