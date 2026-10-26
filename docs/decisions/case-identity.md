@@ -10,7 +10,7 @@ The workload split asks Role 5 to "define when a chain is complete enough to ale
 
 - **Case ID = Role 3's `chain_digest`** (`apps/privacy_node/claims.py`) of the first result that creates the case. Searches from different banks over the same transfers already share it (loop `o1` from B and C).
 - **Join on a shared transfer.** Each transfer, keyed `<pair>|<token>` like `claims.key`, belongs to one case. A result that shares any transfer with a case joins it; a result that spans several cases merges them into the oldest, which keeps exactly one alert. This answers Role 3's question: the five `v1` partials join one case, even though they have two digests.
-- **One alert per case at each bank:** `alerts.case_id` is the primary key, written in the same transaction as the claims, with a transactional outbox for notifications.
+- **One alert per case at each bank:** `alerts.case_id` is the primary key, written in the same transaction as the claims and its inbox entry; reports to the intake use a transactional outbox.
 - **Only `CONFIRMED` and `PARTIAL` results are accepted**, matching what the privacy node delivers. A case is confirmed once any of its results is, and is never downgraded. Only a confirmed case can alert.
 
 Code: `apps/case/case_store.py`, `apps/case/evidence.py`. Tests: `apps/case/test_case_store.py`, using real results from Role 3's nodes (`apps/case/sample_chains.py`).
@@ -27,4 +27,4 @@ Role numbers follow the workload split: 2 streaming and scoring, 3 privacy node 
 | Review of the report input fields | Role 4 (security and privacy) | pending | `apps/case/report.py:17` | `docs/contracts/security.md:26`, `:160` |
 | Review of the fields sent to the mock intake | Role 4 (security and privacy) | pending | `apps/case/app.py:46` | `docs/contracts/security.md:26`, `:160` |
 
-Resolved by Role 3's merged code (assumptions removed): claim fields, result fields, result states, signed claim bytes and claim verification now use `privacy_node.proto` and `claims.py`. The outbox retry and lease timings are a Role 5 choice, so no dependency is recorded for them.
+Resolved by Role 3's merged code (assumptions removed): claim fields, result fields, result states, signed claim bytes and claim verification now use `privacy_node.proto` and `claims.py`. The outbox retry timings are a Role 5 choice, so no dependency is recorded for them.

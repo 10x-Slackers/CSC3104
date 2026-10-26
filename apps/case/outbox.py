@@ -1,78 +1,51 @@
-"""Deliver outbox events at least once, with bounded retries and acknowledgements.
-
-    uv run apps/case/outbox.py cases.db --url http://analyst-ui:8000/notifications
+"""Deliver queued reports to the mock intake at least once, with bounded retries.
 
 A delivery counts as acknowledged when send() returns, e.g. a 2xx webhook response.
-A crash between send and ack resends after the lease, so receivers must deduplicate
-on event_id. Notifications carry only the event, case ID and state; reports to the
-mock intake add the chain's tokens and signing banks. Never accounts or amounts.
+A crash between send and ack resends it, so the intake deduplicates on event_id.
+Reports carry the case's tokens and signing banks; never accounts or amounts.
 """
 
-import argparse
 import json
 import os
-import sys
-import threading
 import time
 import urllib.request
-from dataclasses import dataclass
-from pathlib import Path
+
+from apps.case.report import report_input
+
+# Role 5 delivery timings (case.md); no other role sets them.
+MAX_ATTEMPTS = int(os.environ.get("CASE_NOTIFY_MAX_ATTEMPTS", "10"))
+BACKOFF = 1.0  # seconds before the first retry, doubling each attempt
+MAX_BACKOFF = 60.0
+MESSAGE_FIELDS = ("case_id", "state", "merged_into", "raised_at", "links")
 
 
-@dataclass(frozen=True)
-class RetryPolicy:
-    """Role 5 delivery timings (case.md); no other role sets them."""
-
-    max_attempts: int = int(os.environ.get("CASE_NOTIFY_MAX_ATTEMPTS", "10"))
-    backoff: float = 1.0  # seconds before the first retry, doubling each attempt
-    max_backoff: float = 60.0
-    lease: float = 30.0  # how long a send may take before another dispatcher retries
-
-
-LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token")
-
-
-def message(store, event):
-    """Notifications name the case only; a report also carries the chain evidence."""
-    case = store.get(event["case_id"])
-    msg = {
-        "event_id": event["event_id"],
-        "kind": event["kind"],
-        "case_id": event["case_id"],
-        "state": case["state"],
-        "merged_into": case["merged_into"],
+def message(store, event, bank):
+    """The report event: the case's allow-listed evidence, as of sending."""
+    data = report_input(store.get(event["case_id"]))
+    return {"event_id": event["event_id"], "bank": bank} | {
+        f: data[f] for f in MESSAGE_FIELDS
     }
-    if event["kind"] == "report":
-        links = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
-        msg |= {"raised_at": case["raised_at"], "links": links}
-    return msg
 
 
-def route(senders):
-    """Send each event kind to its own receiver."""
-    return lambda msg: senders[msg["kind"]](msg)
-
-
-def dispatch(store, send, policy=None, now=time.time):
-    """Send every due event once; return how many were acknowledged."""
-    policy = policy or RetryPolicy()
+def dispatch(store, send, bank, now=time.time):
+    """Send every due report once; return how many were acknowledged."""
     started, sent = now(), 0
-    for event in store.lease_due(started, policy.lease, policy.max_attempts):
+    for event in store.due(started, MAX_ATTEMPTS):
         try:
-            send(message(store, event))
-        except OSError as exc:  # network and HTTP errors; the class is the category
-            delay = min(policy.backoff * 2 ** event["attempts"], policy.max_backoff)
-            store.retry(event["event_id"], started + delay, type(exc).__name__)
+            send(message(store, event, bank))
+        except Exception as exc:  # noqa: BLE001 - any failure is retried; the class is the category
+            delay = min(BACKOFF * 2 ** event["attempts"], MAX_BACKOFF)
+            store.failed(event["event_id"], started + delay, type(exc).__name__)
             continue
         store.ack(event["event_id"])
         sent += 1
     return sent
 
 
-def run(store, send, stop, policy=None, interval=1.0):
+def run(store, send, bank, stop, interval=1.0):
     """Housekeeping loop for a background thread; set stop to end it."""
     while not stop.wait(interval):
-        dispatch(store, send, policy)
+        dispatch(store, send, bank)
 
 
 def webhook(url, timeout=10):
@@ -85,31 +58,3 @@ def webhook(url, timeout=10):
         urllib.request.urlopen(request, timeout=timeout).close()
 
     return send
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("db", type=Path, help="case store SQLite file")
-    parser.add_argument("--url", required=True, help="webhook receiving events")
-    parser.add_argument("--interval", type=float, default=1.0, help="seconds")
-    args = parser.parse_args()
-    # Direct script execution puts apps/case, rather than the repo root, on sys.path.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from apps.case.case_store import SqliteCaseStore
-
-    try:
-        run(
-            SqliteCaseStore(args.db),
-            webhook(args.url),
-            threading.Event(),
-            None,
-            args.interval,
-        )
-    except KeyboardInterrupt:
-        pass
-
-
-if __name__ == "__main__":
-    main()

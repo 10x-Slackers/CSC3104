@@ -1,14 +1,9 @@
 import json
 import logging
 import socket
-import sys
 import threading
 import time
 import urllib.request
-from pathlib import Path
-
-# The pytest executable does not add the repository root for namespace imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 import uvicorn
@@ -18,7 +13,7 @@ from test_evidence import forged
 from apps.case.app import create_app
 from apps.case.case_store import SqliteCaseStore
 from apps.case.intake import create_app as create_intake
-from apps.case.outbox import dispatch
+from apps.case.outbox import dispatch, message, webhook
 from apps.case.sample_chains import leaks, m1, o1, public_keys, v1
 from apps.privacy_node import privacy_node_pb2 as pb
 
@@ -98,22 +93,17 @@ def test_decisions_are_recorded(client, db):
 
 
 def test_alert_notification_shows_once(client, db):
-    store = SqliteCaseStore(db)
-    senders = client.app.state.senders(store)
-    assert dispatch(store, senders) == 1
-    message = {"event_id": f"alert:{m1_id(db)}", "kind": "alert", "case_id": m1_id(db)}
-    assert client.post("/notifications", json=message).status_code == 204  # redelivery
-    assert len(store.notifications()) == 1
+    SqliteCaseStore(db).record(m1())  # a redelivered result
     assert client.get("/").text.count(f"alert <a href='/cases/{m1_id(db)}'>") == 1
 
 
-def test_report_reaches_intake_once(db, intake):
-    client = TestClient(create_app(db, "B", intake, public_keys(), interval=None))
+def test_report_reaches_intake_once(client, db, intake):
     case_id = m1_id(db)
-    for _ in range(2):
-        client.post(f"/cases/{case_id}/decision", data={"action": "report"})
+    client.post(f"/cases/{case_id}/decision", data={"action": "report"})
     store = SqliteCaseStore(db)
-    assert dispatch(store, client.app.state.senders(store)) == 2  # alert and report
+    [event] = store.due(time.time(), 10)
+    webhook(intake)(message(store, event, "B"))  # sent, but the ack was lost
+    assert dispatch(store, webhook(intake), "B") == 1  # so it is sent again
     with urllib.request.urlopen(intake) as reply:
         received = json.load(reply)
     assert len(received) == 1
@@ -128,17 +118,18 @@ def test_report_reaches_intake_once(db, intake):
 def test_undelivered_report_is_shown(client, db):
     store = SqliteCaseStore(db)
     store.decide(m1_id(db), "report")
-    dispatch(store, client.app.state.senders(store))  # intake on port 9 is down
+    dispatch(store, webhook(DOWN), "B")  # intake on port 9 is down
     page = client.get("/").text
     assert f"report:{m1_id(db)}"[:24] in page and "URLError" in page
 
 
-def test_background_dispatcher_delivers_alerts(db):
-    with TestClient(create_app(db, "B", DOWN, public_keys(), 0.01)):
+def test_background_dispatcher_delivers_reports(db, intake):
+    with TestClient(create_app(db, "B", intake, public_keys(), 0.01)) as client:
+        client.post(f"/cases/{m1_id(db)}/decision", data={"action": "report"})
         deadline = time.time() + 5
-        while not SqliteCaseStore(db).notifications() and time.time() < deadline:
+        while SqliteCaseStore(db).outbox(pending=True) and time.time() < deadline:
             time.sleep(0.01)
-    assert len(SqliteCaseStore(db).notifications()) == 1
+    assert SqliteCaseStore(db).outbox(pending=True) == []
 
 
 def test_json_api(client, db):
@@ -177,8 +168,7 @@ def test_nothing_sensitive_in_api_responses_pages_or_logs(db, intake, caplog, ca
         client.post(f"/cases/{case_id}/report")
         texts += [client.get(f"/cases/{case_id}").text]
         texts += [client.get(f"/api/cases/{case_id}").text]
-    # m1, v1 and o1: 3 reports, plus alerts for the two confirmed cases
-    assert dispatch(store, client.app.state.senders(store)) == 5
+    assert dispatch(store, webhook(intake), "B") == 3  # m1, v1 and o1
     texts += [client.get("/").text, client.get("/api/cases").text]
     with urllib.request.urlopen(intake) as reply:
         texts.append(reply.read().decode())

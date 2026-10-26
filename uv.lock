@@ -63,11 +63,6 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "httpx2" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.2" },
@@ -76,9 +71,6 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "uvicorn", specifier = ">=0.54.0" },
 ]
-
-[package.metadata.requires-dev]
-dev = [{ name = "httpx2", specifier = ">=2.13.1,<2.14" }]
 
 [[package]]
 name = "certifi"
@@ -435,6 +427,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "grpcio-tools" },
+    { name = "httpx2" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "ruff" },
@@ -445,6 +438,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = ">=1.84.1" },
+    { name = "httpx2", specifier = ">=2.13.1,<2.14" },
     { name = "pre-commit", specifier = ">=4" },
     { name = "pytest", specifier = ">=8.4" },
     { name = "ruff", specifier = ">=0.14" },

@@ -1,9 +1,4 @@
 import socket
-import sys
-from pathlib import Path
-
-# The pytest executable does not add the repository root for namespace imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,12 +42,11 @@ def keys(value):
 
 
 # DEPENDS ON Role 4 (security and privacy): ALLOWED is pending their review.
-def test_disallowed_fields_never_reach_report(store, monkeypatch):
+def test_disallowed_fields_never_reach_report(store):
     # A case carrying private fields, as if a future store change leaked them.
     leaky = store.get(case_id(store)) | PRIVATE
-    monkeypatch.setattr(store, "get", lambda _: leaky)
     recorder = Recorder()
-    draft_report(store, case_id(store), recorder)
+    draft_report(store, leaky, recorder)
     assert keys(recorder.seen) <= ALLOWED
     template = TemplateClient().draft(report_input(leaky))
     for text in (str(recorder.seen), template):
@@ -61,7 +55,7 @@ def test_disallowed_fields_never_reach_report(store, monkeypatch):
 
 
 def test_template_report_is_a_labelled_draft(store):
-    report_id = draft_report(store, case_id(store), TemplateClient())
+    report_id = draft_report(store, store.get(case_id(store)), TemplateClient())
     [report] = store.reports(case_id(store))
     assert report["report_id"] == report_id
     assert (report["source"], report["status"]) == ("template", "draft")
@@ -79,7 +73,7 @@ def test_template_report_is_a_labelled_draft(store):
 
 def test_partial_case_report_states_uncertainty(store):
     partial = store.record(v1()[0])
-    draft_report(store, partial, TemplateClient())
+    draft_report(store, store.get(partial), TemplateClient())
     body = store.reports(partial)[0]["body"]
     assert "Alert raised: not raised" in body
     assert "This case is partial: links may be missing or unconfirmed." in body
@@ -90,15 +84,17 @@ def test_template_needs_no_network(store, monkeypatch):
         raise AssertionError("network used")
 
     monkeypatch.setattr(socket, "socket", refuse)
-    draft_report(store, case_id(store), TemplateClient())
+    draft_report(store, store.get(case_id(store)), TemplateClient())
 
 
 def test_review_happens_once(store):
-    report_id = draft_report(store, case_id(store), TemplateClient())
+    cid = case_id(store)
+    report_id = draft_report(store, store.get(cid), TemplateClient())
     with pytest.raises(ValueError):
-        store.review_report(report_id, "draft")
-    assert store.review_report(report_id, "approved")
-    assert not store.review_report(report_id, "rejected")
+        store.review_report(cid, report_id, "draft")
+    assert not store.review_report("other-case", report_id, "approved")
+    assert store.review_report(cid, report_id, "approved")
+    assert not store.review_report(cid, report_id, "rejected")
     assert store.reports(case_id(store))[0]["status"] == "approved"
 
 

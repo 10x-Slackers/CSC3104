@@ -1,9 +1,4 @@
-import sys
 import threading
-from pathlib import Path
-
-# The pytest executable does not add the repository root for namespace imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
@@ -16,11 +11,6 @@ from apps.privacy_node.claims import key
 
 # DEPENDS ON Role 3 (privacy node): every test here uses real ChainResults from its
 # nodes (sample_chains.py), so a change to privacy_node.proto affects them all.
-
-
-@pytest.fixture
-def store(tmp_path):
-    return SqliteCaseStore(tmp_path / "cases.db")
 
 
 def alerts(store):
@@ -160,21 +150,11 @@ def test_close_and_reopen_keeps_cases_alerts_and_pending_outbox(tmp_path):
     reopened = SqliteCaseStore(path)
     assert reopened.cases() == before
     assert reopened.get(confirmed)["raised_at"] is not None
-    pending = [(e["kind"], e["acked_at"]) for e in reopened.outbox()]
-    assert pending == [("alert", None), ("report", None)]
+    assert reopened.record(m1()) == confirmed  # still one alert after a redelivery
+    assert [n["kind"] for n in reopened.notifications()] == ["alert"]
     sent = []
-    assert dispatch(reopened, sent.append) == 2
-    assert dispatch(reopened, sent.append) == 0
-    assert [m["kind"] for m in sent] == ["alert", "report"]
-
-
-def test_alert_survives_restart(tmp_path):
-    path = tmp_path / "cases.db"
-    case_id = SqliteCaseStore(path).record(m1())
-    raised = SqliteCaseStore(path).get(case_id)["raised_at"]
-    reopened = SqliteCaseStore(path)
-    assert reopened.record(m1()) == case_id
-    assert reopened.get(case_id)["raised_at"] == raised
+    assert dispatch(reopened, sent.append, "B") == 1  # the pending report
+    assert dispatch(reopened, sent.append, "B") == 0
 
 
 def test_leak_check_catches_planted_values():
@@ -191,8 +171,8 @@ def test_nothing_sensitive_in_any_stored_table(store):
         store.record(result)
     case_id = store.cases()[0]["case_id"]
     store.decide(case_id, "report")
-    draft_report(store, case_id, TemplateClient())
-    dispatch(store, store.receive)  # every event into the inbox table too
+    draft_report(store, store.get(case_id), TemplateClient())
+    dispatch(store, lambda message: None, "B")
     tables = [row[0] for row in store.db.execute("SELECT name FROM sqlite_master")]
     dump = "\n".join(
         str(value)

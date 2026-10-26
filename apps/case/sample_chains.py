@@ -13,6 +13,7 @@ import tempfile
 from functools import cache
 from pathlib import Path
 
+from apps.case.case_store import transfers
 from apps.privacy_node import privacy_node_pb2 as pb
 from apps.privacy_node.claims import chain_digest, key
 from apps.privacy_node.demo import start_banks
@@ -59,12 +60,7 @@ def public_keys():
 
 def payment_ids(case):
     """Fixture payment IDs of the transfers in a stored case (test-side lookup only)."""
-    return {
-        searches()[2][f"{pair}|{token}"]
-        for c in case["claims"]
-        for pair, token in ((c.in_pair, c.in_token), (c.out_pair, c.out_token))
-        if token
-    }
+    return {searches()[2][k] for c in case["claims"] for k in transfers(c)}
 
 
 def delivered_to(bank):
