@@ -2,11 +2,15 @@
 
 Owner: Caleb · Partners: Zane (messages, signed claims), Cindy (tokens), Jia Rui (report inputs), Isaac (Secrets, certificates, NetworkPolicy) · Code: `apps/security/` · Status: **draft**, needs review by Zane and Cindy
 
-> [!WARNING]
-> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
-> - **Pairwise HMAC tokens**: token format, key distribution and rotation are under review
-> - **Disclosure boundary**: the allowlist approach; AI report input is replaced by summary-service input
-> - **mTLS and NetworkPolicy**: paths for Valkey, the replay Job, the analyst UI and the summary service
+> [!NOTE]
+> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
+> - **16-byte tokens:** `derive_token` returns the HMAC-SHA256 truncated to 128 bits as `bytes`, with no `ppmc:v1:k1:` prefix (the version is in `key_version`). About 4.7× smaller; NIST SP 800-107 Rev 1 §5.3.3 allows truncation. A new frozen test vector.
+> - **Key agreement, not a dealer:** each bank generates its own X25519 key pair and publishes the public key; `pair_key(A,B,k) = HKDF(X25519(a_priv, B_pub), info="csc3104 pair-key A-B k")`. This replaces `privacy_node/keys.py`, which generates every bank's keys on one machine. No secret travels (MAS TRM §10.2.5); X25519 stays separate from Ed25519 (TRM §10.2.6).
+> - **Rotation with overlapping versions:** introduce `k2` at both banks and index new payments under both keys; switch queries once both have it; retire `k1` after its index entries expire. A new key pair, not a relabel (TRM §10.2.9). Keys are re-read on a timer, and public keys are looked up by (bank, key version). Demonstrated during a live replay.
+> - **Schema test instead of the runtime walk:** one CI test reads the protobuf descriptor and asserts every field is allowed and none is in `FORBIDDEN_FIELDS`; the node rejects unknown fields. `check_peer_payload` stays for untyped JSON.
+> - **`check_result`** in `claims.py`: all six chain conditions, shared by the node's `Deliver` and the case service's `/results`.
+> - **Own-bank data in cases:** an analyst sees their own bank's legs (payment ID, account, amount); other banks' legs stay tokens ([Disclosure boundary](#disclosure-boundary)).
+> - **mTLS** with a SPIFFE-style URI SAN naming the bank, and certificates reloaded on renewal; NetworkPolicy paths for Valkey, replay and the summary service.
 
 Scope: pairwise HMAC tokens, Ed25519 claim signing, the disclosure allowlist, certificate identity and mTLS, NetworkPolicy intent, and security test evidence.
 Query rate limiting and a signed audit log are extensions, added only once the core works.
@@ -29,7 +33,8 @@ This is a laboratory model; see also [overview.md](../overview.md#trust-and-fail
 | Peer query | Pair-scoped token, authenticated bank identity, query ID, versions, protocol hop count and deadline | Zane |
 | Peer claim / assembled result | Token references, signer identity, signature, minimal local-rule assertion | Zane, Jia Rui |
 | Application logs | Request IDs, bank identity, status, timing, error category. No payload dumps; tokens only if needed | All owners |
-| AI report input | Minimal reviewed case evidence; the destination must be agreed | Jia Rui |
+| Case service store and UI (**pending work**) | The bank's **own** legs (payment ID, account, amount), snapshotted at case creation; other banks' legs as tokens only. The boundary is between banks, not inside one | Jia Rui, Zane |
+| Summary service input (**pending work**) | The same bank-local case evidence, sent inside the bank to a function URL with `AWS_IAM`; template only, no model | Jia Rui |
 
 The protocol's hop count isn't the same field as the evaluation `hop` label. The protocol field needs a different name.
 
@@ -68,7 +73,7 @@ token = ppmc:v1:k1:86ef4e3f811c077dcde10d9cef4d807c1b039afda3d794d72174c5d4a92cb
 
 The pair is bound into the HMAC input but isn't shown in the token. Lookups must therefore be scoped by `(pair, key_version, token)`. Tokens from different pairs or versions are never compared.
 
-**Key rotation** isn't automated. A new key gets a new version label at both endpoints, and then the affected services restart and rebuild their index (Cindy). Changing the encoding requires a new protocol version (`v2`).
+**Key rotation** isn't automated (**pending work**: overlapping versions, above). A new key gets a new version label at both endpoints, and then the affected services restart and rebuild their index (Cindy). Changing the encoding requires a new protocol version (`v2`).
 
 ## Ed25519 claim signing
 
@@ -86,7 +91,7 @@ Key helpers: `generate_signing_key`, `private_key_pem` (unencrypted PKCS8), `pub
 - Public keys are distributed to every verifier as configuration.
 - Never put keys in manifests, Helm values or git. The local `.secrets/` folder is git-ignored.
 - `load_pairwise_keys(bank_id, {pair: path})` reads the raw bytes without stripping or base64 decoding. It rejects pairs that don't include this bank, pairs supplied twice, keys shorter than 32 bytes, and the same key reused across pairs.
-- Keys are read once at startup, so rotation needs a restart.
+- Keys are read once at startup, so rotation needs a restart. **pending work:** mounted Secrets update in place, so services re-read keys on a timer.
 
 From another app that lists `security` as a workspace dependency (as `scorer` does):
 
@@ -106,7 +111,7 @@ The mount paths above are examples. Secret names and paths: TODO, with Isaac.
 - Both sides verify the certificate chain. The client checks the server's SAN.
 - The server maps the client certificate's SAN to a bank using an explicit SAN-to-bank map. Any certificate signed by the CA isn't enough, and a bank ID written in the message never replaces the certificate.
 - The authenticated sender must match the sender in the message envelope. TLS keys are separate from signing keys.
-- TODO with Zane and Isaac: SAN names, trust bundle, Secret mounts, and whether claims can be forwarded.
+- **pending work** with Zane and Isaac: the DNS SAN plus a SPIFFE-style URI SAN naming the bank, the trust bundle and Secret mounts; the node re-reads certificates when cert-manager renews them. One shared lab CA is a trusted third party, which is a stated limitation.
 
 **NetworkPolicy** intent: every bank namespace denies all ingress and egress by default, then allows only the following:
 
@@ -114,11 +119,13 @@ The mount paths above are examples. Secret names and paths: TODO, with Isaac.
 | --- | --- | --- |
 | Privacy node | Other banks' privacy nodes | The protocol port only (namespace **and** pod selector) |
 | Ingestor, scorer | Own bank's Kafka | Broker ports |
-| Scorer, privacy node, case service | Own bank's PostgreSQL | Database port |
+| Scorer, privacy node | Own bank's Valkey | Valkey port (**pending work**); the case service never connects |
+| Privacy node, case service | Own bank's PostgreSQL | Database port |
+| Replay Job (`replay` namespace, k3d) | Each bank's ingestor | Its HTTP port (**pending work**) |
+| Case service | Summary service | Its HTTP port in the namespace; on EKS, AWS on 443 with `AWS_IAM` (**pending work**) |
 | Bank workloads | Cluster DNS | DNS |
 | Operator-managed pods (e.g. CloudNativePG) | Kubernetes API server | TCP 443/6443 to the API server addresses only |
 | KEDA operator | Own bank's Kafka | Broker ports, to read consumer lag |
-| Monitoring | Explicit metrics endpoints | Metrics ports |
 
 Isaac owns the final policies in [deployment.md](deployment.md). The cluster's CNI must actually enforce them.
 
@@ -158,9 +165,19 @@ Integration evidence still needed, owned with Isaac and evaluated in [evaluation
 - [ ] Tampered or wrongly signed claims never become confirmed evidence.
 - [ ] Cross-bank access to Kafka and PostgreSQL is denied on k3d and EKS.
 
+## Interfaces
+
+Agreed contract first ([conventions](../README.md#conventions)): the producer adds one sample message here, and both sides' tests load it.
+
+| Interface | From → to | Pins down | Status | Agree by |
+| --- | --- | --- | --- | --- |
+| Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
+| `.proto` v1 ([protocol.md](protocol.md#messages)) | Zane ↔ Caleb | `bytes` token, no absolute deadline, unknown fields rejected, the schema test's allow and forbid lists | **draft**, sample TODO | Wed 4 Nov |
+| `check_result` ([security.md](security.md)) | Caleb → Zane, Jia Rui | Signature, the six conditions, how a failure is reported | **draft** | Wed 4 Nov |
+
 ## Open
 
-- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/src/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS`
-- [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes`
-- [ ] Secret names, mount paths, SAN-to-bank map (with Isaac)
-- [ ] Destination and inputs for the AI report (with Jia Rui)
+- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/src/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS` (Caleb).
+- [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes` (Caleb).
+- [ ] Secret names, mount paths and the SAN-to-bank map (Caleb, with Isaac).
+- [x] Destination and inputs for the report: the summary service, template only, bank-local case evidence.

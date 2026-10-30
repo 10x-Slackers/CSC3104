@@ -1,26 +1,21 @@
 # Overview
 
-> [!WARNING]
-> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
-> - **Architecture** and step 5: per-bank storage becomes Kafka (raw events) + Valkey (derived, rebuildable state) + PostgreSQL (durable state); the analyst UI becomes read-only (no simulated actions, no mock intake); the AI report service becomes a separate summary service
-> - **Goals** and **Scope**: the AI draft report and simulated analyst actions
-> - **Requirements**, "How we meet it": serverless is now planned (summary service as a container locally, Lambda on AWS); the callback and housekeeping rows
-> - **Technology stack**: storage row
-> - The requirements themselves still stand
+> [!NOTE]
+> This is the target design decided on 30 Oct 2026. Most of it is **pending work**; each contract lists what's built today.
 
 ## Problem
 
-Money mules pass funds through accounts to hide where the money came from. Each bank sees only its own transfers, so a chain that passes through several banks is split across organisations.
+Money mules pass funds through accounts to hide where the money came from. Each bank sees only its own transfers, so a chain that passes through several banks is split across organisations. In Singapore, "mule bank accounts are used to electronically move the scam monies between different banks, and out of the country" (SPF/MAS/IMDA/GovTech, 17 Sep 2025).
 
-We build a system in which simulated banks cooperate to find these chains, while customer details and payment records stay inside each bank. The output is an analyst case showing which banks confirmed each link, plus an AI-assisted draft report for human review.
+We build a system in which simulated banks cooperate to find these chains, while customer details and payment records stay inside each bank. The output is a bank-local analyst case showing which banks' rules confirmed each link, with a template summary draft for human review.
 
 ## Goals
 
-- Trace a mule chain across three banks in real time, peer to peer, with **no central coordinator**.
+- Trace a mule chain across three banks in real time, peer to peer, with **no central coordinator**, including for key setup.
 - Keep raw customer and payment fields out of interbank messages. Banks exchange only opaque transfer tokens and limited signed link claims.
 - Keep detecting among the remaining banks when one bank is offline.
-- Raise exactly **one durable alert per involved bank** per chain, despite delayed or repeated messages, retries and restarted pods. This is guaranteed after recovery with intact storage, not after permanent data loss.
-- Measure detection quality, latency, scaling and recovery.
+- Keep exactly **one durable case per bank per chain**, despite delayed or repeated messages, retries and restarted pods, and push an alert only when at least two banks' own rules fired. This is guaranteed after recovery with intact storage, not after permanent data loss.
+- Measure detection quality offline against labelled data, and latency, scaling and recovery on the cluster.
 
 ## Requirements
 
@@ -28,17 +23,17 @@ The module fixes these requirements; they override anything else in the docs.
 
 | Requirement | How we meet it |
 | --- | --- |
-| Containers and/or Kubernetes (mandatory); containerised and tested | Per-bank Helm chart on k3d and EKS; tested from a clean setup before submission |
-| Original distributed contribution | Peer-to-peer cross-bank chain search with no central hub |
-| Concurrency (interference, memory consistency) | Concurrent scorer replicas, overlapping searches, a durable unique alert per bank and chain |
-| Use of cloud services | EKS, container registry, autoscaling |
-| Concurrent housekeeping tasks | Bounded retries, redelivery of pending notifications, expiry of query state |
-| Fault and failure handling | An offline bank leaves dependent traces partial; recovery after restarts |
-| Server callbacks / server-to-client communication | Confirmed results pushed to every involved bank, with acknowledgements |
+| Containers and/or Kubernetes (mandatory); containerised and tested | Per-bank Helm chart on k3d and EKS; one Dockerfile pattern; tested from a clean setup before submission |
+| Original distributed contribution | Peer-to-peer cross-bank chain search with no central hub, and pair keys agreed between banks (X25519) rather than issued by a dealer |
+| Concurrency (interference, memory consistency) | Scorer replicas with partition ownership and shared state in Valkey; overlapping searches; two privacy-node replicas sharing PostgreSQL; one durable case per bank and chain |
+| Use of cloud services | EKS, ECR, AWS Lambda (ingestor, summary service), ElastiCache, KEDA autoscaling, CloudWatch |
+| Concurrent housekeeping tasks | Retries with capped, jittered backoff and expiry; outbox redelivery with dead letters; one replica at a time under a PostgreSQL advisory lock |
+| Fault and failure handling | An offline bank leaves dependent searches pending (outcome unknown) until it returns or they expire; replicas in the HA bank; recovery measured as RTO and RPO |
+| Server callbacks / server-to-client communication | Results pushed to every involved bank (`Deliver`, with acknowledgements), and from each node to its case service through an outbox |
 | Quantitative evaluation | [evaluation.md](evaluation.md) |
-| No sophisticated GUI needed | Minimal analyst UI |
+| No sophisticated GUI needed | Read-only analyst UI |
 
-Serverless functions would earn extra credit but are not planned.
+Serverless functions earn extra credit: the ingestor and the summary service run on AWS Lambda (plain containers locally).
 
 ## Scope
 
@@ -46,46 +41,50 @@ Serverless functions would earn extra credit but are not planned.
 | --- | --- | --- |
 | Three simulated banks: A, B, C | Split payments, merged flows | Training a detection model |
 | Bounded **linear** chains | Broad graph discovery | Live banking integration |
-| Transparent rules, USD only | More banks | Real freezes, holds or reports |
-| Synthetic data with planted chains ([data.md](contracts/data.md)) | Query rate limiting, signed audit log | Sophisticated GUI |
-| Small analyst UI; AI draft report with human review | | |
+| Four cited, transparent rules; amounts in SGD | More banks | Real freezes, holds or reports; analyst decisions |
+| IBM AML data with Altman's labels as ground truth; planted chains as acceptance tests ([data.md](contracts/data.md)) | Query rate limiting, signed audit log | Sophisticated GUI |
+| Read-only analyst UI; template summary drafts | | |
 
 A rule flags suspicion, not proven laundering.
 
 ## Architecture
 
-Every bank runs the same services in its own Kubernetes namespace (Bank A shown).
+Every bank runs the same services in its own Kubernetes namespace (Bank A shown). Replay stands outside the banks, in place of their payment systems.
 
-This is the target design. The scorer currently keeps its token index in memory and runs one consumer per bank; see [streaming.md](contracts/streaming.md).
+![Target architecture](architecture.drawio.png)
 
 ```mermaid
 flowchart LR
+  R[Replay Job] -- "pacs.008 JSON over HTTP" --> I
   subgraph A["namespace: bank A"]
-    R[Replay Job] --> I[Ingestor] --> K[(Kafka)]
+    I["Ingestor (Lambda)"] --> K[("Kafka: source of truth")]
     K --> S["Scorer workers (KEDA)"]
-    S --> DB[("PostgreSQL: token index, cases")]
-    S -- start search --> P[Privacy node]
-    P --> DB
-    DB --> UI[Analyst UI] --> RS[AI report service]
+    S --> V[("Valkey: state, tokens, hits")]
+    V --> P[Privacy node]
+    P --> DB[("PostgreSQL")]
+    P -- "outbox: hits, chains" --> C[Case service]
+    C --> DB
+    C -- AWS_IAM --> SS["Summary service (Lambda)"]
   end
   P <-- "gRPC + mTLS: tokens, signed claims" --> PB[Bank B privacy node]
   P <-- "gRPC + mTLS" --> PC[Bank C privacy node]
   PB <--> PC
-  UI -. simulated action .-> MI[Mock intake]
+  AN[Analyst] -- "port-forward, read-only" --> C
 ```
 
-1. **Replay** sends one bank's payment events, in time order, to its **ingestor**, which publishes them to the bank's **Kafka** ([data.md](contracts/data.md), [streaming.md](contracts/streaming.md)).
-2. **Scorer workers** index each transfer under its token. A transfer is suspicious when a large share of the incoming value moves on within a time window; the scorer then starts a search.
-3. The **privacy node** queries the next bank with the transfer's token. Both banks on a transfer derive the same token from the shared payment ID, using a key for that bank pair ([security.md](contracts/security.md)). The receiving bank checks its own records and applies the rule locally. If it matches, it replies with an Ed25519-signed claim linking the two tokens and forwards the query onward ([protocol.md](contracts/protocol.md)).
-4. A search stops at the hop limit or its deadline. Visited tokens are recorded so a search can't loop.
-5. Confirmed results become **bank-local cases**, with one alert at each involved bank ([case.md](contracts/case.md)). An analyst reviews the case and the draft report, then chooses a simulated action: monitor, suspend outgoing transfers, freeze accounts, or report to the authorities (the **mock intake**).
+1. **Replay** sends each transfer as an ISO 20022 pacs.008 message to the **ingestor** of both banks involved. The ingestor validates it and writes `out` and `in` events to the bank's **Kafka** topic, keyed by account ([data.md](contracts/data.md)).
+2. **Scorer workers** each own some of the topic's partitions and keep their state in **Valkey**. They index each cross-bank transfer under its token and apply four rules: fast and slow pass-through, fan-in and fan-out ([streaming.md](contracts/streaming.md)). A pass-through link starts a search; any rule hit becomes local (Tier 1) suspicion.
+3. The **privacy node** queries the next bank with the transfer's token. Both banks on a transfer derive the same token from the shared payment ID, using a key the pair agreed ([security.md](contracts/security.md)). The receiving bank checks its own records and applies its own rules. If they match, it replies with an Ed25519-signed claim linking the two tokens and forwards the query onward ([protocol.md](contracts/protocol.md)).
+4. A search stops at the hop limit or its deadline, and visited tokens stop loops. The initiator verifies the chain, stores it in PostgreSQL and delivers it to every bank that signed a claim.
+5. Each node posts its hits and chains to its **case service** through an outbox. A chain on which at least two banks' rules fired is a **Tier 2 alert**; everything else is a **Tier 1** case, shown but not pushed ([case.md](contracts/case.md)). The analyst views and bookmarks cases and reads a summary draft. What the bank then does is outside the system.
 
 ## Trust and failure model
 
-- Kubernetes namespaces **simulate** separate banks. They are not a production security boundary.
-- Banks are authenticated by mTLS and sign their claims. A signature proves who made a claim and that it wasn't altered, **not** that the bank's records are true. Banks are assumed to apply the rule honestly.
+- Kubernetes namespaces **simulate** separate banks. They are not a production security boundary: the banks share a node kernel, and DNS still answers for other namespaces' service names.
+- Banks are authenticated by mTLS and sign their claims. A signature proves who made a claim and that it wasn't altered, **not** that the bank's records are true. Banks are assumed to apply the rules honestly.
 - Tokens and claims still reveal limited relationships, such as which banks took part and in what order ([security.md](contracts/security.md#residual-disclosure)).
-- A bank that is offline can't confirm a link. Searches that need it stay partial, and other searches continue.
+- A bank that is offline can't confirm a link. Searches that need it stay pending, retried with backoff, until it returns or they expire after 24 h. Other searches continue.
+- One shared lab CA and the published public keys are trusted, which is a stated limitation.
 
 ## Technology stack
 
@@ -93,11 +92,12 @@ flowchart LR
 | --- | --- |
 | Language | Python (uv workspace) |
 | Streaming | Kafka (Strimzi, KRaft mode), confluent-kafka, KEDA |
+| Payment messages | ISO 20022 pacs.008 subset as JSON; CloudEvents headers on Kafka records |
 | Protocol | gRPC and protobuf |
-| Cryptography | HMAC-SHA256, Ed25519 (`cryptography`), cert-manager, Kubernetes Secrets |
-| Storage | PostgreSQL |
-| Platform | k3d (local), Amazon EKS, Helm, GitHub Actions |
-| Monitoring and evaluation | Prometheus, Grafana, pandas, matplotlib |
+| Cryptography | HMAC-SHA256, X25519 + HKDF key agreement, Ed25519 (`cryptography`), cert-manager, Kubernetes Secrets |
+| Storage | Kafka (source of truth), Valkey (derived, rebuildable state), PostgreSQL (CloudNativePG) |
+| Platform | k3d (local), Amazon EKS, AWS Lambda, Helm, GitHub Actions |
+| Monitoring and evaluation | No dedicated stack: metrics-server (`kubectl top`), KEDA/HPA status, Kafka consumer-group lag, CloudWatch for Lambda, JSON logs; pandas, matplotlib |
 
 ## Deadlines
 

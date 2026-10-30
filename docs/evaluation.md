@@ -1,51 +1,70 @@
 # Evaluation
 
-Owner: Isaac · Evidence supplied by every owner · Status: **draft**
+Owner: Isaac · Evidence supplied by every owner · Status: **pending work** (no runs yet)
 
-> [!WARNING]
-> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
-> - **Questions**, **Metric definitions**: the mock intake and AI report items
-> - **Demo scenario**: step 5 (AI draft report); HA-bank failover comparison
-
-Every claim needs a measured indicator, and the main results need graphs.
+Every claim needs a measured indicator, and the main results need graphs. Detection quality is measured **offline**, and the system (latency, scaling, failures) on the **cluster**.
 
 ## Rules
 
-- Freeze a small deterministic **acceptance suite** first. Then evaluate on a separate, **held-out** labelled workload. Tune only on dev data.
-- Report results for ordinary activity and for planted chains.
-- Choose load levels and latency targets after the first baseline and before any comparative runs. Never present an unmeasured target as a result.
-- Explain trade-offs and bottlenecks, including any case where scaling doesn't help.
+- **Two kinds of test data.** The planted chains in the committed fixture are a deterministic **acceptance suite**: they check that tracing works, never how well detection works. Detection quality is measured against **Altman's labelled laundering attempts** ([data.md](contracts/data.md#labels-labelscsv-evaluation-only)).
+- **Dev/eval split by attempt start.** Dev = attempts that start 1–5 Sep 2022, eval = attempts that start 6–10 Sep. Each run reads its own days plus the following days so attempts can finish, and counts false positives only on its own days. Days 11–18 are the generator finishing its patterns and are never used for false-positive counts. Tune only on dev; run eval **once**.
+- **Named SLIs, percentiles not means.** End-to-end detection latency (p50, p95) and alert correctness. SLO targets are chosen after the first baseline and before any comparative run. Never present an unmeasured target as a result.
+- **Sound benchmarking** (Hoefler and Belli, SC'15): run each configuration at least 5 times and report the median and p95 with min/max, documenting every factor that varies.
+- **Open-loop load:** replay at fixed rates (`--rate`, events/s) for load tests, which avoids coordinated omission; `--speed 60` is for the demo only.
+- **Failures as RTO and RPO** (MAS TRM §8.2.1): RTO = time to the next alert, RPO = alerts lost. Define the steady state before injecting a fault. Faults: `kubectl delete pod`, `kubectl scale --replicas=0`, a temporary deny-all NetworkPolicy. k3d is one node, so failover there is pod-level only.
+- Explain trade-offs and bottlenecks, including any case where scaling doesn't help (e.g. bank B's hot account, which carries 13% of its events).
 
-## Questions
+## Offline detection evaluation
 
-| Question | Method | Evidence required |
-| --- | --- | --- |
-| Does tracing work? | Replay known three-bank chains, benign lookalikes, loops, absent links and limit cases | Every deterministic case matches its expected links and state; loops and deadlines terminate |
-| Does collaboration help? | Compare local-only rules with cooperative tracing on the same held-out workload | Transaction-level and chain-level measures defined separately; precision, recall, false positives, sample counts |
-| Is disclosure bounded? | Inspect representative serialised peer messages, app logs and report inputs against the allowlist | No forbidden raw fields; permitted metadata and residual linkability documented |
-| Are peers and claims checked? | Send unauthenticated requests, and altered or wrongly signed claims | Rejected without creating confirmed evidence |
-| Is one alert maintained? | Replay duplicates; launch overlapping searches; restart workers around case and alert writes | One persistent alert per bank per agreed chain identity; required alerts appear after recovery |
-| Does failure stay local? | Take one bank offline; restart a privacy node or scorer and replay | Dependent traces stay partial; independent work continues; recovery time and unresolved work recorded |
-| Does scaling help? | Replay fixed low and high loads with fixed workers, then with autoscaling | Throughput, queue lag, replica count, resource use, median and p95 latency, over repeated runs |
-| Is the analyst output grounded? | Review case views and generated drafts against signed evidence, including a partial case | No invented identities or unsupported conclusions; uncertainty shown; a report failure doesn't block detection |
+**pending work (Isaac):** a workspace package `apps/evaluation/`, run with `uv run python -m evaluation.offline`.
+
+- **Input:** `prepare.py`'s bank files and labels file, with the attempt ID and `altman_pattern` per laundering transfer.
+- **Same code as the live path:** each bank's scorer runs as a library over its bank file, with an in-memory state store. The existing in-process three-node trace (the privacy node's CSV mode) then produces cross-bank chains and tiers. No Kafka, Valkey or gRPC servers.
+- **Output, per Altman pattern type:** attempts caught at Tier 1 (local) and at Tier 2 (cross-bank), precision, and analyst load (cases per bank per day). An attempt counts as caught if any of its transfers is in a case.
+- **Where it runs:** a laptop for the full splits; CI runs it on the committed fixture as a regression test.
+- **Bridge to the cluster:** replay one eval day through k3d at `--speed 0` and compare the stored cases with the offline output for the same day. They must match (experiment 13).
+
+## Experiments
+
+Experiments 2–4 run offline; the rest run on k3d, and 10 on AWS.
+
+| # | Question | Setup | Report |
+| --- | --- | --- | --- |
+| 1 | Does tracing work? | Fixture scenarios (`m1`, `l1`, `o1`, `x1`, `v1`) end to end | Every expected link, state and tier |
+| 2 | Detection vs Altman | Rules tuned on dev, eval run once | Per pattern type: Tier 1 vs Tier 2 recall, precision, cases per bank per day |
+| 3 | Thresholds | Dev only: ratio band, window, counterparty count, amount floor, rule-backed banks for Tier 2 (1/2/3) | False positives vs recall; the chosen point |
+| 4 | Hop limit | `HOP_LIMIT` 4/6/8 | Chain recall on Altman cycles vs search latency |
+| 5 | Does scaling help? | Fixed low and high rates; fixed replicas vs KEDA; 6 partitions | Throughput, lag, replicas, CPU/memory, p50/p95 latency; KEDA reaction time (polling 30 s, cooldown 300 s) |
+| 6 | HA vs single instance | The same broker, PostgreSQL or privacy-node pod kill in the HA bank and a single bank | RTO, RPO; searches complete with one node replica killed mid-replay |
+| 7 | Bank outage | Take C offline for N minutes under steady load | Backlog, request rate C sees on return, time to drain, with and without backoff and jitter |
+| 8 | Clock skew | One bank under libfaketime | Absolute deadlines time out; relative deadlines complete |
+| 9 | Bulkhead | Disable the summary service during a replay | Alerts still appear; drafts missing |
+| 10 | Lambda | Ingestor and summary under load | Cold and warm latency separately; CloudWatch invocations, errors, duration |
+| 11 | Valkey loss | Delete Valkey and rebuild by replay from `earliest` | Rebuild time = RTO; RPO 0 |
+| 12 | Key rotation | Rotate a pair key during a live replay | No missed links |
+| 13 | Offline = live | One eval day through k3d at `--speed 0` vs the offline run | Identical cases and tiers |
+
+Security evidence (sentinel values never leave a bank; bad certificates and claims rejected; cross-bank store access denied) is listed in [security.md](contracts/security.md#tests).
 
 ## Metric definitions
 
 | Metric | From → to | Notes |
 | --- | --- | --- |
-| End-to-end detection latency | Event ingestion → durable alert | Headline latency |
+| End-to-end detection latency | Kafka record timestamp at ingestion → durable case or alert at the same bank | Headline latency |
 | Peer-trace latency | Search start → search result | Report separately |
-| Intake response time | Durable alert → mock intake arrival | A post-alert metric. **Never** substitute it for detection latency |
+| Analyst load | Cases per bank per day, by tier | From the offline evaluator |
 
-TODO (Isaac, Cindy, Jia Rui): agree which component emits each timestamp, and how clocks are compared across pods.
+**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. Each service logs `payment_id` or `chain_digest` with its own timestamp as JSON to stdout, and pandas joins them. Pending work for every owner, by Fri 6 Nov.
+
+**Metric sources** (no monitoring stack): `kubectl top`, `kubectl get hpa`, `kafka-consumer-groups.sh`, CloudWatch for Lambda, and JSON logs. Results are presented as RED (rate, errors, duration) and USE (utilisation, saturation, errors).
 
 ## Run record
 
 Record this for every run, e.g. as `results/<run-id>/run.json` (location TBC):
 
-- dataset and workload, seed, event rate
+- dataset split and workload, seed, event rate
 - rule settings
-- deployment (k3d or EKS) and resources
+- deployment (k3d or EKS, HA or single) and resources
 - software revision (git SHA)
 - fault timing, if any
 
@@ -53,11 +72,11 @@ Record this for every run, e.g. as `results/<run-id>/run.json` (location TBC):
 
 The scripted demo runs these steps in order:
 
-1. Replay a labelled mule chain alongside ordinary payments across Banks A, B and C. Show local suspicion turning into verified cross-bank links.
-2. Open the bank-local cases: one alert per involved bank. Inspect a peer payload to show the disclosure boundary.
-3. Repeat messages and restart a worker. The existing alert is kept and not duplicated.
-4. Take one bank offline. A dependent trace stays partial while a separate search among the available banks continues. Restore the bank and show recovery.
-5. Show the load experiment results and an AI draft report with its evidence.
+1. Replay the fixture alongside ordinary payments across Banks A, B and C. Show local (Tier 1) suspicion turning into a verified cross-bank (Tier 2) alert.
+2. Open the bank-local cases: one case per involved bank, with the bank's own legs and other banks' tokens. Inspect a peer payload to show the disclosure boundary.
+3. Repeat messages and restart a worker. The existing case is kept and not duplicated.
+4. Take one bank offline. A dependent search stays pending while a separate search among the available banks continues. Restore the bank and show recovery. Kill a pod in the HA bank and show it carries on.
+5. Show the load experiment results, the offline detection results, and a summary draft with its evidence.
 
 ## Results
 
