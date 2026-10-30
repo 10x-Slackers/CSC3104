@@ -1,6 +1,12 @@
 # Security and privacy contract
 
-Owner: Caleb · Partners: Zane (messages, signed claims), Cindy (tokens), Jia Rui (report inputs), Isaac (Secrets, certificates, NetworkPolicy) · Code: `apps/security/security.py` · Status: **draft**, needs review by Zane and Cindy
+Owner: Caleb · Partners: Zane (messages, signed claims), Cindy (tokens), Jia Rui (report inputs), Isaac (Secrets, certificates, NetworkPolicy) · Code: `apps/security/` · Status: **draft**, needs review by Zane and Cindy
+
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Pairwise HMAC tokens**: token format, key distribution and rotation are under review
+> - **Disclosure boundary**: the allowlist approach; AI report input is replaced by summary-service input
+> - **mTLS and NetworkPolicy**: paths for Valkey, the replay Job, the analyst UI and the summary service
 
 Scope: pairwise HMAC tokens, Ed25519 claim signing, the disclosure allowlist, certificate identity and mTLS, NetworkPolicy intent, and security test evidence.
 Query rate limiting and a signed audit log are extensions, added only once the core works.
@@ -82,10 +88,10 @@ Key helpers: `generate_signing_key`, `private_key_pem` (unencrypted PKCS8), `pub
 - `load_pairwise_keys(bank_id, {pair: path})` reads the raw bytes without stripping or base64 decoding. It rejects pairs that don't include this bank, pairs supplied twice, keys shorter than 32 bytes, and the same key reused across pairs.
 - Keys are read once at startup, so rotation needs a restart.
 
-From the repository root:
+From another app that lists `security` as a workspace dependency (as `scorer` does):
 
 ```python
-from apps.security.security import derive_token, load_pairwise_keys
+from security import derive_token, load_pairwise_keys
 
 keys = load_pairwise_keys("A", {("A", "B"): "/run/secrets/pairs/ab-k1.key"})
 token = derive_token(payment_id, "A", "B", keys["A", "B"], "k1")
@@ -154,7 +160,7 @@ Integration evidence still needed, owned with Isaac and evaluated in [evaluation
 
 ## Open
 
-- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS`
+- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/src/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS`
 - [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes`
 - [ ] Secret names, mount paths, SAN-to-bank map (with Isaac)
 - [ ] Destination and inputs for the AI report (with Jia Rui)

@@ -1,5 +1,13 @@
 # Overview
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Architecture** and step 5: per-bank storage becomes Kafka (raw events) + Valkey (derived, rebuildable state) + PostgreSQL (durable state); the analyst UI becomes read-only (no simulated actions, no mock intake); the AI report service becomes a separate summary service
+> - **Goals** and **Scope**: the AI draft report and simulated analyst actions
+> - **Requirements**, "How we meet it": serverless is now planned (summary service as a container locally, Lambda on AWS); the callback and housekeeping rows
+> - **Technology stack**: storage row
+> - The requirements themselves still stand
+
 ## Problem
 
 Money mules pass funds through accounts to hide where the money came from. Each bank sees only its own transfers, so a chain that passes through several banks is split across organisations.

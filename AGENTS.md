@@ -9,6 +9,7 @@ This is a **university coursework project** done by undergraduates. It is not a 
 - Always research before implementing a task — both the codebase and online. Understand existing patterns, dependencies, and conventions before writing code.
 - Refer to the latest documentation and existing implementations of any libraries or frameworks in use.
 - Check `docs/` for architectural and planning details relevant to the task.
+- Fetch and branch from the latest `origin/main` before starting work or a review.
 
 ## Ask When Unsure
 
@@ -33,7 +34,10 @@ Optimize for **low line count, readability, and simplicity** — not for product
 uv sync --all-packages --locked
 uv run ruff check .
 uv run ruff format --check .
+uv run pytest
 ```
+
+- When a change alters a command, file path or behaviour described in `docs/`, update that doc in the same PR.
 
 ## Python
 
@@ -42,3 +46,6 @@ uv run ruff format --check .
 - Keep runtime dependencies with the application that needs them and shared development tools in the root `dev` dependency group.
 - Use the shared workspace environment and lockfile rather than separate member environments.
 - Commit `uv.lock` and update it through `uv`; do not edit it by hand.
+- Each app is a workspace package: `apps/<app>/src/<package>/` and `apps/<app>/tests/`.
+- Import other apps by package name (`from security import ...`) and declare them as `{ workspace = true }` sources. Run modules with `uv run python -m <package>.<module>`.
+- Regenerate `*_pb2*.py` with the command in the `.proto` header; don't edit them.

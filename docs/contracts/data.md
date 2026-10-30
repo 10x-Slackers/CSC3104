@@ -2,6 +2,12 @@
 
 Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation), Caleb (token input) · Code: `apps/dataset/` · Status: **draft**, needs review by Cindy
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Bank event files**: columns under review (counterparty account, non-USD handling)
+> - **Labels**, **Planted scenarios**: how Altman's labels and the planted chains are used for evaluation
+> - **Replay**: runs as a Kubernetes Job and produces to Kafka directly
+
 Scope: the synthetic dataset, the split into Banks A, B and C, planted chains, labels, workloads, the committed fixture and replay.
 
 ## Source
@@ -75,7 +81,7 @@ Constants in `prepare.py` (**draft**, to agree with Cindy and Zane):
 
 ## Workloads
 
-Run each with `uv run apps/dataset/prepare.py <args>`. Outputs go to the git-ignored `apps/dataset/out/`. Every workload writes a `workload.json` recording `t0`, its source, its parameters and its counts. The dataset version is pinned and seeds are fixed, so runs are reproducible.
+Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-ignored `apps/dataset/out/`. Every workload writes a `workload.json` recording `t0`, its source, its parameters and its counts. The dataset version is pinned and seeds are fixed, so runs are reproducible.
 
 | Workload | Args | Transfers (including planted) |
 | --- | --- | --- |
@@ -118,8 +124,8 @@ Payment IDs shared by each bank pair (useful for token tests):
 Run one replay per bank. Each prints its bank's events as JSON lines, in file order, for that bank's ingestor ([streaming.md](streaming.md)). In each line every field is a string except `amount`, which is a number. An event is printed at `start_at + (event_time − t0) / speed`, so all three banks must be given the same `--start-at` to stay in step.
 
 ```sh
-uv run apps/dataset/replay.py apps/dataset/fixtures/tiny A --speed 0                        # no pacing
-uv run apps/dataset/replay.py apps/dataset/out/dev-small A --speed 60 --start-at <epoch> | <ingestor>
+uv run python -m dataset.replay apps/dataset/fixtures/tiny A --speed 0                        # no pacing
+uv run python -m dataset.replay apps/dataset/out/dev-small A --speed 60 --start-at <epoch> | <ingestor>
 ```
 
 At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as possible, for load tests.

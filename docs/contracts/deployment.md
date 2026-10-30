@@ -2,6 +2,12 @@
 
 Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPolicy, Secrets, mTLS) · Code: `deploy/` · Status: **draft**
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Platform components**: adds Valkey; one bank runs with replicas (Kafka, PostgreSQL, Valkey, privacy node) on k3d, the others single-instance; all banks HA on EKS
+> - **Per-service settings**: the service list (ingestor, report service and mock intake change)
+> - **Namespaces and network paths**: privacy node, replay and analyst UI paths
+
 Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monitoring and the evaluation harness.
 
 ## Environments

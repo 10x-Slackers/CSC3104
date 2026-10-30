@@ -3,6 +3,8 @@ name = "security"
 version = "0.1.0"
 description = "Role 4: pairwise payment tokens, bank signatures and privacy checks"
 requires-python = ">=3.12"
-dependencies = [
-    "cryptography>=50.0.2",
-]
+dependencies = ["cryptography>=50.0.2"]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

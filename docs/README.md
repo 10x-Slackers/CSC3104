@@ -2,6 +2,9 @@
 
 CSC3104 Cloud and Distributed Computing, Group 08: **Privacy Preserving Detection of Cross-Bank Money Mule Chains**.
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Every doc below is under review and partly outdated; each one lists the sections expected to change.
+
 Start with [overview.md](overview.md). Its requirements section is fixed by the module and overrides every other doc.
 
 | Doc | Covers | Owner |

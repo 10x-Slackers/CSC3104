@@ -17,5 +17,12 @@ dev = [
     "ruff>=0.14",
 ]
 
+[tool.pytest]
+testpaths = ["apps"]
+
 [tool.ruff]
+src = ["apps/*/src", "apps/*/tests"]
 extend-exclude = ["*_pb2.py", "*_pb2.pyi", "*_pb2_grpc.py"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "RUF100"]

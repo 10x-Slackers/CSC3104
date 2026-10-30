@@ -2,6 +2,13 @@
 
 Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, local implementation available; integration decisions below remain open
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Kafka events**: ingest moves out of the scorer (replay produces to Kafka); topic partitioning
+> - **Detection rule**: the rule and its parameters are under review
+> - **Token index**, **Search handoff**: index and scorer state move out of memory into Valkey, shared with the privacy node
+> - **Scaling**
+
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
 
 ## Kafka events
@@ -77,7 +84,7 @@ scoring, including unflagged and scorer-too-late events. It uses the original
 [security.md](security.md) for the token and secret-file contract.
 
 Enable with `--key-version k1` and repeated `--pairwise-key PEER PATH` options on
-`stream.py consume`; omitting both keeps scorer-only operation. Missing/invalid
+`python -m scorer.stream consume`; omitting both keeps scorer-only operation. Missing/invalid
 configuration fails; an event whose pair lacks a key is not committed. A new
 key/version requires a new index and replay; there is no old-key fallback.
 
@@ -95,7 +102,7 @@ acceptable at capacity. This is a fail-stop resource bound, not an expiry policy
 ## Search handoff
 
 Integrated mode runs Role 2's consumer inside the privacy-node process. Use
-`uv run python -m apps.privacy_node.node --bank B --bootstrap-servers <brokers>
+`uv run python -m privacy_node.node --bank B --bootstrap-servers <brokers>
 --group <fresh-group> --search` with the existing pairwise, signing, public-key
 and peer options from [protocol.md](protocol.md). `--workload` selects the existing
 standalone CSV mode instead; the two input modes are mutually exclusive.
@@ -131,7 +138,7 @@ TODO: KEDA trigger (Kafka consumer-group lag), min and max replicas, and the met
 
 ## Local-only baseline
 
-`uv run apps/scorer/baseline.py apps/dataset/fixtures/tiny B` reads only that bank's
+`uv run python -m scorer.baseline apps/dataset/fixtures/tiny B` reads only that bank's
 CSV and exports JSONL candidates using the same scorer, without Kafka or peers.
 Repeat for A and C. Defaults can be overridden with `--min-ratio`, `--max-ratio`,
 `--min-delay`, `--window` and `--max-events`.

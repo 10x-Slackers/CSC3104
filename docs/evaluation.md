@@ -2,6 +2,11 @@
 
 Owner: Isaac · Evidence supplied by every owner · Status: **draft**
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Questions**, **Metric definitions**: the mock intake and AI report items
+> - **Demo scenario**: step 5 (AI draft report); HA-bank failover comparison
+
 Every claim needs a measured indicator, and the main results need graphs.
 
 ## Rules
