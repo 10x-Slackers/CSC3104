@@ -16,7 +16,7 @@ Privacy Preserving Detection of Cross Bank Money Mule Chains
 ```sh
 uv sync --all-packages --locked                                   # install every app
 uv run pytest                                                     # run all tests
-uv run apps/scorer/baseline.py apps/dataset/fixtures/tiny B       # local-only detections for Bank B
+uv run python -m scorer.baseline apps/dataset/fixtures/tiny B   # local-only detections for Bank B
 deploy/k3d-up.sh && deploy/check-netpol.sh                        # local cluster, then policy check
 ```
 

@@ -2,6 +2,13 @@
 
 Owner: Zane · Partners: Caleb (security), Jia Rui (result delivery, cases), Isaac (fault tests), Cindy (search handoff) · Code: `apps/privacy_node/` · Status: **draft**, needs review by Caleb
 
+> [!WARNING]
+> **Outdated (30 Oct 2026).** Under review after a full codebase walkthrough; don't build against this doc until it's updated. Expected to change:
+> - **Search algorithm**: deadline handling, retries and hop limit are under review
+> - **Result states**, **Failure contract**: pending and timed-out handling
+> - **Durable state**: SQLite moves to PostgreSQL; replicas in the HA bank
+> - **Result delivery**: posting chains to the case service
+
 Scope: protobuf messages, gRPC service, onward matching, hop and deadline bounds, visited state, stored replies, retries, result delivery and failure handling.
 
 ## How a search works
@@ -32,7 +39,7 @@ Searches start from the scorer's detection, wherever it is, because a chain is o
 
 ## Messages
 
-Source: [`apps/privacy_node/privacy_node.proto`](../../apps/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending.
+Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending.
 
 | Message | Fields | Notes |
 | --- | --- | --- |
@@ -90,7 +97,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 ## Durable state (per bank)
 
-`apps/privacy_node/store.py`, SQLite for M2. The same SQL moves to the bank's PostgreSQL for M3.
+`apps/privacy_node/src/privacy_node/store.py`, SQLite for M2. The same SQL moves to the bank's PostgreSQL for M3.
 
 | Table | Key | Purpose |
 | --- | --- | --- |
@@ -111,15 +118,15 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 ## Running and testing
 
 ```sh
-uv run pytest apps/privacy_node                 # 14 protocol tests on the tiny fixture
-uv run python -m apps.privacy_node.demo         # three banks on localhost, prints each trace
-uv run python -m apps.privacy_node.keys .secrets  # lab keys (git-ignored)
+uv run pytest apps/privacy_node             # 29 protocol tests
+uv run python -m privacy_node.demo          # three banks on localhost, prints each trace
+uv run python -m privacy_node.keys .secrets # lab keys (git-ignored)
 ```
 
 Regenerate the stubs after editing the `.proto` (from the repo root):
 
 ```sh
-uv run python -m grpc_tools.protoc -I. --python_out=. --pyi_out=. --grpc_python_out=. apps/privacy_node/privacy_node.proto
+uv run python -m grpc_tools.protoc -Iapps/privacy_node/src --python_out=apps/privacy_node/src --pyi_out=apps/privacy_node/src --grpc_python_out=apps/privacy_node/src apps/privacy_node/src/privacy_node/privacy_node.proto
 ```
 
 Tiny-fixture results (`demo.py`):
