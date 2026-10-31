@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS chains (
   chain_digest TEXT PRIMARY KEY, state INTEGER, result BLOB);
 CREATE TABLE IF NOT EXISTS outbox (
   chain_digest TEXT, bank TEXT, result BLOB, acked INTEGER DEFAULT 0,
+  dead INTEGER DEFAULT 0,
   PRIMARY KEY (chain_digest, bank));
 """
 
@@ -90,8 +91,9 @@ class Store:
             ).rowcount
             for bank in deliver_to if changed else ():
                 self.db.execute(
-                    "INSERT INTO outbox VALUES (?,?,?,0) ON CONFLICT (chain_digest, bank)"
-                    " DO UPDATE SET result=excluded.result, acked=0",
+                    "INSERT INTO outbox (chain_digest, bank, result) VALUES (?,?,?)"
+                    " ON CONFLICT (chain_digest, bank)"
+                    " DO UPDATE SET result=excluded.result, acked=0, dead=0",
                     (result.chain_digest, bank, blob),
                 )
 
@@ -100,7 +102,7 @@ class Store:
         return [pb.ChainResult.FromString(r[0]) for r in rows]
 
     def pending_deliveries(self):
-        rows = self._run("SELECT bank, result FROM outbox WHERE acked=0")
+        rows = self._run("SELECT bank, result FROM outbox WHERE acked=0 AND dead=0")
         return [(bank, pb.ChainResult.FromString(blob)) for bank, blob in rows]
 
     def ack(self, chain_digest, bank):
@@ -109,3 +111,14 @@ class Store:
             chain_digest,
             bank,
         )
+
+    def dead_letter(self, chain_digest, bank):
+        """Stop delivering a result the receiver rejected; kept for inspection."""
+        self._run(
+            "UPDATE outbox SET dead=1 WHERE chain_digest=? AND bank=?",
+            chain_digest,
+            bank,
+        )
+
+    def dead_letters(self):
+        return self._run("SELECT chain_digest, bank FROM outbox WHERE dead=1")
