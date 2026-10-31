@@ -6,10 +6,11 @@ Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation), Caleb (to
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **SGD, all currencies:** `prepare.py` keeps every transfer and converts amounts to SGD: first to USD with the dataset's own rates (which keeps Altman's cross-currency hops consistent), then at MAS's September 2022 average, US$1 = S$1.4136 ([SingStat, source MAS](https://data.gov.sg/datasets/d_b2b7ffe00aaec3936ed379369fdf531b/view)). The USD-only filter keeps only 34% of CYCLE and 22% of RANDOM hops.
 > - **Bank event files:** add `counterparty_account` (Singapore wires carry both accounts, MAS Notice 626 ¶11.4); `amount` in SGD.
+> - **Singapore payment types:** `prepare.py` writes Altman's `ACH` as `GIRO` and `Wire` as `MEPS+`; cheque, card, cash and Bitcoin keep their names. The detection rules use only GIRO and MEPS+ ([streaming.md](streaming.md#detection-rule)).
 > - **Labels and splits:** fetch Altman's patterns file and label each laundering transfer with its attempt ID and `altman_pattern` type. Detection is evaluated offline on dev/eval splits by attempt start ([evaluation.md](../evaluation.md#rules)). Planted chains go only into test fixtures, as the acceptance suite.
 > - **Replay and ingestor:** one replay process sends pacs.008 messages over HTTP to each bank's [ingestor](#ingestor), which replaces the stdin pipe.
 > - **`payment_id`** is described as a stand-in for the ISO 20022 EndToEndId / Swift UETR, which both banks see unchanged.
-> - **Fixture expectations** follow the alert tiers in [case.md](case.md).
+> - **Fixture expectations** follow the one ranked alert tier in [case.md](case.md).
 
 Scope: the synthetic dataset, the split into Banks A, B and C, planted chains, labels, workloads, the committed fixture and replay.
 
@@ -25,6 +26,9 @@ IBM AML synthetic dataset (Altman et al., NeurIPS 2023 Datasets and Benchmarks):
 | Transaction ID | None | We generate `payment_id` |
 | Bank IDs | Inconsistent zero-padding (`010` = `0010`) | Compared as integers |
 | Account IDs | Unique only within a bank | Prefixed with the bank ID |
+| Ordinary activity | Ends on 10 Sep; 11–18 Sep has 715 transfers (self-transfers removed), 652 of them laundering, as the generator finishes its patterns | Never used for false-positive counts ([evaluation.md](../evaluation.md#rules)) |
+
+**pending work:** `HI-Medium_Trans.csv` and `HI-Medium_Patterns.txt` (same Kaggle version; 31,898,238 transfers, about 3.0 GB; ordinary activity ends on 16 Sep) are used once, for the out-of-sample check in [evaluation.md](../evaluation.md#experiments).
 
 ## Preparation rules (`prepare.py`)
 
@@ -46,10 +50,10 @@ Each bank only ever reads its own file.
 | `bank` | `A` | This bank |
 | `direction` | `out` / `in` | |
 | `account` | `22164-801F75F50` | This bank's customer only |
-| `counterparty_account` | `3208-8000F4580` | **pending work:** The other side's account, for the fan-in and fan-out rules; never sent to peers |
+| `counterparty_account` | `3208-8000F4580` | **pending work:** The other side's account, for the new payee and quick repeat rules and each payee's payer count; never sent to peers |
 | `counterparty_bank` | `B` | Which bank to query next |
 | `amount` | `360542.13` | USD today; **pending work:** SGD |
-| `payment_format` | `Wire` | ACH, Cheque, Credit Card, Cash, Wire, Bitcoin |
+| `payment_format` | `Wire` | ACH, Cheque, Credit Card, Cash, Wire, Bitcoin. **pending work:** `GIRO` (Altman's ACH) and `MEPS+` (Altman's Wire) |
 
 ## Labels: `labels.csv` (evaluation only)
 
@@ -61,11 +65,11 @@ Only the evaluation harness reads this file. Labels never go into bank files, Ka
 | `altman_laundering` | `1` = Altman's own label. These aren't planted chains, so report them separately (**draft**, with Isaac) |
 | `chain_id`, `hop` | Planted chain and position (0 = first transfer) |
 | `scenario` | See below |
-| `attempt_id`, `altman_pattern` | **pending work:** Altman's laundering attempt and its type (e.g. `CYCLE`, `FAN-IN`), from `HI-Small_Patterns.txt`; the offline evaluator reports per type |
+| `attempt_id`, `altman_pattern` | **pending work:** Altman's laundering attempt and its type (e.g. `CYCLE`, `FAN-IN`), from `HI-Small_Patterns.txt`; the offline evaluator reports per type. Laundering transfers in no listed attempt (about a third of the cross-bank bank-transfer laundering) leave both empty and are counted by day |
 
 ## Planted scenarios
 
-Planted chains run between accounts that already exist in the slice, start in its first half, and **cross banks on every hop**. They are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). **pending work:** with the alert tiers, a chain alerts (Tier 2) only when at least two banks' rules fire, so a 2-transfer chain, whose only rule hit is at the middle bank, becomes a Tier 1 case there.
+Planted chains run between accounts that already exist in the slice, start in its first half, and **cross banks on every hop**. They are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). **pending work:** with one alert tier, each bank alerts on its own rules' hits, so a 2-transfer chain, whose only rule hit is at the middle bank, alerts there only; a chain that two banks' rules link is marked "confirmed by".
 
 | Scenario | Shape | Expected result |
 | --- | --- | --- |
@@ -80,7 +84,7 @@ Constants in `prepare.py` (**draft**, to agree with Cindy and Zane):
 - `HOP_LIMIT = 4`
 - `FORWARD = 0.90–0.98`, `LOOKALIKE_FORWARD = 0.20–0.50`
 - `DELAY_MIN = 1–30` minutes
-- starting amount USD 5,000–50,000; format ACH or Wire
+- starting amount USD 5,000–50,000; format ACH or Wire (**pending work:** GIRO or MEPS+)
 
 `--chains` sets the number of chains per scenario (default 10, i.e. 50 chains).
 
@@ -112,9 +116,9 @@ Use `--hours 5` or more: chains start in the first half of the slice and the lon
 | --- | --- | --- | --- |
 | — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert |
 | — | p05 | B→C | `altman_laundering = 1`; not a planted chain |
-| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** a Tier 1 case at B only, since only B's rule fired |
+| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** an alert at B only, since only B's rule fired |
 | `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert |
-| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules fire) |
+| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C. **pending work:** alerts at B and C, marked "confirmed by", since B's and C's rules fire; whether A, which signed but whose rule didn't fire, also alerts is open in [case.md](case.md#open) |
 | `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked |
 | `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4 |
 
@@ -190,7 +194,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | --- | --- | --- | --- | --- |
 | pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **draft**, sample TODO | Mon 2 Nov |
 | Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample TODO | Mon 2 Nov |
-| Labels file and splits | Macarius → Isaac | Columns, the split by attempt start | **draft**, sample TODO | Wed 4 Nov |
+| Labels file and splits | Macarius → Isaac | Columns, the split by attempt start, laundering in no attempt counted by day | **draft**, sample TODO | Wed 4 Nov |
 
 ## Open
 

@@ -125,7 +125,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 | Payload | Key | Contents |
 | --- | --- | --- |
 | Chain | `chain_digest` | The `ChainResult`, plus this bank's own legs (payment ID, account, amount) from the token index. Sent when the `chains` row is inserted or upgraded |
-| Tier 1 hit | hit ID | The scorer's hit from Valkey: rule, account, payments |
+| Hit | hit ID | The scorer's hit from Valkey: rule, account, payments; it becomes an alert |
 | Pending search | search ID | "Waiting for bank X", upgraded when the retry confirms |
 | Fully internal chain | hit ID | A local-only chain, with no peer search |
 
@@ -165,8 +165,8 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
 | Valkey layout ([streaming.md](streaming.md#search-handoff)) | Cindy → Zane | Key names, token-index value, local links (including collapsed intra-bank links), `hit:` keys, windows, TTL and trim | **draft**, sample TODO | Wed 4 Nov |
 | `.proto` v1 ([protocol.md](protocol.md#messages)) | Zane ↔ Caleb | `bytes` token, no absolute deadline, unknown fields rejected, the schema test's allow and forbid lists | **draft**, sample TODO | Wed 4 Nov |
-| Node → case service ([protocol.md](protocol.md#result-delivery-to-the-case-service)) | Zane → Jia Rui | Payloads (chains with own legs, Tier 1 hits, pending and internal cases), keys, retry and dead letter | **draft**, sample TODO | Wed 4 Nov |
-| Alert tiers ([case.md](case.md#cases-and-alerts)) | Cindy, Zane → Jia Rui | Rule-backed claim, Tier 1 vs Tier 2, promotion; thresholds come from the offline sweep | **draft**, sample TODO | Wed 4 Nov |
+| Node → case service ([protocol.md](protocol.md#result-delivery-to-the-case-service)) | Zane → Jia Rui | Payloads (chains with own legs, hits, pending and internal cases), keys, retry and dead letter | **draft**, sample TODO | Wed 4 Nov |
+| Alert ranking ([case.md](case.md#cases-and-alerts)) | Cindy, Zane → Jia Rui | Rule-backed claim, the "confirmed by" label, ranking order; thresholds come from the offline sweep | **draft**, sample TODO | Wed 4 Nov |
 | `check_result` ([security.md](security.md)) | Caleb → Zane, Jia Rui | Signature, the six conditions, how a failure is reported | **draft** | Wed 4 Nov |
 
 ## Open
