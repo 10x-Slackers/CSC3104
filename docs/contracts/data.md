@@ -1,6 +1,6 @@
 # Data contract
 
-Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation), Caleb (token input) · Code: `apps/dataset/` · Status: **draft**, needs review by Cindy
+Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events) and Isaac (pacs.008 batch)
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
@@ -9,7 +9,6 @@ Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation), Caleb (to
 > - **Singapore payment types:** `prepare.py` writes Altman's `ACH` as `GIRO` and `Wire` as `MEPS+`; cheque, card, cash and Bitcoin keep their names. The detection rules use only GIRO and MEPS+ ([streaming.md](streaming.md#detection-rule)).
 > - **Labels and splits:** fetch Altman's patterns file and label each laundering transfer with its attempt ID and `altman_pattern` type. Detection is evaluated offline on dev/eval splits by attempt start ([evaluation.md](../evaluation.md#rules)). Planted chains go only into test fixtures, as the acceptance suite.
 > - **Replay and ingestor:** one replay process sends pacs.008 messages over HTTP to each bank's [ingestor](#ingestor), which replaces the stdin pipe.
-> - **`payment_id`** is described as a stand-in for the ISO 20022 EndToEndId / Swift UETR, which both banks see unchanged.
 > - **Fixture expectations** follow the one ranked alert tier in [case.md](case.md).
 
 Scope: the synthetic dataset, the split into Banks A, B and C, planted chains, labels, workloads, the committed fixture and replay.
@@ -45,7 +44,7 @@ Each bank only ever reads its own file.
 
 | Column | Example | Notes |
 | --- | --- | --- |
-| `payment_id` | `008f4681d368aece` | Same at both endpoints; the input for `derive_token` ([security.md](security.md)) |
+| `payment_id` | `008f4681d368aece` | Same at both endpoints: a stand-in for the ISO 20022 EndToEndId or Swift UETR, which both banks see unchanged ([ISO 20022](https://www.iso20022.org/standardsrepository/type/PaymentIdentification13), [Swift](https://www.swift.com/payments/what-unique-end-end-transaction-reference-uetr)). The input for `derive_token` ([security.md](security.md)) |
 | `event_time` | `2022-09-05T00:00:00Z` | Event time, not replay time |
 | `bank` | `A` | This bank |
 | `direction` | `out` / `in` | |
@@ -143,46 +142,61 @@ At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as
 
 ## Ingestor
 
-**pending work (Macarius):** Each bank's entry point: it normalises a payment message into this contract's events, validates it and produces it to Kafka. A plain container locally, AWS Lambda with a function URL (`AuthType: AWS_IAM`, requests signed with SigV4) on EKS. It replaces the scorer's stdin ingest mode.
+Each bank's entry point: it turns a payment message into this contract's events, validates them and produces them to Kafka. `ingestor.records()` (`apps/ingestor/`) does the mapping and every check, and its test loads both shared samples. **pending work (Macarius):** the Kafka producer, an HTTP server (with `/healthz`) and `lambda_handler` around it: a plain container locally, AWS Lambda with a function URL (`AuthType: AWS_IAM`, requests signed with SigV4) on EKS. It replaces the scorer's stdin ingest mode.
 
-**Input:** a subset of ISO 20022 **pacs.008** (FIToFICustomerCreditTransfer, as used by FAST) as JSON over HTTP POST, one batch per message. JSON keys use the XML element names.
+**Input:** a subset of ISO 20022 **pacs.008** (FIToFICustomerCreditTransfer, as used by FAST) as JSON over HTTP POST, one batch per message. JSON keys use the XML element names. The shared sample, [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json), is a batch to Bank B with three fixture payments: `p02` (intra-bank at B), `p06` (from A) and `p07` (to C). Its header and `p06`:
 
 ```json
 {"FIToFICstmrCdtTrf": {
-  "GrpHdr": {"MsgId": "replay-A-000123", "CreDtTm": "2022-09-05T00:00:05Z", "NbOfTxs": "1"},
-  "CdtTrfTxInf": [{
-    "PmtId": {"EndToEndId": "008f4681d368aece"},
-    "PmtTpInf": {"LclInstrm": {"Prtry": "Cheque"}},
-    "IntrBkSttlmAmt": {"Ccy": "SGD", "Amt": "509662.35"},
-    "AccptncDtTm": "2022-09-05T00:00:00Z",
-    "DbtrAcct": {"Id": {"Othr": {"Id": "22164-801F75F50"}}}, "DbtrAgt": {"FinInstnId": {"BICFI": "TSTASGSG"}},
-    "CdtrAcct": {"Id": {"Othr": {"Id": "3208-8000F4580"}}},  "CdtrAgt": {"FinInstnId": {"BICFI": "TSTBSGSG"}}
-  }]
+  "GrpHdr": {"MsgId": "replay-B-000001", "CreDtTm": "2022-09-05T09:25:00Z", "NbOfTxs": "3"},
+  "CdtTrfTxInf": [{"PmtId": {"EndToEndId": "p02"}, ...}, {
+    "PmtId": {"EndToEndId": "p06"},
+    "PmtTpInf": {"LclInstrm": {"Prtry": "MEPS+"}},
+    "IntrBkSttlmAmt": {"Ccy": "SGD", "Amt": "10000.00"},
+    "AccptncDtTm": "2022-09-05T09:10:00Z",
+    "DbtrAcct": {"Id": {"Othr": {"Id": "A-m0"}}}, "DbtrAgt": {"FinInstnId": {"BICFI": "TSTASGSG"}},
+    "CdtrAcct": {"Id": {"Othr": {"Id": "B-m1"}}}, "CdtrAgt": {"FinInstnId": {"BICFI": "TSTBSGSG"}}
+  }, {"PmtId": {"EndToEndId": "p07"}, ...}]
 }}
 ```
 
-Bank identifiers are fictional BICs, in one table shared by replay and the ingestor: A `TSTASGSG`, B `TSTBSGSG`, C `TSTCSGSG`. Replay sends each transfer to **both** banks involved, or once if it's intra-bank.
+Bank identifiers are fictional BICs: A `TSTASGSG`, B `TSTBSGSG`, C `TSTCSGSG`. The one table is `ingestor.BICS`, which replay imports. It lives in the ingestor rather than in `dataset` so the ingestor's Lambda image doesn't pull in pandas and kagglehub.
 
 | Event field | From |
 | --- | --- |
 | `payment_id` | `PmtId.EndToEndId`, also the idempotency key |
-| `event_time` | `AccptncDtTm` (UTC) |
+| `event_time` | `AccptncDtTm` (UTC, `Z`) |
 | `bank` | The ingestor's own bank (config) |
-| `direction` | `out` if `DbtrAgt` is this bank, `in` if `CdtrAgt` is; an intra-bank transfer emits both |
+| `direction` | `out` if `DbtrAgt` is this bank, `in` if `CdtrAgt` is; an intra-bank transfer emits both, `out` first |
 | `account`, `counterparty_account` | `DbtrAcct` / `CdtrAcct`, by direction |
 | `counterparty_bank` | The other agent's BIC, mapped back to `A`/`B`/`C` |
-| `amount` | `IntrBkSttlmAmt.Amt`; reject the batch unless `Ccy` is `SGD` |
-| `payment_format` | `PmtTpInf.LclInstrm.Prtry` |
+| `amount` | `IntrBkSttlmAmt.Amt` (a decimal string), written as a JSON number; `Ccy` must be `SGD` |
+| `payment_format` | `PmtTpInf.LclInstrm.Prtry`: `GIRO` and `MEPS+` for bank transfers (Altman's ACH and Wire), and `Cheque`, `Cash`, `Credit Card` and `Bitcoin` as proprietary local instruments |
 
-Behaviour:
+The events and their Kafka headers are in [streaming.md](streaming.md#kafka-events).
 
-- **Validation at the boundary:** `validate()` moves here from the scorer. Return 400 for the whole batch if any transaction names neither agent as this bank, or if `NbOfTxs` doesn't match the transaction count.
-- **Acknowledge only after a durable write:** produce every event keyed by `account` to `bank-<X>-transactions`, call `flush()` once, then return 200. On a Kafka error, return 5xx and replay retries the same batch, which is safe because `EndToEndId` is a caller-supplied idempotency key.
+### Batches and responses
+
+**draft**, Isaac to approve (he owns the replay Job).
+
+| Item | Decision |
+| --- | --- |
+| Endpoint | `POST /` with the batch as the JSON body; `GET /healthz` for the readiness probe |
+| What a batch holds | Only payments that involve this bank. Replay sends each payment to both banks involved, or once if it's intra-bank: `p06` goes to A and to B, `p02` only to B |
+| Batch size | The payments due at the same moment, at most 100. At `--speed 60` one Altman minute replays in one second; on HI-Small, 1–10 Sep, a bank receives 158–192 payments a second on average (p99 418–471, busiest minute 1,870), so usually two batches a second. 100 payments are about 40 KB, far under the function URL's [6 MB request limit](https://docs.aws.amazon.com/lambda/latest/dg/API_CreateFunctionUrlConfig.html) |
+| `200` | Every event is in Kafka (`flush()` left nothing). Body `{"events": <n>}` |
+| `400` | The whole batch is rejected and nothing is produced: `NbOfTxs` doesn't match the transaction count, a payment names neither agent as this bank, `Ccy` isn't `SGD`, the amount isn't positive, `AccptncDtTm` isn't UTC (`Z`), a field is missing or empty, or a BIC is unknown. Body `{"error": "<reason>"}`. Replay stops with an error, because resending the same batch can't succeed |
+| `5xx`, `429`, timeout | Replay resends the same batch (same `MsgId` and `EndToEndId`s) with exponential backoff and full jitter, from 1 s doubling to at most 30 s, until it succeeds ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)). `503` means Kafka didn't confirm every event within `message.timeout.ms`; `429` is Lambda throttling. Replay keeps one queue per bank, so a bank that's down delays only its own batches |
+| Duplicates | A resent batch can write some events twice; consumers drop repeats by `ce_id` ([streaming.md](streaming.md#kafka-events)) |
+
+Behaviour (**pending work**):
+
+- **Validation at the boundary:** `validate()` moves here from the scorer; `records()` already makes its checks (the `400` row).
+- **Acknowledge only after a durable write:** produce every event keyed by `account` to `bank-<X>-transactions`, call `flush()` once, then return 200. If anything is left, return 503 and replay resends the batch, which is safe because `EndToEndId` is a caller-supplied idempotency key ([AWS](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)).
 - **Producer:** `confluent_kafka` with `enable.idempotence: True` (librdkafka defaults it to false; enabling it sets `acks=all`) and `message.timeout.ms` 25 s against a 30 s Lambda timeout.
-- **Kafka record headers** in CloudEvents binary mode: `ce_specversion: 1.0`, `ce_id: <payment_id>-<direction>`, `ce_source: /bank/<X>/ingestor`, `ce_type: payment.<direction>`, `ce_time`, `content-type: application/json`.
 - **Code shape:** one `handle(body) -> (status, body)` with two thin adapters, an HTTP server (with `/healthz`) and `lambda_handler`. The producer is created at module level so warm invocations reuse it.
 - **Why not gRPC:** Lambda can't be a gRPC target (ALB gRPC target groups don't allow Lambda), and the input is a payment-network message, not a schema we design. gRPC is used between long-lived peers; HTTP + JSON at the serverless edge.
-- **Stated simplifications:** JSON instead of FAST's XML; intra-bank book transfers wouldn't go through FAST; cheque, cash and card aren't credit transfers, so they're carried as a proprietary local instrument.
+- **Stated simplifications:** JSON instead of FAST's XML; a subset of pacs.008 that leaves out elements a real message requires but detection doesn't need, such as the charge bearer (`ChrgBr`) and the debtor and creditor parties (`Dbtr`, `Cdtr`); intra-bank book transfers wouldn't go through FAST; cheque, cash and card aren't credit transfers, so they're carried as a proprietary local instrument.
 
 **Replay (**pending work**):** one process feeds all three banks from one clock, so `--start-at` coordination goes away. It retries a batch on 5xx, adds `--rate` (events/s, open-loop) for load tests, and keeps `--speed` for the demo. On k3d it runs as a Job in its own `replay` namespace; on EKS it signs requests with SigV4.
 
@@ -192,8 +206,8 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **draft**, sample TODO | Mon 2 Nov |
-| Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample TODO | Mon 2 Nov |
+| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **draft**, sample [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json); Isaac to approve | Mon 2 Nov |
+| Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json); Cindy to approve | Mon 2 Nov |
 | Labels file and splits | Macarius → Isaac | Columns, the split by attempt start, laundering in no attempt counted by day | **draft**, sample TODO | Wed 4 Nov |
 
 ## Open
