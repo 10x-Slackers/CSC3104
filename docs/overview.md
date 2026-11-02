@@ -103,5 +103,6 @@ flowchart LR
 
 | Event | Date (2026) |
 | --- | --- |
-| Progress presentation (live progress check) | 29 Oct |
-| Final submission (working system, tested in containers) | 15 Nov, 23:59 |
+| Progress presentation (live progress check) | Tue 27 Oct |
+| Final submission (working system, tested in containers) | Fri 20 Nov, 23:59 |
+| Dell Cloud Native Award presentation (top 3 teams only) | Wed 2 Dec |
