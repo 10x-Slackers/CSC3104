@@ -142,7 +142,12 @@ At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as
 
 ## Ingestor
 
-Each bank's entry point: it turns a payment message into this contract's events, validates them and produces them to Kafka. `ingestor.records()` (`apps/ingestor/`) does the mapping and every check, and its test loads both shared samples. **pending work (Macarius):** the Kafka producer, an HTTP server (with `/healthz`) and `lambda_handler` around it: a plain container locally, AWS Lambda with a function URL (`AuthType: AWS_IAM`, requests signed with SigV4) on EKS. It replaces the scorer's stdin ingest mode.
+Each bank's entry point: it turns a payment message into this contract's events, validates them and produces them to Kafka. `ingestor.records()` (`apps/ingestor/`) does the mapping and every check, and its test loads both shared samples. `ingestor.app` produces the records to Kafka and serves them two ways: an HTTP server, as a plain container locally and on k3d, and `lambda_handler` behind a Lambda function URL (`AuthType: AWS_IAM`, requests signed with SigV4) on EKS. Its settings are in [deployment.md](deployment.md#per-service-settings). It replaces the scorer's stdin ingest mode, which the scorer drops in [#19](https://github.com/10x-Slackers/CSC3104/issues/19).
+
+```sh
+INGESTOR_BANK=B uv run python -m ingestor.app                     # Kafka at localhost:9092
+curl -d @apps/ingestor/fixtures/pacs008_batch.json localhost:8080   # {"events": 4}
+```
 
 **Input:** a subset of ISO 20022 **pacs.008** (FIToFICustomerCreditTransfer, as used by FAST) as JSON over HTTP POST, one batch per message. JSON keys use the XML element names. The shared sample, [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json), is a batch to Bank B with three fixture payments: `p02` (intra-bank at B), `p06` (from A) and `p07` (to C). Its header and `p06`:
 
@@ -184,17 +189,18 @@ The events and their Kafka headers are in [streaming.md](streaming.md#kafka-even
 | Endpoint | `POST /` with the batch as the JSON body; `GET /healthz` for the readiness probe |
 | What a batch holds | Only payments that involve this bank. Replay sends each payment to both banks involved, or once if it's intra-bank: `p06` goes to A and to B, `p02` only to B |
 | Batch size | The payments due at the same moment, at most 100. At `--speed 60` one Altman minute replays in one second; on HI-Small, 1–10 Sep, a bank receives 158–192 payments a second on average (p99 418–471, busiest minute 1,870), so usually two batches a second. 100 payments are about 40 KB, far under the function URL's [6 MB request limit](https://docs.aws.amazon.com/lambda/latest/dg/API_CreateFunctionUrlConfig.html) |
-| `200` | Every event is in Kafka (`flush()` left nothing). Body `{"events": <n>}` |
+| `200` | Kafka confirmed every event: `flush()` returned and no delivery failed. Body `{"events": <n>}` |
 | `400` | The whole batch is rejected and nothing is produced: `NbOfTxs` doesn't match the transaction count, a payment names neither agent as this bank, `Ccy` isn't `SGD`, the amount isn't positive, `AccptncDtTm` isn't UTC (`Z`), a field is missing or empty, or a BIC is unknown. Body `{"error": "<reason>"}`. Replay stops with an error, because resending the same batch can't succeed |
 | `5xx`, `429`, timeout | Replay resends the same batch (same `MsgId` and `EndToEndId`s) with exponential backoff and full jitter, from 1 s doubling to at most 30 s, until it succeeds ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)). `503` means Kafka didn't confirm every event within `message.timeout.ms`; `429` is Lambda throttling. Replay keeps one queue per bank, so a bank that's down delays only its own batches |
 | Duplicates | A resent batch can write some events twice; consumers drop repeats by `ce_id` ([streaming.md](streaming.md#kafka-events)) |
 
-Behaviour (**pending work**):
+Behaviour:
 
-- **Validation at the boundary:** `validate()` moves here from the scorer; `records()` already makes its checks (the `400` row).
-- **Acknowledge only after a durable write:** produce every event keyed by `account` to `bank-<X>-transactions`, call `flush()` once, then return 200. If anything is left, return 503 and replay resends the batch, which is safe because `EndToEndId` is a caller-supplied idempotency key ([AWS](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)).
-- **Producer:** `confluent_kafka` with `enable.idempotence: True` (librdkafka defaults it to false; enabling it sets `acks=all`) and `message.timeout.ms` 25 s against a 30 s Lambda timeout.
-- **Code shape:** one `handle(body) -> (status, body)` with two thin adapters, an HTTP server (with `/healthz`) and `lambda_handler`. The producer is created at module level so warm invocations reuse it.
+- **Validation at the boundary:** `records()` makes the scorer's `validate()` checks (the `400` row); the scorer keeps its own until [#19](https://github.com/10x-Slackers/CSC3104/issues/19).
+- **Acknowledge only after a durable write:** `handle()` produces every event keyed by `account` to `bank-<X>-transactions`, calls `flush()` once, then returns 200. If Kafka reports any event undelivered, it returns 503 and replay resends the batch, which is safe because `EndToEndId` is a caller-supplied idempotency key ([AWS](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)). With no broker reachable, the 503 comes after 25 s.
+- **Producer:** `confluent_kafka` with `enable.idempotence: True` (librdkafka defaults it to false; enabling it sets `acks=all`) and `message.timeout.ms` 25 s against a 30 s Lambda timeout. It's created at module level so warm invocations reuse it.
+- **Code shape:** one `handle(body) -> (status, reply)` with two thin adapters: `Handler`, for the standard library's `ThreadingHTTPServer`, with keep-alive, `POST /` and `GET /healthz`; and `lambda_handler`, for the function URL's payload format 2.0, whose `body` is the batch.
+- **Logs:** one JSON line per batch to stdout, e.g. `{"ts": 1793500000.123, "service": "ingestor", "bank": "B", "status": 200, "ms": 4.2, "events": 4, "payment_ids": ["p02", "p02", "p06", "p07"]}`. `ts` is also every record's Kafka timestamp, so the evaluation joins each `payment_id` to it ([evaluation.md](../evaluation.md#metric-definitions)). A rejected batch logs its `error` and no IDs.
 - **Why not gRPC:** Lambda can't be a gRPC target (ALB gRPC target groups don't allow Lambda), and the input is a payment-network message, not a schema we design. gRPC is used between long-lived peers; HTTP + JSON at the serverless edge.
 - **Stated simplifications:** JSON instead of FAST's XML; a subset of pacs.008 that leaves out elements a real message requires but detection doesn't need, such as the charge bearer (`ChrgBr`) and the debtor and creditor parties (`Dbtr`, `Cdtr`); intra-bank book transfers wouldn't go through FAST; cheque, cash and card aren't credit transfers, so they're carried as a proprietary local instrument.
 

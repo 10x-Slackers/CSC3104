@@ -5,7 +5,7 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **Consume only:** the ingest mode and `validate()` move to the [ingestor](data.md#ingestor) (Macarius, who also owns this doc's event schema).
-> - **Event schema (draft, Macarius → Cindy):** each event gains `counterparty_account` and CloudEvents headers ([Kafka events](#kafka-events)).
+> - **Event schema (draft, Macarius → Cindy):** the ingestor writes `counterparty_account` and CloudEvents headers ([Kafka events](#kafka-events)); the scorer reads neither yet ([#19](https://github.com/10x-Slackers/CSC3104/issues/19)).
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Four rules** replace the single rule: fast pass-through, chain, new payee and quick repeat, on cross-bank bank transfers ([Detection rule](#detection-rule)). The scorer runs as a library over a bank file for the offline evaluator.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
@@ -21,21 +21,23 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Item | Decision |
 | --- | --- |
 | Topic names | `bank-A-transactions`, `bank-B-transactions`, `bank-C-transactions` |
-| Event identity / dedup key | `(payment_id, direction, account)` within one bank; scorer deduplication lasts only while the event is retained. **pending work:** the `ce_id` header, `<payment_id>-<direction>`, names the same event; a batch the ingestor resends can write an event twice, so consumers drop repeats by it |
-| Record value (**draft**) | **pending work:** JSON with nine fields: the eight in [data.md](data.md#bank-event-files-bank_abccsv) plus `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
-| Record headers (**draft**) | **pending work:** CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, which latency is measured from ([evaluation.md](../evaluation.md#metric-definitions)) |
-| Intra-bank transfers (**draft**) | **pending work:** two records, `out` then `in`, with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, then key `B-carol`, `ce_id` `p02-in` |
+| Event identity / dedup key | `(payment_id, direction, account)` within one bank; scorer deduplication lasts only while the event is retained. The ingestor's `ce_id` header, `<payment_id>-<direction>`, names the same event; a batch the ingestor resends can write an event twice. **pending work (Cindy):** consumers drop repeats by `ce_id` |
+| Record value (**draft**) | JSON with nine fields: the eight in [data.md](data.md#bank-event-files-bank_abccsv) plus `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
+| Record headers (**draft**) | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, the same for a whole batch and logged as its `ts`; latency is measured from it ([evaluation.md](../evaluation.md#metric-definitions)) |
+| Intra-bank transfers (**draft**) | Two records, `out` then `in`, with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, then key `B-carol`, `ce_id` `p02-in` |
 | Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order no longer matters |
 | Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window`. Events are retained for twice `--window` so an accepted late event still finds its partner |
 
-The ingestor reads Role 1's JSONL replay from stdin using the event format in
-[data.md](data.md). It rejects invalid or wrong-bank events; the consumer also
-checks the topic and account key. Both accept `--bootstrap-servers` (default
-`localhost:9092`). Producer queue waits and final flush are each bounded at 30 seconds.
-The k3d Kafka has only an in-cluster listener, so run the scripts inside the
-cluster with `--bootstrap-servers kafka-kafka-bootstrap:9092`; a port-forward does
-not work because the broker advertises in-cluster addresses. The consumer may
-start before the topic exists: non-fatal Kafka errors are logged and retried.
+The [ingestor](data.md#ingestor) (`apps/ingestor/`) receives pacs.008 batches
+over HTTP, rejects invalid or wrong-bank ones whole, and produces these records.
+The scorer's stdin `ingest` mode is still there until
+[#19](https://github.com/10x-Slackers/CSC3104/issues/19) removes it. The consumer
+also checks the topic and account key. The ingestor reads the broker list from
+`KAFKA_BOOTSTRAP_SERVERS` and the scorer from `--bootstrap-servers` (both default
+`localhost:9092`). The k3d Kafka has only an in-cluster listener, so run them inside
+the cluster with `kafka-kafka-bootstrap:9092`; a port-forward does not work because
+the broker advertises in-cluster addresses. The consumer may start before the topic
+exists: non-fatal Kafka errors are logged and retried.
 
 Scorer history is in memory: at most `--max-events` (default 10,000) globally,
 with time expiry per account. Capacity eviction removes the oldest arrival; each

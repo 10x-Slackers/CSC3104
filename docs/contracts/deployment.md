@@ -47,7 +47,7 @@ Each owner fills in their own row.
 | Service | Owner | Image | Ports | Readiness / liveness | Resources | Config / Secrets |
 | --- | --- | --- | --- | --- | --- | --- |
 | Replay Job | Macarius | | — | — | | |
-| Ingestor (Lambda on EKS) | Macarius | | HTTP | HTTP `/healthz` | | |
+| Ingestor (Lambda on EKS) | Macarius | The one pattern; entrypoint `python -m ingestor.app`; Lambda handler `ingestor.app.lambda_handler`, timeout 30 s | HTTP `8080` (`PORT`): `POST /` with a batch | Readiness `GET /healthz`: up once it serves; a Kafka outage shows as `503` on `POST` instead | 29 MB resident when idle (measured); memory request 64Mi, limit 128Mi; CPU to be measured under load | `INGESTOR_BANK` (`A`, `B` or `C`), `KAFKA_BOOTSTRAP_SERVERS` (k3d: `kafka-kafka-bootstrap:9092`), `PORT`; no Secrets; one JSON log line per batch to stdout ([data.md](data.md#ingestor)) |
 | Scorer | Cindy | | — | | | |
 | Privacy node | Zane | | gRPC | gRPC health | | |
 | Case service / UI | Jia Rui | | HTTP | HTTP `/healthz` | | |

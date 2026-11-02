@@ -1,8 +1,8 @@
 """Each bank's ingestor: pacs.008 batches in, Kafka transaction events out.
 
-`records()` is the whole mapping and every check. The Kafka producer, the HTTP
-server and `lambda_handler` are pending work. Contract: docs/contracts/data.md
-(Ingestor) and docs/contracts/streaming.md (Kafka events).
+`records()` is the whole mapping and every check; `ingestor.app` produces the
+records and serves HTTP and Lambda. Contract: docs/contracts/data.md (Ingestor)
+and docs/contracts/streaming.md (Kafka events).
 """
 
 import math
