@@ -70,7 +70,7 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | Minimum chain length | Replaced by the alert tiers | **pending work:** [case.md](case.md#cases-and-alerts) |
 | Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md); checked by a 4/6/8 sweep |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
-| Fees, currencies, insufficient history | Uses Role 1's USD-only data; no separate fee model. Missing/evicted history produces no local match | **pending work:** all amounts in SGD ([data.md](data.md)); history bounded by the event-time trim, not a count |
+| Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing/evicted history produces no local match | **pending work:** history bounded by the event-time trim, not a count |
 
 **pending work (Cindy):** four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` (Altman's ACH and Wire, relabelled in [data.md](data.md)). Cheque, card, cash and Bitcoin payments are never flagged. Starting thresholds come from the exploratory sweep below and are confirmed on the dev split ([evaluation.md](../evaluation.md#rules)). No regulator publishes numeric thresholds, so each rule cites a red flag and its numbers come from tuning.
 

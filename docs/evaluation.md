@@ -7,7 +7,7 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 ## Rules
 
 - **Two kinds of test data.** The planted chains in the committed fixture are a deterministic **acceptance suite**: they check that tracing works, never how well detection works. Detection quality is measured against **Altman's labelled laundering attempts** ([data.md](contracts/data.md#labels-labelscsv-evaluation-only)).
-- **Dev/eval split by attempt start.** Dev = attempts that start 1–5 Sep 2022, eval = attempts that start 6–10 Sep. Each run reads its own days plus the following days so attempts can finish, and counts false positives only on its own days. Days 11–18 are the generator finishing its patterns and are never used for false-positive counts. Tune only on dev; run eval **once**. **pending work:** an eval run first reads the earlier days as rule history (payee sets, chain windows) without counting them; starting empty on 6 Sep doubled the ordinary payments flagged in the exploratory sweep (2.75% vs 1.38%), because every payee looks new. Laundering transfers in no Altman attempt are assigned to dev or eval by the day they happen.
+- **Dev/eval split by attempt start.** Dev = attempts that start 1–5 Sep 2022, eval = attempts that start 6–10 Sep. Each run reads its own days plus the following days so attempts can finish, and counts false positives only on its own days. Days 11–18 are the generator finishing its patterns and are never used for false-positive counts. Tune only on dev; run eval **once**. Both read all of `altman-small` ([data.md](contracts/data.md#workloads)), so an eval run first reads 1–5 Sep as rule history (payee sets, chain windows) without counting them; starting empty on 6 Sep doubled the ordinary payments flagged in the exploratory sweep (2.75% vs 1.38%), because every payee looks new. Laundering transfers in no Altman attempt are assigned to dev or eval by the day they happen.
 - **Scope.** The rules target **cross-bank bank transfers** (GIRO and MEPS+). Report recall over that scope, and account for every other laundering transfer separately: same-bank, cheque/card/cash (mostly from bank-70 hub accounts, whose laundering no rule separates from their ordinary payments), and the days after ordinary activity stops.
 - **Named SLIs, percentiles not means.** End-to-end detection latency (p50, p95) and alert correctness. SLO targets are chosen after the first baseline and before any comparative run. Never present an unmeasured target as a result.
 - **Sound benchmarking** (Hoefler and Belli, SC'15): run each configuration at least 5 times and report the median and p95 with min/max, documenting every factor that varies.
@@ -19,11 +19,11 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 
 **pending work (Isaac):** a workspace package `apps/evaluation/`, run with `uv run python -m evaluation.offline`.
 
-- **Input:** `prepare.py`'s bank files and labels file, with the attempt ID and `altman_pattern` per laundering transfer.
+- **Input:** `prepare.py`'s bank files and labels file (`altman-small`, and `altman-medium` for experiment 14), with the attempt ID and `altman_pattern` per laundering transfer.
 - **Same code as the live path:** each bank's scorer runs as a library over its bank file, with an in-memory state store. The existing in-process three-node trace (the privacy node's CSV mode) then produces cross-bank chains and tiers. No Kafka, Valkey or gRPC servers.
 - **Output, per Altman pattern type:** attempts caught at Tier 1 (local) and at Tier 2 (cross-bank), precision, and analyst load (cases per bank per day, by tier). An attempt counts as caught if any of its transfers is in a case. Also report **payment-level** recall over the scope, which counts laundering in no attempt (about a third of HI-Small's in-scope laundering), and the false-positive rate as ordinary payments flagged / all payments on the split's own days.
 - **Where it runs:** a laptop for the full splits; CI runs it on the committed fixture as a regression test.
-- **Bridge to the cluster:** replay one eval day through k3d at `--speed 0` and compare the stored cases with the offline output for the same day. They must match (experiment 13).
+- **Bridge to the cluster:** replay 1 Sep up to the end of one eval day (e.g. 6 Sep) through k3d at `--speed 0`, so the live rules have the same history as the offline run, and compare that day's stored cases with the offline output for the same day. They must match (experiment 13).
 
 ## Experiments
 
@@ -43,8 +43,8 @@ Experiments 2–4 and 14 run offline; the rest run on k3d, and 10 on AWS.
 | 10 | Lambda | Ingestor and summary under load | Cold and warm latency separately; CloudWatch invocations, errors, duration |
 | 11 | Valkey loss | Delete Valkey and rebuild by replay from `earliest` | Rebuild time = RTO; RPO 0 |
 | 12 | Key rotation | Rotate a pair key during a live replay | No missed links |
-| 13 | Offline = live | One eval day through k3d at `--speed 0` vs the offline run | Identical cases and tiers |
-| 14 | Out of sample | Rules frozen from HI-Small, run once on HI-Medium's days with ordinary activity (1–16 Sep) ([data.md](contracts/data.md#source)) | Recall (attempts and payments), false-positive rate |
+| 13 | Offline = live | 1–6 Sep through k3d at `--speed 0` (1–5 Sep as history) vs the offline run | Identical cases and tiers on 6 Sep |
+| 14 | Out of sample | Rules frozen from HI-Small, run once on `altman-medium`, counting its days with ordinary activity (1–16 Sep) ([data.md](contracts/data.md#workloads)) | Recall (attempts and payments), false-positive rate |
 
 Security evidence (sentinel values never leave a bank; bad certificates and claims rejected; cross-bank store access denied) is listed in [security.md](contracts/security.md#tests).
 
