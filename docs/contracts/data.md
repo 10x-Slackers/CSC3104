@@ -1,6 +1,6 @@
 # Data contract
 
-Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events) and Isaac (pacs.008 batch)
+Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events)
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
@@ -177,7 +177,7 @@ The events and their Kafka headers are in [streaming.md](streaming.md#kafka-even
 
 ### Batches and responses
 
-**draft**, Isaac to approve (he owns the replay Job).
+**agreed** (Isaac, 2 Nov 2026).
 
 | Item | Decision |
 | --- | --- |
@@ -206,7 +206,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **draft**, sample [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json); Isaac to approve | Mon 2 Nov |
+| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **agreed** (Isaac, 2 Nov 2026), sample [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json) | Mon 2 Nov |
 | Labels file and splits | Macarius → Isaac | Columns, the split by attempt start, laundering in no attempt counted by day | **draft**, sample TODO | Wed 4 Nov |
 
 Also part of: [Kafka transaction event](streaming.md#interfaces).
