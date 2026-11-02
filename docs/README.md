@@ -35,5 +35,5 @@ Every doc in `contracts/` follows the same frame; the sections in between are th
 2. A `> [!NOTE]` banner, **Pending work (decided 30 Oct 2026)**, listing what changes today's design. Remove it when it's empty.
 3. `Scope:` in one sentence.
 4. The owner's sections, describing what exists today, with inline **pending work** where it changes.
-5. `## Interfaces`: one row per interface the owner produces or consumes (interface, from → to, what it pins down, status, agree-by date). Both sides list it.
+5. `## Interfaces`: one row per interface this doc owns (interface, from → to, what it pins down, status, agree-by date), stated nowhere else. Interfaces the owner only takes part in follow as one `Also part of:` line of links to the owning doc.
 6. `## Open`: a checklist, unresolved items first, each ending with its owner in parentheses; resolved items stay ticked with the decision.
