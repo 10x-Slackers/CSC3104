@@ -4,7 +4,6 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Consume only:** the ingest mode and `validate()` move to the [ingestor](data.md#ingestor) (Macarius, who also owns this doc's event schema).
 > - **Event schema (draft, Macarius → Cindy):** each event gains `counterparty_account` and CloudEvents headers ([Kafka events](#kafka-events)).
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Four rules** replace the single rule: fast pass-through, chain, new payee and quick repeat, on cross-bank bank transfers ([Detection rule](#detection-rule)). The scorer runs as a library over a bank file for the offline evaluator.
@@ -28,14 +27,15 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order no longer matters |
 | Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window`. Events are retained for twice `--window` so an accepted late event still finds its partner |
 
-The ingestor reads Role 1's JSONL replay from stdin using the event format in
-[data.md](data.md). It rejects invalid or wrong-bank events; the consumer also
-checks the topic and account key. Both accept `--bootstrap-servers` (default
-`localhost:9092`). Producer queue waits and final flush are each bounded at 30 seconds.
-The k3d Kafka has only an in-cluster listener, so run the scripts inside the
-cluster with `--bootstrap-servers kafka-kafka-bootstrap:9092`; a port-forward does
-not work because the broker advertises in-cluster addresses. The consumer may
-start before the topic exists: non-fatal Kafka errors are logged and retried.
+The [ingestor](data.md#ingestor) (`apps/ingestor/`) validates every event and
+produces these records; the scorer only consumes them and trusts their fields. It
+still checks the topic and account key. Run it with
+`uv run python -m scorer.stream B --bootstrap-servers <brokers> --group <fresh-group>`
+(default `localhost:9092`). The k3d Kafka has only an in-cluster listener, so run it
+inside the cluster with `kafka-kafka-bootstrap:9092`; a port-forward does not work
+because the broker advertises in-cluster addresses. The consumer may start before
+the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
+the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
 Scorer history is in memory: at most `--max-events` (default 10,000) globally,
 with time expiry per account. Capacity eviction removes the oldest arrival; each
@@ -104,14 +104,14 @@ it is not an approved peer payload.
 
 ## Token index
 
-Optional `TokenIndex` population runs on validated cross-bank events before
+Optional `TokenIndex` population runs on cross-bank events before
 scoring, including unflagged and scorer-too-late events. It uses the original
 `payment_id` and actual `counterparty_bank` with Role 4's `canonical_pair`,
 `derive_token` and `load_pairwise_keys`; same-bank events are skipped. See
 [security.md](security.md) for the token and secret-file contract.
 
 Enable with `--key-version k1` and repeated `--pairwise-key PEER PATH` options on
-`python -m scorer.stream consume`; omitting both keeps scorer-only operation. Missing/invalid
+`python -m scorer.stream`; omitting both keeps scorer-only operation. Missing/invalid
 configuration fails; an event whose pair lacks a key is not committed. A new
 key/version requires a new index and replay; there is no old-key fallback.
 
@@ -146,7 +146,32 @@ replay with a fresh group; there is no atomic durable handoff or exactly-once
 guarantee. Role 3's existing pending/timed-out search retries and result outbox
 are unchanged.
 
-**pending work:** the scorer writes to Valkey and the privacy node reads from it, so they run in separate pods. Keys: a sorted set per account for window state; `tok:<pair>:<ver>:<token>` → `(payment, direction, account, amount)`; `link:in:<payment>` → outgoing payments; `hit:<id>` → (rule, account, payments), where the ID is a hash of rule, account and first payment so a replay rewrites the same key; `payees:<account>` → the set of counterparty accounts this customer has paid (new payee); `payers:<account>` → the set of distinct payers into this account (the ≥ 30 cap); `flag:<account>:<counterparty>` → the time of the last flagged payment between them (quick repeat); plus the per-account watermark and dedup keys. Windows: 30 min of all events for the fast rule, 72 h of bank-transfer events for the chain rule; the payee and payer sets keep the whole history (TTL TBD). Only the scorer and the privacy node may connect. On loss, Valkey is rebuilt by replaying from `earliest` with a fresh group.
+### Valkey layout (**draft**, Cindy → Zane)
+
+**pending work:** the scorer writes to Valkey and the privacy node reads from it, so they run in separate pods. One Valkey per bank, so keys carry no bank prefix. Only the scorer and the privacy node connect ([security.md](security.md#mtls-and-networkpolicy)). Client: [valkey-py](https://github.com/valkey-io/valkey-py).
+
+| Key | Type | Value | Read by |
+| --- | --- | --- | --- |
+| `win:<account>` | sorted set | One member per GIRO/MEPS+ event on this account: compact JSON (sorted keys) of `payment_id`, `direction`, `amount`, `payment_format`, `counterparty_bank`, `counterparty_account`. Score = `event_time` in Unix seconds | Scorer |
+| `pay:<payment_id>:<direction>` | hash | `account`, `amount`, `event_time`, `counterparty_bank`, and `token` (hex) for cross-bank events. Every event | Node: own legs, the token for a payment, which bank to ask next |
+| `tok:<pair>:<key_version>:<token>` | hash | `payment_id`, `direction`, `account`, `amount`. Cross-bank events only; `<token>` is hex | Node: peer lookups |
+| `link:in:<payment_id>` / `link:out:<payment_id>` | set | Outgoing payments a fast or chain rule linked to this incoming one, and the reverse | Node: onward and backward links |
+| `hit:<hit_id>` | hash | `rule` (`chain`, `new_payee`, `quick_repeat`; the fast rule writes no hit), `account`, `payments` (JSON list), `event_time` | Node |
+| `hits` | stream | One entry `hit <hit_id>` per new hit | Node, with `XREADGROUP` |
+| `payees:<account>` | set | Accounts at other banks this customer has paid by bank transfer | Scorer: new payee |
+| `payers:<account>` | set | Distinct payers into this account | Scorer: the ≥ 30 cap |
+| `flag:<account>:<counterparty_account>` | string | Unix seconds of the last flagged payment between them | Scorer: quick repeat |
+
+- **IDs:** `hit_id` is SHA-256 of the compact JSON `[bank, rule, *payment_ids]`, so a replay rewrites the same key.
+- **Watermark and trim:** an account's watermark is the highest score in `win:<account>`, so there's no separate key. Events more than the window behind it are ignored as late. Each write runs `ZREMRANGEBYSCORE win:<account> -inf (<watermark − 2 × 72 h>`, which keeps twice the longest rule window.
+- **Repeats:** a resent event (same `ce_id`) builds the same `win:` member, so the scorer skips it when `ZSCORE` finds it. No separate dedup key. Events outside `win:` (cards, cash, cheques) don't feed any rule, and their `pay:`/`tok:` writes are idempotent.
+- **One transaction per event:** the scorer reads first, then writes all keys for the event in one `MULTI`/`EXEC`, then calls `store_offsets()`. A crash before `EXEC` writes nothing; after it, the redelivered event is a repeat. So `hits` gets one entry per hit, except after a full rebuild, when the node skips hit IDs it already has.
+- **Concurrency:** partition ownership gives `win:`, `payees:` and `flag:` a single writer. `payers:<account>` is keyed by the payee, so several replicas add to it; `SADD` is safe, but whether the ≥ 30 cap applies can depend on processing order across partitions.
+- **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, within `HOP_LIMIT`. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
+- **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `payees:` and `payers:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
+- **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group.
+
+Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The card payment `p02` gets only `pay:` keys. Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
 
 Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
 `PENDING` until a fixed deadline from that search's first attempt. Retries use
@@ -191,14 +216,16 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json); Cindy to approve | Mon 2 Nov |
-| Valkey layout ([streaming.md](streaming.md#search-handoff)) | Cindy → Zane | Key names, token-index value, local links (including collapsed intra-bank links), `hit:` keys, windows, TTL and trim | **draft**, sample TODO | Wed 4 Nov |
+| Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **agreed** (Cindy, 3 Nov), sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json) | Mon 2 Nov |
+| Valkey layout ([streaming.md](streaming.md#search-handoff)) | Cindy → Zane | Key names, token-index value, local links (including collapsed intra-bank links), `hit:` keys, windows, TTL and trim | **draft**, sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json); Zane to approve | Wed 4 Nov |
 | Scorer as a library | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample TODO | Wed 4 Nov |
 
 Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md#interfaces).
 
 ## Open
 
+- [ ] Intra-bank hops: followed by the node when it reads, rather than collapsed by the scorer (Cindy, with Zane).
+- [ ] TTL for `tok:` and `pay:`: a peer's query can arrive up to 72 h after the event under the chain rule, longer than the 24 h search retention in [security.md](security.md) (Cindy, with Caleb).
 - [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
 - [ ] TTL for the `payees:` and `payers:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).

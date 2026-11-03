@@ -10,12 +10,14 @@ from unittest.mock import Mock
 import pytest
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
-from scorer.score import Scorer, validate
-from scorer.stream import consume, ingest, require_full_replay
+from scorer.score import Scorer
+from scorer.stream import consume, require_full_replay
 from scorer.token_index import TokenIndex
 from security import canonical_pair, derive_token
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
+# Shared with the ingestor: the records it writes for one batch to Bank B
+KAFKA_EVENTS = Path(__file__).parents[2] / "ingestor/fixtures/kafka_events.json"
 
 
 def event(payment="in", direction="in", amount=100, time="09:00:00", **changes):
@@ -51,25 +53,6 @@ def test_boundaries(amount, time, expected):
         assert result[0]["ratio"] == amount / 100
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"amount": 0},
-        {"amount": -1},
-        {"amount": "NaN"},
-        {"amount": True},
-        {"event_time": "bad"},
-        {"event_time": "2022-09-05T09:00:00"},
-        {"bank": "A"},
-        {"direction": "other"},
-        {"account": ""},
-    ],
-)
-def test_invalid(changes):
-    with pytest.raises(ValueError):
-        Scorer("B").process(event(**changes))
-
-
 def test_duplicates_and_local_accounts():
     scorer = Scorer("B")
     incoming = event()
@@ -79,7 +62,6 @@ def test_duplicates_and_local_accounts():
     assert scorer.process(outgoing | {"account": "someone_else"}) == []
     assert len(scorer.process(outgoing)) == 1
     assert scorer.process(outgoing) == []
-    assert "scenario" not in validate(incoming | {"scenario": "mule_chain"}, "B")
 
 
 def test_out_of_order_and_bounds():
@@ -163,29 +145,6 @@ def test_tiny(bank, pairs):
     } == pairs
 
 
-def test_ingest():
-    producer = Mock(**{"flush.return_value": 0})
-    ingest([json.dumps(event())], "B", producer)
-    args, kwargs = producer.produce.call_args
-    assert args == ("bank-B-transactions",)
-    assert kwargs["key"] == "bob"
-    assert json.loads(kwargs["value"]) == event()
-    with pytest.raises(ValueError):
-        ingest([json.dumps(event(bank="A"))], "B", producer)
-    assert producer.produce.call_count == 1
-
-
-def test_delivery_failure():
-    producer = Mock(**{"flush.return_value": 0})
-
-    def fail(*args, **kwargs):
-        kwargs["on_delivery"]("failed", None)
-
-    producer.produce.side_effect = fail
-    with pytest.raises(RuntimeError):
-        ingest([json.dumps(event())], "B", producer)
-
-
 def message(e):
     return Mock(
         **{
@@ -213,6 +172,33 @@ def test_consumer():
     assert consumer.commit.call_count == 2
     assert consumer.commit.call_args.kwargs["asynchronous"] is False
     consumer.close.assert_called_once()
+
+
+def test_consumer_reads_ingestor_sample():
+    records = json.loads(KAFKA_EVENTS.read_text())
+    messages = []
+    for r in records:
+        m = message(r["value"])
+        m.topic.return_value = r["topic"]
+        m.key.return_value = r["key"].encode()
+        messages.append(m)
+    consumer = Mock(**{"commit.return_value": []})
+    consumer.poll.side_effect = [*messages, KeyboardInterrupt]
+    scorer, seen = Scorer("B"), []
+
+    def process(e):
+        seen.append(e)
+        return scorer.process(e)
+
+    output = io.StringIO()
+    with pytest.raises(KeyboardInterrupt):
+        consume(consumer, scorer, output, process_event=process)
+    # events reach the scorer whole, counterparty_account included
+    assert seen == [r["value"] for r in records]
+    [result] = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert (result["account"], result["incoming_payment_id"]) == ("B-m1", "p06")
+    assert result["outgoing_payment_id"] == "p07"
+    assert consumer.commit.call_count == len(records)
 
 
 @pytest.mark.parametrize(
@@ -245,69 +231,10 @@ def test_consumer_failures(failure):
     consumer.close.assert_called_once()
 
 
-@pytest.mark.parametrize("failure", ["flush_callback", "pending", "backpressure"])
-def test_producer_failures(failure):
-    producer = Mock(**{"flush.return_value": 0})
-    if failure == "pending":
-        producer.flush.return_value = 1
-    elif failure == "flush_callback":
-
-        def flush(timeout):
-            producer.produce.call_args.kwargs["on_delivery"]("delivery failed", None)
-            return 0
-
-        producer.flush.side_effect = flush
-    else:
-        producer.produce.side_effect = BufferError
-
-        def poll(timeout):
-            producer.produce.call_args.kwargs["on_delivery"]("delivery failed", None)
-
-        producer.poll.side_effect = poll
-    with pytest.raises(RuntimeError):
-        ingest([json.dumps(event())], "B", producer)
-    producer.flush.assert_called_once_with(30)
-    if failure == "backpressure":
-        producer.produce.assert_called_once()
-
-
-def test_backpressure_timeout(monkeypatch):
-    producer = Mock()
-    producer.produce.side_effect = BufferError
-    producer.flush.return_value = 0
-    monkeypatch.setattr("scorer.stream.time.monotonic", Mock(side_effect=[0, 31]))
-    with pytest.raises(TimeoutError, match="queue remained full"):
-        ingest([json.dumps(event())], "B", producer)
-    producer.produce.assert_called_once()
-    producer.flush.assert_called_once_with(30)
-
-
-def test_backpressure_recovers():
-    producer = Mock()
-    producer.produce.side_effect = [BufferError, None]
-    producer.flush.return_value = 0
-    ingest([json.dumps(event())], "B", producer)
-    assert producer.produce.call_count == 2
-    producer.poll.assert_any_call(0.1)
-
-
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])
 def test_replay_is_repeatable(bank, count):
-    replay = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "dataset.replay",
-            str(TINY),
-            bank,
-            "--speed",
-            "0",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    events = [json.loads(line) for line in replay.stdout.splitlines()]
+    with (TINY / f"bank_{bank}.csv").open() as source:
+        events = list(csv.DictReader(source))
 
     def run():
         consumer = Mock(**{"commit.return_value": []})
@@ -410,8 +337,6 @@ def test_token_scopes_versions_and_references(pair_key_paths, tmp_path):
     assert index.add(event(counterparty_bank="C")) != token
     with pytest.raises(ValueError, match="unrelated"):
         index.lookup(("A", "C"), "k1", token)
-    with pytest.raises(ValueError, match="wrong bank"):
-        index.add(event(bank="A"))
     assert index.add(event(counterparty_bank="B")) is None
     rotated_path = tmp_path / "rotated.key"
     rotated_path.write_bytes(b"d" * 32)
@@ -471,13 +396,11 @@ def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
     ]
 
 
-@pytest.mark.parametrize("failure", ["missing_pair", "invalid_event", "wrong_bank"])
+@pytest.mark.parametrize("failure", ["missing_pair", "wrong_bank"])
 def test_index_failure_does_not_commit(failure, pair_key_paths):
     index = TokenIndex("B", "k1", {("B", "C"): pair_key_paths["B", "C"]})
     e = event()
-    if failure == "invalid_event":
-        e["amount"] = -1
-    elif failure == "wrong_bank":
+    if failure == "wrong_bank":
         index = TokenIndex("A", "k1", {("A", "B"): pair_key_paths["A", "B"]})
     consumer = Mock()
     consumer.poll.return_value = message(e)
@@ -515,7 +438,6 @@ def test_index_cli_configuration(options):
             sys.executable,
             "-m",
             "scorer.stream",
-            "consume",
             "B",
             *options,
         ],
