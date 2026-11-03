@@ -28,6 +28,7 @@ p.add_argument(
     type=float,
     help="epoch seconds that workload t0 maps to (default: now)",
 )
+p.add_argument("--until", help="last event time to send, e.g. 2022-09-06T23:59:59Z")
 a = p.parse_args()
 
 t0 = datetime.fromisoformat(
@@ -37,6 +38,9 @@ start = a.start_at or time.time()
 
 with open(a.workload / f"bank_{a.bank}.csv") as f:
     for e in csv.DictReader(f):
+        # both are ISO 8601 UTC in the same format, so text order is time order
+        if a.until and e["event_time"] > a.until:
+            break
         if a.speed:
             due = (
                 start

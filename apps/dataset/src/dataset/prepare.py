@@ -68,16 +68,15 @@ def altman(name, start=None, hours=6):
         start = pd.Timestamp(start)
         keep &= (df.time >= start) & (df.time < start + pd.Timedelta(hours=hours))
     df, fb, tb = df[keep], fb[keep], tb[keep]
-    sim = dict(enumerate("ABC"))
     return pd.DataFrame(
         {
-            # source row number: the same transfer keeps its ID in every slice
-            "payment_id": [pid(f"altman:{i}") for i in df.index],
+            # file and source row: the same transfer keeps its ID in every slice
+            "payment_id": [pid(f"{name}:{i}") for i in df.index],
             "time": df.time,
-            "from_bank": (fb % 3).map(sim),
+            "from_bank": pd.Categorical.from_codes(fb % 3, list("ABC")),
             # account IDs are only unique per source bank
             "from_account": fb.astype(str) + "-" + df["Account"],
-            "to_bank": (tb % 3).map(sim),
+            "to_bank": pd.Categorical.from_codes(tb % 3, list("ABC")),
             "to_account": tb.astype(str) + "-" + df["Account.1"],
             # in cents, at least SGD 0.01 (a 0.01 Yen cheque would round to 0)
             "amount": (
@@ -98,14 +97,17 @@ def altman(name, start=None, hours=6):
 
 
 def split(t):
-    # Transfers -> ({bank: events}, labels). Write event_time with date_format=TIME.
+    # Transfers -> ({bank: events}, labels), with event_time already a TIME string.
     labels = t.reindex(columns=LABEL_COLS)  # Altman workloads have no planted chains
     labels = labels[(labels.altman_laundering == 1) | labels.chain_id.notna()]
     sides = {"out": ("from", "to"), "in": ("to", "from")}
-    t = t.sort_values(["time", "payment_id"], ignore_index=True)
+    # same-minute transfers keep the source file's order
+    t = t.sort_values("time", kind="stable", ignore_index=True)
+    ts = t.time.astype("category").cat  # format each distinct time once
+    when = ts.rename_categories(ts.categories.strftime(TIME))
     ev = pd.concat(
         t[["payment_id", "amount", "payment_format"]].assign(
-            event_time=t.time,
+            event_time=when,
             direction=d,
             bank=t[f"{me}_bank"],
             account=t[f"{me}_account"],
@@ -147,7 +149,7 @@ if __name__ == "__main__":
     banks, labels = split(t)
     a.out.mkdir(parents=True, exist_ok=True)
     for b, ev in banks.items():
-        ev.to_csv(a.out / f"bank_{b}.csv", index=False, date_format=TIME)
+        ev.to_csv(a.out / f"bank_{b}.csv", index=False)
     labels.to_csv(a.out / "labels.csv", index=False)
     meta = {
         "t0": t.time.min().strftime(TIME),

@@ -78,17 +78,17 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | --- | --- | --- | --- |
 | Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link; starts a search |
 | Chain (slow pass-through) | Bank transfer in and out of one account, out/in 0.90–1.10 within 72 h; at least one of the two payments is with another bank | B-4(i) "high velocity of funds", B-5(iv) "within a short period"; Altman's 90th-percentile hop delay is 69.7 h | Local link; starts a search |
-| New payee | A bank transfer to an account at another bank that this customer has never paid, unless that payee already has ≥ 30 distinct payers | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
+| New payee | A bank transfer to an account at another bank that this customer has never paid | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
 
 - Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag and the planted acceptance chains depend on it.
 - Bank transfers carry 87% of Altman's laundering but 12% of transfers, a dataset artefact; the payment-type filter is reported as dev-tuned. Cheque, card and cash laundering, mostly from bank-70 hub accounts whose laundering payments look like their ordinary ones, is out of reach of any rule.
 - **Exploratory sweep** (Macarius, 31 Oct, a scratchpad script, not the offline evaluator; amounts in SGD, three banks, every hit counted as caught):
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,272 to 664 a day on HI-Small's held-out days) for 1.1 points of recall.
-  - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 8–56% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 67–81%. Payees with ≥ 30 earlier payers (businesses) were 9.8% of its ordinary flags and 0.6% of its laundering.
+  - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 8–56% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 67–81%. An exception for payees with ≥ 30 earlier payers (businesses) was dropped: only the payee's bank sees all of a payee's payers, and counting this bank's own customers removed 16 ordinary flags a day.
   - **Quick repeat:** half of the repeat laundering payments to a just-flagged payee came within 18 minutes (ordinary repeats: 28 h). It added about 1 point of recall for about 100 flags a day.
   - **No amount floor:** a S$1,500 floor on both payments of a link cut CYCLE and RANDOM attempts caught from 68 to 63 of 72.
-  - **Together:** 94.9% of cross-bank laundering bank transfers on HI-Small's held-out days (1,338 of 1,410) with 1.38% of all payments flagged as ordinary, and 92.1% on HI-Medium (16,373 of 17,777) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
+  - **Together:** 95.2% of cross-bank laundering bank transfers on HI-Small's held-out days (1,343 of 1,410) with 1.53% of all payments flagged as ordinary, and 92.5% on HI-Medium (16,450 of 17,777, 2.17% flagged) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
 - **Intra-bank hops:** follow a bank's internal hops locally and emit one link from the first cross-bank payment in to the last cross-bank payment out, so the node signs one claim. Fully internal chains are flagged for the node to post as Tier 1 cases.
 
 The scorer reports every qualifying incoming/outgoing pair for the same local
@@ -146,7 +146,7 @@ replay with a fresh group; there is no atomic durable handoff or exactly-once
 guarantee. Role 3's existing pending/timed-out search retries and result outbox
 are unchanged.
 
-**pending work:** the scorer writes to Valkey and the privacy node reads from it, so they run in separate pods. Keys: a sorted set per account for window state; `tok:<pair>:<ver>:<token>` → `(payment, direction, account, amount)`; `link:in:<payment>` → outgoing payments; `hit:<id>` → (rule, account, payments), where the ID is a hash of rule, account and first payment so a replay rewrites the same key; `payees:<account>` → the set of counterparty accounts this customer has paid (new payee); `payers:<account>` → the set of distinct payers into this account (the ≥ 30 cap); `flag:<account>:<counterparty>` → the time of the last flagged payment between them (quick repeat); plus the per-account watermark and dedup keys. Windows: 30 min of all events for the fast rule, 72 h of bank-transfer events for the chain rule; the payee and payer sets keep the whole history (TTL TBD). Only the scorer and the privacy node may connect. On loss, Valkey is rebuilt by replaying from `earliest` with a fresh group.
+**pending work:** the scorer writes to Valkey and the privacy node reads from it, so they run in separate pods. Keys: a sorted set per account for window state; `tok:<pair>:<ver>:<token>` → `(payment, direction, account, amount)`; `link:in:<payment>` → outgoing payments; `hit:<id>` → (rule, account, payments), where the ID is a hash of rule, account and first payment so a replay rewrites the same key; `payees:<account>` → the set of counterparty accounts this customer has paid (new payee); `flag:<account>:<counterparty>` → the time of the last flagged payment between them (quick repeat); plus the per-account watermark and dedup keys. Windows: 30 min of all events for the fast rule, 72 h of bank-transfer events for the chain rule; the payee sets keep the whole history (TTL TBD). Only the scorer and the privacy node may connect. On loss, Valkey is rebuilt by replaying from `earliest` with a fresh group.
 
 Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
 `PENDING` until a fixed deadline from that search's first attempt. Retries use
@@ -201,4 +201,4 @@ Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md
 
 - [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
-- [ ] TTL for the `payees:` and `payers:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).
+- [ ] TTL for the `payees:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).

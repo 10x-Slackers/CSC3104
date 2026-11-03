@@ -27,8 +27,7 @@ def test_fixture_split():
     assert list(banks["B"][banks["B"].payment_id == "p02"].direction) == ["out", "in"]
     # committed fixture outputs are up to date (regenerate with prepare.py, see docstring)
     for b, e in banks.items():
-        csv = e.to_csv(index=False, date_format=prepare.TIME)
-        assert csv == (TINY / f"bank_{b}.csv").read_text()
+        assert e.to_csv(index=False) == (TINY / f"bank_{b}.csv").read_text()
     assert labels.to_csv(index=False) == (TINY / "labels.csv").read_text()
 
 
@@ -54,9 +53,9 @@ def test_altman(tmp_path, monkeypatch):
         prepare.kagglehub, "dataset_download", lambda *a, path: tmp_path / path
     )
     t = prepare.altman("HI-Small", "2022-09-05 09:00", 1)
-    assert list(t.payment_id) == [pid(f"altman:{i}") for i in (0, 2, 4, 5)]
-    assert list(t.from_bank + t.from_account) == ["B10-8000A", "B10-8000A", "C11-8000A", "C11-8000C"]  # fmt: skip
-    assert list(t.to_bank + t.to_account) == ["C11-8000B", "C11-8000B", "B10-8000A", "B10-8000D"]  # fmt: skip
+    assert list(t.payment_id) == [pid(f"HI-Small:{i}") for i in (0, 2, 4, 5)]
+    assert list(t.from_bank.astype(str) + t.from_account) == ["B10-8000A", "B10-8000A", "C11-8000A", "C11-8000C"]  # fmt: skip
+    assert list(t.to_bank.astype(str) + t.to_account) == ["C11-8000B", "C11-8000B", "B10-8000A", "B10-8000D"]  # fmt: skip
     # SGD via USD: 100 USD -> 141.36; 100 EUR -> 110 USD -> 155.50; at least 0.01
     assert list(t.amount) == [141.36, 0.01, 70.68, 155.5]
     assert list(t.payment_format) == ["GIRO", "Cheque", "MEPS+", "MEPS+"]

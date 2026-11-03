@@ -33,10 +33,10 @@ IBM AML synthetic dataset (Altman et al., NeurIPS 2023 Datasets and Benchmarks):
 2. **Amounts in SGD:** `Amount Paid` goes to USD at the dataset's own rate, then to SGD at MAS's September 2022 average, US$1 = S$1.4136 ([SingStat, source MAS](https://data.gov.sg/datasets/d_b2b7ffe00aaec3936ed379369fdf531b/view)). A currency's rate is the median of `Amount Received / Amount Paid` over payments received in US dollars (EUR 1 = US$1.1718 on HI-Small), which keeps Altman's cross-currency hops consistent. Amounts are in cents, at least SGD 0.01, because 4,358 ordinary payments (e.g. a 0.01 Shekel cheque) would otherwise round to 0, which the ingestor rejects. For example, a US$360,542.13 cheque becomes SGD 509,662.35.
 3. **Banks:** `int(bank ID) % 3` maps to `0 = A`, `1 = B`, `2 = C`. Events split A 30.0 %, B 38.1 %, C 32.0 %, and 65.3 % of transfers cross banks. Three banks merge some of Altman's banks: banks 10 and 70 both become B, so a transfer between them is intra-bank. On HI-Small, 1–10 Sep, 98.3 % of laundering transfers cross Altman's banks but 65.6 % cross A, B and C, so the rules' scope (cross-bank GIRO and MEPS+) holds 55.4 % of laundering instead of 83.0 %. Recall inside the scope barely changes (95.8 % with three banks, 95.4 % with every Altman bank as its own bank, in the exploratory sweep), so three banks shrink the scope, not the rules' accuracy.
 4. **Account:** `<int bank ID>-<account hex>`, e.g. `3208-8000F4580`.
-5. **`payment_id`:** the first 16 hex characters of `sha256("altman:<source row>")`, so a transfer keeps the same ID in every slice. The fixture's transfers keep their hand-written IDs (`p01`–`p20`).
+5. **`payment_id`:** the first 16 hex characters of `sha256("<file>:<source row>")`, e.g. `sha256("HI-Small:2288336")` gives `9ce850992a9f4cec`. A transfer keeps the same ID in every slice, and HI-Small and HI-Medium never share an ID. The fixture's transfers keep their hand-written IDs (`p01`–`p20`).
 6. **Payment types:** Altman's `ACH` becomes `GIRO` and `Wire` becomes `MEPS+` (Singapore payment systems); cheque, card, cash and Bitcoin keep their names. The detection rules use only GIRO and MEPS+ ([streaming.md](streaming.md#detection-rule)).
 7. **Time:** Altman time is treated as UTC and written as ISO 8601, e.g. `2022-09-05T09:20:00Z`.
-8. **Events:** each transfer becomes two events sharing one `payment_id`: `out` at the sender's bank and `in` at the receiver's bank. This is the shared identifier both endpoints use for the token. Each bank file is sorted by `(event_time, payment_id)`. For an intra-bank transfer, `out` comes before `in`.
+8. **Events:** each transfer becomes two events sharing one `payment_id`: `out` at the sender's bank and `in` at the receiver's bank. This is the shared identifier both endpoints use for the token. Each bank file is in `event_time` order; transfers in the same minute keep their order in the source file. For an intra-bank transfer, `out` comes before `in`.
 9. **Attempts:** a laundering transfer listed in the patterns file gets that attempt's number (`attempt_id`, counting the file's `BEGIN` lines from 0) and type (`altman_pattern`). It's matched on time, both bank IDs, both accounts and the amount paid; one listed twice keeps its first attempt. For example, attempt `0` is a `FAN-OUT` from account `21174-800737690`.
 
 ## Bank event files: `bank_{A,B,C}.csv`
@@ -45,12 +45,12 @@ Each bank only ever reads its own file. The examples are one row of `bank_A.csv`
 
 | Column | Example | Notes |
 | --- | --- | --- |
-| `payment_id` | `008f4681d368aece` | Same at both endpoints: a stand-in for the ISO 20022 EndToEndId or Swift UETR, which both banks see unchanged ([ISO 20022](https://www.iso20022.org/standardsrepository/type/PaymentIdentification13), [Swift](https://www.swift.com/payments/what-unique-end-end-transaction-reference-uetr)). The input for `derive_token` ([security.md](security.md)) |
+| `payment_id` | `9ce850992a9f4cec` | Same at both endpoints: a stand-in for the ISO 20022 EndToEndId or Swift UETR, which both banks see unchanged ([ISO 20022](https://www.iso20022.org/standardsrepository/type/PaymentIdentification13), [Swift](https://www.swift.com/payments/what-unique-end-end-transaction-reference-uetr)). The input for `derive_token` ([security.md](security.md)) |
 | `event_time` | `2022-09-05T00:00:00Z` | Event time, not replay time |
 | `bank` | `A` | This bank |
 | `direction` | `out` | `out` at the sender's bank, `in` at the receiver's |
 | `account` | `22164-801F75F50` | This bank's customer only |
-| `counterparty_account` | `2947-806272DA0` | The other side's account (Singapore wires carry both, MAS Notice 626 ¶11.4), for the new payee and quick repeat rules and each payee's payer count; never sent to peers |
+| `counterparty_account` | `2947-806272DA0` | The other side's account (Singapore wires carry both, MAS Notice 626 ¶11.4), for the new payee and quick repeat rules; never sent to peers |
 | `counterparty_bank` | `B` | Which bank to query next |
 | `amount` | `509662.35` | SGD in cents, at least `0.01` (rule 2) |
 | `payment_format` | `Cheque` | `GIRO`, `MEPS+`, `Cheque`, `Credit Card`, `Cash` or `Bitcoin` (rule 6) |
@@ -67,9 +67,9 @@ Only the evaluation harness reads this file. Labels never go into bank files, Ka
 | `chain_id`, `hop` | Planted chain and position (0 = first transfer); fixture only |
 | `scenario` | See below; fixture only |
 
-Examples: `f11c9b8ae2632d97,1,0,FAN-OUT,,,` is in attempt 0; `b6f20e227bb75e24,1,,,,,` is laundering in no attempt; the fixture's `p06,0,,,m1,0,mule_chain` is hop 0 of planted chain `m1`. The fixture has no real Altman attempts, so its `p05,1,0,FAN-OUT,,,` is a stand-in that fills both attempt columns in the labels sample.
+Examples: `866bab90f796f92f,1,0,FAN-OUT,,,` is in attempt 0; `0c0c5b0ee33a7df5,1,,,,,` is laundering in no attempt; the fixture's `p06,0,,,m1,0,mule_chain` is hop 0 of planted chain `m1`. The fixture has no real Altman attempts, so its `p05,1,0,FAN-OUT,,,` is a stand-in that fills both attempt columns in the labels sample.
 
-**Splits** (for the offline evaluator, [evaluation.md](../evaluation.md#rules)): dev = the attempts whose first transfer is on 1–5 Sep, eval = 6–10 Sep; laundering in no attempt goes by its own day. Both read all of `altman-small`: eval reads 1–5 Sep as rule history that it doesn't count, and each reads the days after its own so attempts can finish. False positives count only on the split's own days.
+**Splits** (for the offline evaluator, [evaluation.md](../evaluation.md#rules)): dev = the attempts whose first transfer is on 1–5 Sep, eval = 6–10 Sep; laundering in no attempt goes by its own day. Both read all of `altman-small`: eval reads 1–5 Sep as rule history that it doesn't count, and each reads the days after its own so attempts can finish. False positives count only on the split's own days. Rule 1 drops 11 of the patterns file's 3,209 laundering transfers as self-transfers (all GIRO, each in a different `GATHER-SCATTER` attempt; 72 on HI-Medium). That changes the first transfer of 2 attempts, but not its day, so no attempt changes split.
 
 ## Planted scenarios (fixture only)
 
@@ -95,11 +95,11 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 | `altman-small` | `apps/dataset/out/altman-small` (all of HI-Small) | 4,487,133 | Offline evaluation, dev and eval |
 | `altman-medium` | `apps/dataset/out/altman-medium --altman HI-Medium` | 29,336,378 | Out-of-sample check |
 
-`altman-small` takes about 70 s and 4.7 GB of memory and writes 825 MB; `altman-medium` takes about 9 minutes and 11 GB and writes 5.5 GB. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
+`altman-small` takes about 30 s and 3.9 GB of memory and writes 825 MB; `altman-medium` takes about 4 minutes and 11 GB and writes 5.5 GB. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
 
 **One workload for dev and eval.** The plan named two, `altman-dev` and `altman-eval`. Eval reads 1–5 Sep as history, and dev reads the days after 5 Sep so its attempts can finish, so both would hold every day of HI-Small. They share `altman-small`, and the evaluator applies the split ([Splits](#labels-labelscsv-evaluation-only)).
 
-**Slices.** A slice is every transfer from `--start` for `--hours`; `slice-6h` is 5 Sep, 00:00–06:00. The two slices replace `dev-small`, `eval-small`, `dev-medium` and `eval-medium`, which differed only in their start day and planted-chain seed. A slice starts with no history, so every payee looks new on its first payment and the new payee rule fires more than it does on `altman-small`. Starting empty doubled the ordinary payments flagged in the exploratory sweep ([evaluation.md](../evaluation.md#rules)). Use slices for load tests and the demo, never for detection quality.
+**Slices.** A slice is every transfer from `--start` for `--hours`; `slice-6h` is 5 Sep, 00:00–06:00. The two slices replace `dev-small`, `eval-small`, `dev-medium` and `eval-medium`, which differed only in their start day and planted-chain seed. A slice starts with no history, so every payee looks new on its first payment and the new payee rule fires more than it does on `altman-small`. Starting empty nearly doubled the ordinary payments flagged in the exploratory sweep ([evaluation.md](../evaluation.md#rules)). Use slices for load tests and the demo, never for detection quality.
 
 ## Fixture: `apps/dataset/fixtures/tiny`
 
@@ -107,15 +107,17 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 
 `--transfers` takes a CSV with the columns `payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario`, as in `fixtures/tiny/transfers.csv`. `attempt_id` and `altman_pattern` are empty outside an Altman attempt, and the last three are empty for unplanted transfers.
 
+**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank card) and p04 (card). Each hit is at the sender's bank and is listed below.
+
 | Chain | Transfers | Banks | Expected (**draft**) |
 | --- | --- | --- | --- |
-| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert |
-| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain |
-| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; a Tier 1 case at B |
-| `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert |
-| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it) |
-| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked |
-| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4 |
+| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert. **pending work:** p03 is a Tier 1 case at C (new payee) |
+| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain. **pending work:** a Tier 1 case at B (new payee) |
+| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; Tier 1 cases at A (p06: new payee) and B (p07: chain and new payee) |
+| `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert. **pending work:** Tier 1 cases at A (p08) and B (p09), both new payee |
+| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it). **pending work:** new payee also fires on p10 at A, p11 at B and p12 at C; the chain promotes those Tier 1 cases |
+| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked. **pending work:** Tier 1 cases at A (p13) and C (p14), both new payee |
+| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4. **pending work:** a Tier 2 alert at A, B and C (partial counts; all three banks' rules link it); new payee also fires on p15–p20 |
 
 Payment IDs shared by each bank pair (useful for token tests):
 
@@ -134,7 +136,7 @@ uv run python -m dataset.replay apps/dataset/fixtures/tiny A --speed 0          
 uv run python -m dataset.replay apps/dataset/out/slice-6h A --speed 60 --start-at <epoch> | <ingestor>
 ```
 
-At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as possible, for load tests.
+At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as possible, for load tests. `--until 2022-09-06T23:59:59Z` stops before the first event after that time, so a live run can end exactly where an offline run does (experiment 13).
 
 ## Ingestor
 
