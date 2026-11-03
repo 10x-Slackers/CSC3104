@@ -172,7 +172,7 @@ Bank identifiers are fictional BICs: A `TSTASGSG`, B `TSTBSGSG`, C `TSTCSGSG`. T
 | `payment_id` | `PmtId.EndToEndId`, also the idempotency key |
 | `event_time` | `AccptncDtTm` (UTC, `Z`) |
 | `bank` | The ingestor's own bank (config) |
-| `direction` | `out` if `DbtrAgt` is this bank, `in` if `CdtrAgt` is; an intra-bank transfer emits both, `out` first |
+| `direction` | `out` if `DbtrAgt` is this bank, `in` if `CdtrAgt` is; an intra-bank transfer emits both, `out` first, though Kafka can deliver them in either order ([streaming.md](streaming.md#kafka-events)) |
 | `account`, `counterparty_account` | `DbtrAcct` / `CdtrAcct`, by direction |
 | `counterparty_bank` | The other agent's BIC, mapped back to `A`/`B`/`C` |
 | `amount` | `IntrBkSttlmAmt.Amt` (a decimal string), written as a JSON number; `Ccy` must be `SGD` |
