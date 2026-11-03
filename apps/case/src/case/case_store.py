@@ -1,8 +1,8 @@
 """Bank-local case store: verified chain results, case identity and one alert per case.
 
-Holds only tokens, bank IDs and claim metadata; never accounts, amounts or payment IDs.
+Holds verified byte tokens and separately snapshotted own-bank leg details.
 Input is Role 3's ChainResult (privacy_node/privacy_node.proto), already verified
-with evidence.verify_result. Contract: docs/contracts/case.md. SQLite for now.
+with claims.check_result. Contract: docs/contracts/case.md. SQLite for now.
 """
 
 import os
@@ -32,16 +32,21 @@ class Claim:
     recipient: str
     query_id: str
     key_version: str
+    signing_key_version: str
+    truncated: bool
     in_pair: str
-    in_token: str
+    in_token: bytes
     out_pair: str
-    out_token: str
+    out_token: bytes
     signature: str  # hex
+
+    def __post_init__(self):
+        object.__setattr__(self, "truncated", bool(self.truncated))
 
     @classmethod
     def from_pb(cls, c):
         return cls(
-            c.signer, c.recipient, c.query_id, c.key_version, c.in_ref.pair,
+            c.signer, c.recipient, c.query_id, c.key_version, c.signing_key_version, c.truncated, c.in_ref.pair,
             c.in_ref.token, c.out_ref.pair, c.out_ref.token, c.signature.hex(),
         )  # fmt: skip
 
@@ -59,9 +64,9 @@ class AlertRule:
 
 
 def transfers(claim):
-    """Transfer keys as Role 3's claims.key writes them: "<pair>|<token>"."""
+    """Transfer references as claims.key writes them: (pair, raw bytes)."""
     refs = ((claim.in_pair, claim.in_token), (claim.out_pair, claim.out_token))
-    return [f"{pair}|{token}" for pair, token in refs if token]
+    return [(pair, token) for pair, token in refs if token]
 
 
 def banks(claim):
@@ -87,13 +92,29 @@ CREATE TABLE IF NOT EXISTS cases (
 );
 -- Each transfer belongs to one case: a result sharing any transfer joins that case.
 CREATE TABLE IF NOT EXISTS transfers (
-    transfer TEXT PRIMARY KEY,
-    case_id TEXT NOT NULL
+    key_version TEXT NOT NULL,
+    pair TEXT NOT NULL,
+    token BLOB NOT NULL,
+    case_id TEXT NOT NULL,
+    PRIMARY KEY (key_version, pair, token)
 );
 CREATE TABLE IF NOT EXISTS claims (
-    {CLAIM_COLUMNS.replace(", ", " TEXT NOT NULL, ")} TEXT NOT NULL,
+    {", ".join(f.name + (" BLOB" if f.name.endswith("_token") else " INTEGER" if f.name == "truncated" else " TEXT") + " NOT NULL" for f in fields(Claim))},
     case_id TEXT NOT NULL,
-    PRIMARY KEY (signer, in_pair, in_token, out_pair, out_token)
+    PRIMARY KEY (signer, key_version, in_pair, in_token, out_pair, out_token)
+);
+-- Raw details are internal only and bound to this bank's signed token reference.
+CREATE TABLE IF NOT EXISTS own_legs (
+    case_id TEXT NOT NULL,
+    bank TEXT NOT NULL,
+    key_version TEXT NOT NULL,
+    pair TEXT NOT NULL,
+    token BLOB NOT NULL,
+    direction TEXT NOT NULL,
+    payment_id TEXT NOT NULL,
+    account TEXT NOT NULL,
+    amount REAL NOT NULL,
+    PRIMARY KEY (case_id, bank, key_version, pair, token, direction)
 );
 -- Every delivered result, once per (digest, sending bank, state).
 CREATE TABLE IF NOT EXISTS results (
@@ -175,12 +196,14 @@ class SqliteCaseStore:
             raise
         self.db.execute("COMMIT")
 
-    def record(self, result):
+    def record(self, result, own_legs=()):
         """Store a verified ChainResult; return its case ID."""
         if result.state not in STATES:
             raise ValueError(f"Not a deliverable result: {pb.State.Name(result.state)}")
         claims = [Claim.from_pb(c) for c in result.claims]
-        keys = sorted({key for claim in claims for key in transfers(claim)})
+        keys = sorted(
+            {(claim.key_version, *key) for claim in claims for key in transfers(claim)}
+        )
         with self._write() as db:
             case_id = self._case_for(db, keys, result.chain_digest)
             row = (result.chain_digest, result.sender, STATES[result.state], case_id)
@@ -189,14 +212,18 @@ class SqliteCaseStore:
                 (*row, time.time()),
             )
             db.executemany(
-                "INSERT INTO transfers VALUES (?, ?) ON CONFLICT DO NOTHING",
-                [(key, case_id) for key in keys],
+                "INSERT INTO transfers VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [(*key, case_id) for key in keys],
             )
             db.executemany(
                 f"INSERT INTO claims ({CLAIM_COLUMNS}, case_id)"
                 f" VALUES ({', '.join('?' * (len(fields(Claim)) + 1))})"
                 " ON CONFLICT DO NOTHING",
                 [astuple(claim) + (case_id,) for claim in claims],
+            )
+            db.executemany(
+                "INSERT INTO own_legs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [(case_id, *leg) for leg in own_legs],
             )
             confirmed = db.execute(
                 "SELECT 1 FROM results WHERE case_id = ? AND state = 'confirmed'",
@@ -238,9 +265,9 @@ class SqliteCaseStore:
             row[0]
             for row in db.execute(
                 "SELECT DISTINCT case_id FROM transfers JOIN cases USING (case_id)"
-                f" WHERE transfer IN ({', '.join('?' * len(keys))})"
+                f" WHERE (key_version, pair, token) IN ({', '.join('(?, ?, ?)' for _ in keys)})"
                 " ORDER BY created_at, case_id",
-                keys,
+                [part for key in keys for part in key],
             )
         ]
         if not found:
@@ -256,7 +283,14 @@ class SqliteCaseStore:
             # Tell the analyst an alerted case now lives on under the surviving case.
             if db.execute("SELECT 1 FROM alerts WHERE case_id = ?", (old,)).fetchone():
                 notify(db, "merged", old)
-            for table in ("transfers", "claims", "results", "decisions", "reports"):
+            for table in (
+                "transfers",
+                "claims",
+                "results",
+                "decisions",
+                "reports",
+                "own_legs",
+            ):
                 db.execute(
                     f"UPDATE {table} SET case_id = ? WHERE case_id = ?", (case_id, old)
                 )
@@ -299,6 +333,14 @@ class SqliteCaseStore:
             "claims": [Claim(*claim) for claim in claims],
             "results": [tuple(result) for result in results],
             "decisions": [tuple(decision) for decision in decisions],
+            "own_legs": [
+                dict(leg)
+                for leg in self.db.execute(
+                    "SELECT bank, key_version, pair, token, direction, payment_id, account, amount"
+                    " FROM own_legs WHERE case_id = ? ORDER BY rowid",
+                    (case_id,),
+                )
+            ],
         }
 
     def decide(self, case_id, action):

@@ -13,8 +13,12 @@ from security import (
     canonical_pair,
     canonical_token_input,
     check_peer_payload,
+    derive_pair_key,
     derive_token,
+    generate_agreement_key,
     generate_signing_key,
+    load_agreement_key,
+    load_agreement_public_key,
     load_pairwise_keys,
     load_signing_key,
     load_verification_key,
@@ -63,10 +67,10 @@ def test_frozen_token_vector():
     digest = "86ef4e3f811c077dcde10d9cef4d807c1b039afda3d794d72174c5d4a92cb444"
     assert canonical_token_input("p01", "B", "A", "k1") == message
     assert hmac.new(PAIR_KEYS["A", "B"], message, hashlib.sha256).hexdigest() == digest
-    assert (
-        derive_token("p01", "A", "B", PAIR_KEYS["A", "B"], "k1")
-        == f"ppmc:v1:k1:{digest}"
-    )
+    token = derive_token("p01", "A", "B", PAIR_KEYS["A", "B"], "k1")
+    assert isinstance(token, bytes) and len(token) == 16
+    assert token == bytes.fromhex("86ef4e3f811c077dcde10d9cef4d807c")
+    assert token == bytes.fromhex(digest)[:16]
 
 
 def test_token_scopes_and_exact_identifiers():
@@ -107,46 +111,41 @@ def test_short_hmac_keys_rejected(key):
         derive_token("p01", "A", "B", key, "k1")
 
 
-def test_pairwise_mounted_keys_are_bank_scoped(tmp_path):
-    paths = {}
-    for pair, key in PAIR_KEYS.items():
-        path = tmp_path / f"{pair[0]}-{pair[1]}.key"
-        path.write_bytes(key)
-        paths[pair] = path
-    loaded = {
-        bank: load_pairwise_keys(
-            bank, {pair: path for pair, path in paths.items() if bank in pair}
-        )
-        for bank in "ABC"
+def test_x25519_pair_agreement_context_and_fresh_rotation():
+    a, b, c = (generate_agreement_key() for _ in range(3))
+    ab = derive_pair_key("A", "B", "k1", a, b.public_key())
+    assert len(ab) == 32
+    assert ab == derive_pair_key("B", "A", "k1", b, a.public_key())
+    assert ab != derive_pair_key("A", "C", "k1", a, c.public_key())
+    assert ab != derive_pair_key("A", "B", "k1", a, c.public_key())
+    # Context includes the version, and actual rotation also creates fresh pairs.
+    assert ab != derive_pair_key("A", "B", "k2", a, b.public_key())
+    a2, b2 = generate_agreement_key(), generate_agreement_key()
+    assert ab != derive_pair_key("A", "B", "k2", a2, b2.public_key())
+    assert public_key_pem(a.public_key()) != public_key_pem(a2.public_key())
+
+
+def test_mounted_x25519_keys_and_reload(tmp_path):
+    a, b = generate_agreement_key(), generate_agreement_key()
+    private, public = tmp_path / "local.pem", tmp_path / "peer.pem"
+    private.write_bytes(private_key_pem(a))
+    public.write_bytes(public_key_pem(b.public_key()))
+    expected = derive_pair_key("A", "B", "k1", a, b.public_key())
+    assert load_pairwise_keys("A", "k1", private, {"B": public}) == {
+        ("A", "B"): expected
     }
-    assert set(loaded["A"]) == {("A", "B"), ("A", "C")}
-    assert set(loaded["B"]) == {("A", "B"), ("B", "C")}
-    assert set(loaded["C"]) == {("A", "C"), ("B", "C")}
-    for pair, key in PAIR_KEYS.items():
-        assert loaded[pair[0]][pair] == loaded[pair[1]][pair] == key
-    with pytest.raises(ValueError):
-        load_pairwise_keys("C", {("A", "B"): paths["A", "B"]})
-
-
-def test_mounted_key_bytes_are_not_transformed(tmp_path):
-    path = tmp_path / "pair.key"
-    key = b"x" * 31 + b"\n"
-    path.write_bytes(key)
-    assert load_pairwise_keys("A", {("B", "A"): path}) == {("A", "B"): key}
-    path.write_bytes(b"short")
-    with pytest.raises(ValueError):
-        load_pairwise_keys("A", {("A", "B"): path})
-
-
-def test_duplicate_pairs_and_reused_keys_rejected(tmp_path):
-    ab = tmp_path / "ab.key"
-    ac = tmp_path / "ac.key"
-    ab.write_bytes(PAIR_KEYS["A", "B"])
-    ac.write_bytes(PAIR_KEYS["A", "B"])
-    with pytest.raises(ValueError):
-        load_pairwise_keys("A", {("A", "B"): ab, ("B", "A"): ac})
-    with pytest.raises(ValueError):
-        load_pairwise_keys("A", {("A", "B"): ab, ("A", "C"): ac})
+    assert isinstance(load_agreement_key(private), type(a))
+    assert public_key_pem(load_agreement_public_key(public)) == public.read_bytes()
+    b2 = generate_agreement_key()
+    public.write_bytes(public_key_pem(b2.public_key()))
+    assert load_pairwise_keys("A", "k2", private, {"B": public})[("A", "B")] != expected
+    # Signing material cannot accidentally be loaded for key agreement.
+    private.write_bytes(private_key_pem(generate_signing_key()))
+    with pytest.raises(TypeError):
+        load_agreement_key(private)
+    public.write_bytes(public_key_pem(generate_signing_key().public_key()))
+    with pytest.raises(TypeError):
+        load_agreement_public_key(public)
 
 
 def test_signatures_authenticate_exact_bytes_and_signer():

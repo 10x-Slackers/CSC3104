@@ -13,7 +13,13 @@ from confluent_kafka import KafkaError, KafkaException, TopicPartition
 from scorer.score import Scorer, validate
 from scorer.stream import consume, ingest, require_full_replay
 from scorer.token_index import TokenIndex
-from security import canonical_pair, derive_token
+from security import (
+    AgreementFiles,
+    canonical_pair,
+    generate_agreement_key,
+    private_key_pem,
+    public_key_pem,
+)
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
 
@@ -364,18 +370,24 @@ def test_consumer_rejects_routing(bad):
 
 @pytest.fixture
 def pair_key_paths(tmp_path):
-    paths = {}
-    for pair, byte in [(("A", "B"), b"a"), (("A", "C"), b"b"), (("B", "C"), b"c")]:
-        path = tmp_path / f"{pair[0]}-{pair[1]}.key"
-        path.write_bytes(byte * 32)
-        paths[pair] = path
-    return paths
+    for bank in "ABC":
+        key = generate_agreement_key()
+        (tmp_path / f"{bank}-private.pem").write_bytes(private_key_pem(key))
+        (tmp_path / f"{bank}-public.pem").write_bytes(public_key_pem(key.public_key()))
+    return tmp_path
+
+
+def key_files(root, bank, peers=None):
+    return AgreementFiles(
+        root / f"{bank}-private.pem",
+        {peer: root / f"{peer}-public.pem" for peer in (peers or set("ABC") - {bank})},
+    )
 
 
 def test_fixture_token_indexes(pair_key_paths):
     endpoints = {}
     for bank in "ABC":
-        paths = {pair: path for pair, path in pair_key_paths.items() if bank in pair}
+        paths = key_files(pair_key_paths, bank)
         index = TokenIndex(bank, "k1", paths)
         rebuilt = TokenIndex(bank, "k1", paths)
         with (TINY / f"bank_{bank}.csv").open() as source:
@@ -399,10 +411,10 @@ def test_fixture_token_indexes(pair_key_paths):
 
 
 def test_token_scopes_versions_and_references(pair_key_paths, tmp_path):
-    paths = {p: path for p, path in pair_key_paths.items() if "B" in p}
+    paths = key_files(pair_key_paths, "B")
     index = TokenIndex("B", "k1", paths)
     token = index.add(event())
-    assert token == derive_token("in", "A", "B", b"a" * 32, "k1")
+    assert isinstance(token, bytes) and len(token) == 16
     index.add(event(account="other"))
     assert len(index.lookup(("B", "A"), "k1", token)) == 2
     assert index.lookup(("A", "B"), "k2", token) == []
@@ -413,45 +425,51 @@ def test_token_scopes_versions_and_references(pair_key_paths, tmp_path):
     with pytest.raises(ValueError, match="wrong bank"):
         index.add(event(bank="A"))
     assert index.add(event(counterparty_bank="B")) is None
-    rotated_path = tmp_path / "rotated.key"
-    rotated_path.write_bytes(b"d" * 32)
-    rotated = TokenIndex("B", "k2", {("A", "B"): rotated_path})
+    rotated_key = generate_agreement_key()
+    rotated_path = tmp_path / "rotated.pem"
+    rotated_path.write_bytes(private_key_pem(rotated_key))
+    rotated = TokenIndex(
+        "B", "k2", AgreementFiles(rotated_path, paths.peer_public_keys)
+    )
     rotated_token = rotated.add(event())
     assert rotated_token != token
     assert rotated.lookup(("A", "B"), "k1", token) == []
     assert index.lookup(("A", "B"), "k2", rotated_token) == []
     same_key_new_version = TokenIndex("B", "k2", paths)
     assert same_key_new_version.add(event()) not in (token, rotated_token)
-    other_key = TokenIndex("B", "k1", {("A", "B"): rotated_path})
+    other_key = TokenIndex(
+        "B", "k1", AgreementFiles(rotated_path, paths.peer_public_keys)
+    )
     assert other_key.add(event()) != token
 
 
 @pytest.mark.parametrize(
-    "failure", ["empty", "short", "missing", "version", "unrelated", "reused"]
+    "failure", ["empty", "short", "missing", "version", "same_bank", "unknown"]
 )
 def test_invalid_index_keys(failure, pair_key_paths, tmp_path):
-    paths = {("A", "B"): pair_key_paths["A", "B"]}
+    files = key_files(pair_key_paths, "B", "A")
+    private, peers = files.private_key, dict(files.peer_public_keys)
     version = "k1"
     if failure == "empty":
-        paths = {}
+        peers = {}
     elif failure == "short":
-        pair_key_paths["A", "B"].write_bytes(b"short")
+        private.write_bytes(b"short")
     elif failure == "missing":
-        paths = {("A", "B"): tmp_path / "absent.key"}
+        peers = {"A": tmp_path / "absent.pem"}
     elif failure == "version":
         version = "bad:version"
-    elif failure == "unrelated":
-        paths = {("A", "C"): pair_key_paths["A", "C"]}
+    elif failure == "same_bank":
+        peers = {"B": peers["A"]}
     else:
-        paths["B", "C"] = paths["A", "B"]
+        peers = {"D": peers["A"]}
     with pytest.raises((ValueError, FileNotFoundError)):
-        TokenIndex("B", version, paths)
+        TokenIndex("B", version, AgreementFiles(private, peers))
 
 
 def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
     with (TINY / "bank_B.csv").open() as source:
         events = list(csv.DictReader(source))
-    paths = {p: path for p, path in pair_key_paths.items() if "B" in p}
+    paths = key_files(pair_key_paths, "B")
     index = TokenIndex("B", "k1", paths)
     scorer = Scorer("B")
     expected = [r for e in events for r in scorer.process(e)]
@@ -465,7 +483,7 @@ def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
         consume(consumer, Scorer("B"), output, token_index=index)
     assert [json.loads(line) for line in output.getvalue().splitlines()] == expected
     assert consumer.commit.call_count == 2 * len(events)
-    token = derive_token("p01", "A", "B", b"a" * 32, "k1")
+    token = index.token_for("p01", ("A", "B"), "k1")
     assert index.lookup(("A", "B"), "k1", token) == [
         {"payment_id": "p01", "direction": "in", "account": "B-bob"}
     ]
@@ -473,12 +491,12 @@ def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
 
 @pytest.mark.parametrize("failure", ["missing_pair", "invalid_event", "wrong_bank"])
 def test_index_failure_does_not_commit(failure, pair_key_paths):
-    index = TokenIndex("B", "k1", {("B", "C"): pair_key_paths["B", "C"]})
+    index = TokenIndex("B", "k1", key_files(pair_key_paths, "B", "C"))
     e = event()
     if failure == "invalid_event":
         e["amount"] = -1
     elif failure == "wrong_bank":
-        index = TokenIndex("A", "k1", {("A", "B"): pair_key_paths["A", "B"]})
+        index = TokenIndex("A", "k1", key_files(pair_key_paths, "A", "B"))
     consumer = Mock()
     consumer.poll.return_value = message(e)
     with pytest.raises(ValueError):
@@ -488,7 +506,7 @@ def test_index_failure_does_not_commit(failure, pair_key_paths):
 
 
 def test_late_unflagged_events_are_indexed(pair_key_paths):
-    index = TokenIndex("B", "k1", {("A", "B"): pair_key_paths["A", "B"]})
+    index = TokenIndex("B", "k1", key_files(pair_key_paths, "B", "A"))
     events = [event("new", time="12:00:00"), event(), event()]
     consumer = Mock(**{"commit.return_value": []})
     consumer.poll.side_effect = [*[message(e) for e in events], KeyboardInterrupt]
@@ -496,7 +514,7 @@ def test_late_unflagged_events_are_indexed(pair_key_paths):
     with pytest.raises(KeyboardInterrupt):
         consume(consumer, Scorer("B"), output, token_index=index)
     assert output.getvalue() == ""
-    token = derive_token("in", "A", "B", b"a" * 32, "k1")
+    token = index.token_for("in", ("A", "B"), "k1")
     assert len(index.lookup(("A", "B"), "k1", token)) == 1
     assert consumer.commit.call_count == 3
 
@@ -505,8 +523,8 @@ def test_late_unflagged_events_are_indexed(pair_key_paths):
     "options",
     [
         ["--key-version", "k1"],
-        ["--pairwise-key", "A", "absent.key"],
-        ["--key-version", "k1", "--pairwise-key", "A", "absent.key"],
+        ["--peer-public-key", "A", "absent.pem"],
+        ["--key-version", "k1", "--peer-public-key", "A", "absent.pem"],
     ],
 )
 def test_index_cli_configuration(options):
@@ -602,9 +620,7 @@ def test_shutdown_finishes_current_handoff():
 
 
 def test_token_capacity_never_evicts(pair_key_paths):
-    index = TokenIndex(
-        "B", "k1", {("A", "B"): pair_key_paths["A", "B"]}, max_references=1
-    )
+    index = TokenIndex("B", "k1", key_files(pair_key_paths, "B", "A"), max_references=1)
     token = index.add(event())
     assert index.add(event()) == token
     consumer = Mock()
@@ -619,4 +635,99 @@ def test_token_capacity_never_evicts(pair_key_paths):
     assert consumer.commit.call_count == 1
     consumer.close.assert_called_once()
     with pytest.raises(ValueError, match="positive"):
-        TokenIndex("B", "k1", {("A", "B"): pair_key_paths["A", "B"]}, max_references=0)
+        TokenIndex("B", "k1", key_files(pair_key_paths, "B", "A"), max_references=0)
+
+
+def test_overlapping_rotation_no_missed_link(pair_key_paths, tmp_path):
+    old = key_files(pair_key_paths, "B")
+    index = TokenIndex("B", "k1", old)
+    old_token = index.add(event())
+    fresh_root = tmp_path / "k2"
+    fresh_root.mkdir()
+    for bank in "ABC":
+        key = generate_agreement_key()
+        (fresh_root / f"{bank}-private.pem").write_bytes(private_key_pem(key))
+        (fresh_root / f"{bank}-public.pem").write_bytes(
+            public_key_pem(key.public_key())
+        )
+    fresh = key_files(fresh_root, "B")
+    with pytest.raises(ValueError, match="fresh"):
+        index.introduce_version("k2", old)
+    index.introduce_version("k2", fresh)
+    assert index.active_versions == ("k1", "k2")
+    assert index.lookup(("A", "B"), "k1", old_token)
+    backfilled = index.token_for("in", ("A", "B"), "k2")
+    assert index.lookup(("A", "B"), "k2", backfilled) == [
+        {"payment_id": "in", "direction": "in", "account": "bob"}
+    ]
+    assert index.add(event("overlap")) == index.token_for("overlap", ("A", "B"), "k1")
+    tokens = index.tokens(event("overlap"))
+    assert tokens["k1"] != tokens["k2"]
+    for version, token in tokens.items():
+        assert index.lookup(("A", "B"), version, token) == [
+            {"payment_id": "overlap", "direction": "in", "account": "bob"}
+        ]
+        assert index.lookup(("A", "B"), "k2" if version == "k1" else "k1", token) == []
+    with pytest.raises(ValueError, match="every peer"):
+        index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1"]})
+    index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1", "k2"]})
+    assert index.add(event("overlap")) == tokens["k2"]
+    index.reload_keys()
+    assert index.lookup(("A", "B"), "k1", tokens["k1"])
+    with pytest.raises(ValueError, match="Switch"):
+        index.retire_version("k2")
+    index.retire_version("k1")
+    assert index.lookup(("A", "B"), "k1", tokens["k1"]) == []
+    assert index.lookup(("A", "B"), "k2", tokens["k2"])
+    assert index.add(event("after")) == index.token_for("after", ("A", "B"), "k2")
+
+
+def test_rotation_capacity_failure_keeps_old_index(pair_key_paths, tmp_path):
+    index = TokenIndex("B", "k1", key_files(pair_key_paths, "B", "A"), max_references=1)
+    token = index.add(event())
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    for bank in "AB":
+        key = generate_agreement_key()
+        (fresh / f"{bank}-private.pem").write_bytes(private_key_pem(key))
+        (fresh / f"{bank}-public.pem").write_bytes(public_key_pem(key.public_key()))
+    with pytest.raises(RuntimeError, match="no records were evicted"):
+        index.introduce_version("k2", key_files(fresh, "B", "A"))
+    assert index.active_versions == ("k1",)
+    assert index.lookup(("A", "B"), "k1", token)
+
+
+def test_reload_reopens_secret_mount_and_requires_version_change(pair_key_paths):
+    files = key_files(pair_key_paths, "B")
+    index = TokenIndex("B", "k1", files)
+    token = index.add(event())
+    index.reload_keys()
+    assert index.add(event()) == token
+    files.private_key.write_bytes(private_key_pem(generate_agreement_key()))
+    with pytest.raises(ValueError, match="new version"):
+        index.reload_keys()
+
+
+def test_incomplete_rotated_peer_set_cannot_drop_unseen_bank_pair(
+    pair_key_paths, tmp_path
+):
+    index = TokenIndex("B", "k1", key_files(pair_key_paths, "B"))
+    fresh = tmp_path / "fresh-peers"
+    fresh.mkdir()
+    for bank in "ABC":
+        key = generate_agreement_key()
+        (fresh / f"{bank}-private.pem").write_bytes(private_key_pem(key))
+        (fresh / f"{bank}-public.pem").write_bytes(public_key_pem(key.public_key()))
+    # No C transaction has arrived yet: readiness must still cover configured C.
+    with pytest.raises(ValueError, match="same bank pairs"):
+        index.introduce_version("k2", key_files(fresh, "B", "A"))
+    assert index.active_versions == ("k1",)
+    before = index.add(event("before", counterparty_bank="C"))
+    assert index.lookup(("B", "C"), "k1", before)
+    index.introduce_version("k2", key_files(fresh, "B"))
+    with pytest.raises(ValueError, match="every peer"):
+        index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1"]})
+    assert index.key_version == "k1"
+    index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1", "k2"]})
+    after = index.add(event("after", counterparty_bank="C"))
+    assert index.lookup(("B", "C"), "k2", after)

@@ -1,0 +1,94 @@
+Role 4 live k3d attempt � 3 November 2026 (Asia/Singapore)
+
+Outcome: BLOCKED before live NetworkPolicy probes or public certificate inspection.
+No live pass/fail probe totals or certificate-issuance claims are made.
+
+Isolation and resources
+- Docker Desktop reported 12 CPUs and 8,287,113,216 bytes RAM (7.72 GiB).
+- No existing Kubernetes contexts or k3d clusters were present.
+- Existing unrelated ecommerce_mongo and the Role 4 Linux test container were preserved.
+- Existing Docker networks used 172.17/18/19; requested 172.28.0.0/16 did not overlap.
+- Official k3d 5.9.0 and Helm 3.19.0 binaries were downloaded only into TEMP tools.
+- Used TEMP/csc3104-role4-k3d/kubeconfig; no default/user kubeconfig changes.
+- Ran a copy of deploy/k3d-up.sh with Windows CRLF normalized to LF; script logic,
+  chart versions, deployment templates and resource settings were unchanged.
+
+Commands/results
+1. k3d cluster create csc3104 --subnet 172.28.0.0/16 --wait
+   Cluster created in approximately 32 seconds; k3s v1.35.5-k3s1 node Ready.
+2. The generated endpoint https://host.docker.internal:59856 was unreachable from
+   Windows. Docker published 6443 on 0.0.0.0:59856; this succeeded with TLS verification:
+     kubectl --server=https://127.0.0.1:59856 --request-timeout=10s get nodes
+   Corrected ONLY the task kubeconfig:
+     kubectl config set-cluster k3d-csc3104 --server=https://127.0.0.1:59856
+3. Resumed the unchanged setup script, using its pinned versions:
+   Strimzi 1.2.0, CloudNativePG chart 0.29.1, KEDA 2.21.0, cert-manager v1.21.2.
+   All four Helm releases deployed and their operator pods became Ready.
+   Actual operator pod labels matched the reviewed NetworkPolicy selectors:
+     Strimzi name=strimzi-cluster-operator
+     CloudNativePG app.kubernetes.io/name=cloudnative-pg
+     KEDA app=keda-operator
+   bank-a, bank-b and bank-c Helm releases installed.
+4. While waiting for all bank Kafka/PostgreSQL/certificates to become Ready,
+   https://127.0.0.1:59856 stopped responding: TLS handshake/request timeouts.
+   Docker list/inspect/stats then stalled and returned HTTP 500 from the
+   dockerDesktopLinuxEngine named-pipe endpoint with API versions 1.53 and 1.51.
+   One conservative retry with DOCKER_API_VERSION=1.44 also returned HTTP 500.
+   Resource pressure is plausible, but OOM/the engine failure cause was not verified.
+5. deploy/check-netpol.sh was NOT run because the engine/API was unavailable.
+   Certificate Ready status and public tls.crt SAN/EKU inspection were NOT obtained.
+   No private tls.key was read/exported.
+
+Cleanup attempts and remaining resources
+- Caleb explicitly authorized restarting Docker Desktop and cleaning up the task cluster.
+- Standard Desktop restart/stop initially timed out; the Docker-owned WSL instance and
+  hung Docker application processes were restarted without unregister/reset/data deletion.
+- The engine briefly responded. Exact task-node stop commands returned success, and
+  later inspect reported the task server/loadbalancer running=false. State queries became
+  unreliable again; task resources must not be assumed deleted.
+- k3d deletion failed with filesystem input/output errors writing containerd meta.db;
+  its final success message was contradicted by remaining containers/network/volume.
+- C: was then measured with 0 free bytes. Only task-created uv cache, archives and the
+  generated Windows worktree venv were removed, recovering roughly 650 MB. A later
+  measurement after RAM test setup showed roughly 550 MB available.
+- A second approved restart with free space available still failed to become healthy.
+  Kernel logs reported I/O errors writing the Docker data filesystem superblock.
+- No existing user database/container/volume was deleted, no factory reset occurred,
+  and no Docker data VHDX or unrelated WSL distribution was changed.
+- Originally running user container: ecommerce_mongo. It was observed running after
+  the first restart, then inspect reported running=false during filesystem failure.
+  Its final restoration is UNCONFIRMED; do not assume it is running.
+- Task resources requiring cleanup after Docker storage recovery:
+    k3d-csc3104-server-0
+    k3d-csc3104-serverlb
+    k3d-csc3104-tools
+    csc3104-role4-check
+    network k3d-csc3104
+    volume k3d-csc3104-images
+- Once storage/daemon is healthy, delete only the task cluster with k3d cluster delete
+  csc3104, remove csc3104-role4-check, verify task network/volume removal, and restore
+  ecommerce_mongo. Preserve all other user containers and volumes.
+- No further cluster was created. Integration tests were instead run in an Ubuntu
+  filesystem entirely in /run RAM, avoiding Docker metadata and further disk growth:
+  301 passed, 0 failed, 0 skipped, 0 warnings; lint/format/protobuf/rotation/Helm passed.
+Remaining evidence
+- Run the revised deploy/check-netpol.sh on working k3d and capture authorized OPEN,
+  cross-bank PostgreSQL/Kafka BLOCKED and unauthorized-namespace BLOCKED output.
+- Inspect only public certificate data for issued bank URI SAN and both EKUs.
+- The separate automated Linux suite passed 298 tests before this live attempt;
+  rendered policy assertions and local real-mTLS tests are not live-CNI evidence.
+
+Final recovery confirmation
+- After freeing task-generated files, closing the hung Docker application processes
+  and restarting the sole Docker-owned WSL backend, Docker Server 29.2.0 responded.
+- Removed the four exact task containers: k3d-csc3104-server-0,
+  k3d-csc3104-serverlb, k3d-csc3104-tools, csc3104-role4-check.
+- Removed task network k3d-csc3104 and volume k3d-csc3104-images.
+- Removed only the four task-downloaded uv/k3d/k3s images; no global prune was used.
+- Final Docker inventory confirmed those resources absent. ecommerce_mongo was
+  restored and verified Up; other previously stopped user containers stayed stopped.
+- The temporary RAM test environment was unmounted and removed after all 301 tests.
+- Earlier cleanup/restoration UNCONFIRMED notes above describe the failed attempts;
+  final task-resource cleanup and Mongo restoration are now CONFIRMED.
+- Host C: still had low free space (about 0.4 GB at the last check). No further
+  cluster attempt was made. Free additional host space before another cluster run.

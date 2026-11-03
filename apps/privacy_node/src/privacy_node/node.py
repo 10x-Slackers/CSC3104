@@ -3,11 +3,16 @@
 Run one per bank, e.g.:
   uv run python -m privacy_node.node --bank B --port 50052 \
     --workload apps/dataset/fixtures/tiny --key-version k1 \
-    --pairwise-key A .secrets/pairs/A-B.key --pairwise-key C .secrets/pairs/B-C.key \
-    --signing-key .secrets/signing/B.pem \
-    --public-key A .secrets/public/A.pem --public-key B .secrets/public/B.pem \
-    --public-key C .secrets/public/C.pem \
-    --peer A localhost:50051 --peer C localhost:50053 --db .secrets/B.db --search
+    --x25519-private-key .secrets/B/private/x25519/k1.pem \
+    --peer-x25519-public-key A .secrets/B/trusted/x25519/A/k1.pem \
+    --peer-x25519-public-key C .secrets/B/trusted/x25519/C/k1.pem \
+    --signing-key .secrets/B/private/signing/k1.pem --signing-key-version k1 \
+    --public-key A k1 .secrets/B/trusted/signing/A/k1.pem \
+    --public-key B k1 .secrets/B/trusted/signing/B/k1.pem \
+    --public-key C k1 .secrets/B/trusted/signing/C/k1.pem \
+    --tls-cert /run/tls/tls.crt --tls-key /run/tls/tls.key --tls-ca /run/tls/ca.crt \
+    --peer A privacy-node.bank-a.svc.cluster.local:50051 \
+    --peer C privacy-node.bank-c.svc.cluster.local:50051 --search
 
 For live Kafka state, replace --workload with --bootstrap-servers <brokers>
 and use a fresh --group to rebuild state. --search starts live candidates.
@@ -15,12 +20,15 @@ and use a fresh --group to rebuild state. --search starts live candidates.
 
 import argparse
 import hashlib
+import json
 import signal
 import threading
 import traceback
 import uuid
 from concurrent import futures
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from time import monotonic
 
 import grpc
 
@@ -29,21 +37,25 @@ from privacy_node import privacy_node_pb2_grpc as pb_grpc
 from privacy_node.claims import (
     bound,
     chain_digest,
-    check_payload,
+    check_result,
     claim_bytes,
     complete,
     key,
     refs,
+    reject_unknown_fields,
     valid_chain,
 )
+from privacy_node.keys import own_key, pair_paths
+from privacy_node.keys import public_keys as trusted_public_keys
 from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
+from privacy_node.transport import TlsFiles, authenticated_bank
 from scorer.stream import consume
-from security import load_signing_key, load_verification_key, sign
+from security import AgreementFiles, load_signing_key, load_verification_key, sign
 
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
 BRANCH_CAP = 1  # linear chains only; extra local links make the result PARTIAL
-SEARCH_SECONDS = 10  # whole-search deadline, carried unchanged by every hop
+SEARCH_SECONDS = 10  # initiator-local budget; nested gRPC calls use time remaining
 # Worst state wins when two results are combined.
 SEVERITY = [
     *(pb.CONFIRMED, pb.PARTIAL, pb.NO_MATCH, pb.PENDING, pb.TIMED_OUT),
@@ -77,11 +89,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
         peers,
         key_version,
         ingestion_grace_seconds=0,
+        signing_key_version="k1",
+        tls=None,
+        reload_keys=None,
     ):
         self.bank = local.bank
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
         self.peers, self.key_version = peers, key_version
+        self.signing_key_version, self.tls = signing_key_version, tls
+        self.reload_keys = reload_keys
         self._started_detections = set()
         if ingestion_grace_seconds < 0:
             raise ValueError("Ingestion grace must be nonnegative")
@@ -90,54 +107,99 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     # ---- outgoing calls -------------------------------------------------
 
-    def call(self, bank, method, request, deadline):
-        """Call a peer once; housekeeping retries searches and deliveries that fail."""
-        check_payload(request)
-        with grpc.insecure_channel(self.peers[bank]) as channel:  # M3: mTLS
+    def call(self, bank, method, request, timeout):
+        """One relative-timeout call; new TLS channels reread renewed certificates."""
+        reject_unknown_fields(request)
+        channel = (
+            self.tls.channel(self.peers[bank])
+            if self.tls
+            else grpc.insecure_channel(self.peers[bank])
+        )
+        with channel:
             stub = pb_grpc.PrivacyNodeStub(channel)
-            timeout = (deadline - now()).total_seconds()
-            return getattr(stub, method)(request, timeout=timeout)
+            reply = getattr(stub, method)(request, timeout=max(0, timeout))
+            reject_unknown_fields(reply)
+            return reply
 
-    def request(self, query_id, ref, direction, hops_remaining, deadline, visited):
+    def request(
+        self, query_id, ref, direction, hops_remaining, visited, key_version=None
+    ):
         return pb.TraceRequest(
             query_id=query_id,
             sender=self.bank,
-            key_version=self.key_version,
+            key_version=key_version or self.key_version,
             ref=ref,
             direction=direction,
             hops_remaining=hops_remaining,
-            deadline=deadline,
             visited=visited,
         )
 
-    def claim(self, recipient, query_id, in_ref, out_ref):
+    def claim(
+        self, recipient, query_id, in_ref, out_ref, key_version=None, truncated=False
+    ):
+        with self.local.lock:
+            signing_key, signing_version = self.signing_key, self.signing_key_version
         c = pb.LinkClaim(
             signer=self.bank,
             recipient=recipient,
             query_id=query_id,
-            key_version=self.key_version,
+            key_version=key_version or self.key_version,
+            signing_key_version=signing_version,
             in_ref=in_ref,
             out_ref=out_ref,
+            truncated=truncated,
         )
-        c.signature = sign(claim_bytes(c), self.signing_key)
+        c.signature = sign(claim_bytes(c), signing_key)
         return c
+
+    def set_query_version(self, version, peer_versions):
+        self.local.index.set_query_version(version, peer_versions)
+        self.key_version = version
+
+    def reload_key_directory(self, root, config):
+        """Apply a trusted mounted active-version manifest without restarting."""
+        with self.local.lock:
+            active = config["active_versions"]
+            for version in active:
+                self.local.index.introduce_version(
+                    version, pair_paths(root, self.bank, version)
+                )
+            self.set_query_version(config["query_version"], config["peer_versions"])
+            for version in set(self.local.index.active_versions) - set(active):
+                self.local.index.retire_version(version)
+            signing_version = config["signing_key_version"]
+            self.signing_key = own_key(root, self.bank, signing_version)
+            self.signing_key_version = signing_version
+            self.public_keys = trusted_public_keys(root, self.bank)
 
     # ---- answering a peer -----------------------------------------------
 
     def Trace(self, request, context):
-        slot = f"{request.sender}|{key(request.ref)}"
+        if self.tls:
+            authenticated_bank(context, request.sender)
+        try:
+            reject_unknown_fields(request)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        slot = (
+            request.sender.encode()
+            + b"\0"
+            + request.key_version.encode()
+            + b"\0"
+            + request.ref.SerializeToString(deterministic=True)
+        )
         stored = self.store.get_reply(request.query_id, slot)
         if stored:
             return stored  # retried query: same answer, no repeated work
-        reply = self.follow(request)
-        check_payload(reply)
+        timeout = context.time_remaining() if context else SEARCH_SECONDS
+        reply = self.follow(request, SEARCH_SECONDS if timeout is None else timeout)
         if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # only cache final answers
             self.store.put_reply(request.query_id, slot, reply)
         return reply
 
-    def follow(self, request):
-        # M3: take the sender from the mTLS certificate, not from the message.
-        if now() > datetime.fromisoformat(request.deadline):
+    def follow(self, request, timeout=SEARCH_SECONDS):
+        deadline = monotonic() + timeout
+        if timeout <= 0:
             return pb.TraceReply(state=pb.TIMED_OUT)
         down = request.direction == pb.DOWNSTREAM
         here = "in" if down else "out"
@@ -146,39 +208,51 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         if not payment:
             return pb.TraceReply(state=pb.NO_MATCH)
-        return self.extend(request, payment, down)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return pb.TraceReply(state=pb.TIMED_OUT)
+        return self.extend(request, payment, down, remaining)
 
-    def extend(self, request, payment, down):
+    def extend(self, request, payment, down, timeout):
         """Sign this bank's link for the transfer and follow it one more hop."""
+        deadline = monotonic() + timeout
         here, there = ("in", "out") if down else ("out", "in")
         this_ref = request.ref
+        truncated = False
 
         def claim(other):
             in_ref, out_ref = (this_ref, other) if down else (other, this_ref)
-            return self.claim(request.sender, request.query_id, in_ref, out_ref)
+            return self.claim(
+                request.sender,
+                request.query_id,
+                in_ref,
+                out_ref,
+                request.key_version,
+                truncated,
+            )
 
         nexts = self.local.links(payment, here)
         if not nexts:  # the chain starts or ends at this bank
             return pb.TraceReply(state=pb.CONFIRMED, claims=[claim(pb.TokenRef())])
-        state = pb.PARTIAL if len(nexts) > BRANCH_CAP else pb.CONFIRMED
-        next_ref = self.local.refs[nexts[0], there]
+        truncated = len(nexts) > BRANCH_CAP
+        state = pb.PARTIAL if truncated else pb.CONFIRMED
+        next_ref = self.local.ref(nexts[0], there, request.key_version)
         if key(next_ref) in {key(r) for r in request.visited}:  # loop closed
             return pb.TraceReply(state=state, claims=[claim(next_ref)])
         if request.hops_remaining <= 0:  # hop limit: next_ref is left unfollowed
+            truncated = True
             return pb.TraceReply(state=pb.PARTIAL, claims=[claim(next_ref)])
         forward = self.request(
             request.query_id,
             next_ref,
             request.direction,
             request.hops_remaining - 1,
-            request.deadline,
             [*request.visited, next_ref],
+            request.key_version,
         )
         peer = self.local.counterparty[nexts[0], there]
         try:
-            reply = self.call(
-                peer, "Trace", forward, datetime.fromisoformat(request.deadline)
-            )
+            reply = self.call(peer, "Trace", forward, deadline - monotonic())
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
         return pb.TraceReply(
@@ -187,23 +261,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     def Deliver(self, request, context):
         """Store a chain result pushed by the bank that assembled it."""
-        claims, sender = list(request.claims), request.sender
-        own = [i for i, c in enumerate(claims) if c.signer == c.recipient == sender]
-        up, down = (claims[: own[0]][::-1], claims[own[0] + 1 :]) if own else ([], [])
-        if (
-            not own
-            or request.state not in (pb.CONFIRMED, pb.PARTIAL)
-            or self.bank not in {c.signer for c in claims}
-            or chain_digest(claims) != request.chain_digest
-            or not valid_chain(claims, self.public_keys)
-            or not all(bound(leg, sender, leg[0].query_id) for leg in (up, down) if leg)
-        ):
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid chain result")
-        # A cut chain is never confirmed, whatever the sender says.
-        if not complete(claims):
-            request.state = pb.PARTIAL
-        self.store.save_chain(request)
-        return pb.Ack(chain_digest=request.chain_digest)
+        if self.tls:
+            authenticated_bank(context, request.sender)
+        try:
+            checked = check_result(request, self.public_keys, self.bank)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        self.store.save_chain(checked)
+        return pb.Ack(chain_digest=checked.chain_digest)
 
     # ---- starting a search ----------------------------------------------
 
@@ -211,12 +276,13 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """Query the next bank in one direction and check the claims that come back."""
         query_id = str(uuid.uuid4())
         side = "out" if direction == pb.DOWNSTREAM else "in"
-        request = self.request(
-            query_id, ref, direction, budget, deadline.isoformat(), visited
-        )
+        request = self.request(query_id, ref, direction, budget, visited)
         try:
             reply = self.call(
-                self.local.counterparty[payment, side], "Trace", request, deadline
+                self.local.counterparty[payment, side],
+                "Trace",
+                request,
+                deadline - monotonic(),
             )
         except grpc.RpcError as error:
             return failure_state(error), []
@@ -231,9 +297,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         retry_until = self._ingestion_deadlines.setdefault(
             search_id, now() + timedelta(seconds=self.ingestion_grace_seconds)
         )
-        deadline = now() + timedelta(seconds=SEARCH_SECONDS)
-        in_ref = self.local.refs[incoming, "in"]
-        out_ref = self.local.refs[outgoing, "out"]
+        deadline = monotonic() + SEARCH_SECONDS
+        in_ref = self.local.ref(incoming, "in", self.key_version)
+        out_ref = self.local.ref(outgoing, "out", self.key_version)
         own = self.claim(self.bank, search_id, in_ref, out_ref)
         visited = [in_ref, out_ref]
         budget = HOP_LIMIT + 1 - len(visited)
@@ -298,13 +364,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
             if stop is not None and stop.is_set():
                 break
             try:
-                self.call(bank, "Deliver", result, now() + timedelta(seconds=5))
+                self.call(bank, "Deliver", result, 5)
                 self.store.ack(result.chain_digest, bank)
             except grpc.RpcError:
                 pass  # stays in the outbox until the bank is back
 
     def housekeeping(self, stop=None):
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
+        if self.reload_keys:
+            self.reload_keys()
         for incoming, outgoing in self.store.unfinished_searches():
             if stop is not None and stop.is_set():
                 break
@@ -315,7 +383,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
 def serve(node, port=0):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     pb_grpc.add_PrivacyNodeServicer_to_server(node, server)
-    port = server.add_insecure_port(f"[::]:{port}")  # M3: mTLS
+    port = (
+        server.add_secure_port(f"[::]:{port}", node.tls.server_credentials())
+        if node.tls
+        else server.add_insecure_port(f"[::]:{port}")
+    )
     server.start()
     return server, port
 
@@ -337,9 +409,27 @@ def main():
     parser.add_argument("--max-events", type=int, default=10000)
     parser.add_argument("--max-token-references", type=int)
     parser.add_argument("--key-version", default="k1")
-    parser.add_argument("--pairwise-key", nargs=2, action="append", default=[])
-    parser.add_argument("--signing-key", required=True)
-    parser.add_argument("--public-key", nargs=2, action="append", default=[])
+    parser.add_argument(
+        "--key-directory", help="per-bank key tree for reloadable active versions"
+    )
+    parser.add_argument("--key-config", help="mounted JSON active-version manifest")
+    parser.add_argument("--x25519-private-key")
+    parser.add_argument(
+        "--peer-x25519-public-key", nargs=2, action="append", default=[]
+    )
+    parser.add_argument("--signing-key")
+    parser.add_argument("--signing-key-version", default="k1")
+    parser.add_argument(
+        "--public-key",
+        nargs=3,
+        action="append",
+        default=[],
+        metavar=("BANK", "VERSION", "PATH"),
+    )
+    parser.add_argument("--tls-cert")
+    parser.add_argument("--tls-key")
+    parser.add_argument("--tls-ca")
+    parser.add_argument("--insecure-demo", action="store_true")
     parser.add_argument("--peer", nargs=2, action="append", default=[])
     parser.add_argument("--db", default=":memory:")
     parser.add_argument("--search", action="store_true", help="trace local detections")
@@ -355,11 +445,31 @@ def main():
         parser.error(
             "Housekeeping interval must be positive and ingestion grace nonnegative"
         )
-    keys = {}
-    for peer, path in args.pairwise_key:
-        if (args.bank, peer) in keys:
-            parser.error("Duplicate peer key configuration")
-        keys[args.bank, peer] = path
+    if not args.insecure_demo and not all((args.tls_cert, args.tls_key, args.tls_ca)):
+        parser.error(
+            "mTLS requires --tls-cert, --tls-key and --tls-ca (local tests: --insecure-demo)"
+        )
+    if args.key_directory:
+        config_path = Path(
+            args.key_config or Path(args.key_directory) / args.bank / "active.json"
+        )
+        config = json.loads(config_path.read_text())
+        args.key_version = config["query_version"]
+        args.signing_key_version = config["signing_key_version"]
+        keys = pair_paths(args.key_directory, args.bank, args.key_version)
+        signing_key = own_key(args.key_directory, args.bank, args.signing_key_version)
+        public_keys = trusted_public_keys(args.key_directory, args.bank)
+    else:
+        if not args.x25519_private_key or not args.signing_key:
+            parser.error("provide --key-directory or explicit X25519/signing key files")
+        keys = AgreementFiles(
+            Path(args.x25519_private_key), dict(args.peer_x25519_public_key)
+        )
+        signing_key = load_signing_key(args.signing_key)
+        public_keys = {
+            (bank, version): load_verification_key(path)
+            for bank, version, path in args.public_key
+        }
     rule = {
         name: getattr(args, name)
         for name in ("min_ratio", "max_ratio", "min_delay", "window", "max_events")
@@ -374,12 +484,36 @@ def main():
     node = Node(
         local,
         Store(args.db),
-        load_signing_key(args.signing_key),
-        {bank: load_verification_key(path) for bank, path in args.public_key},
+        signing_key,
+        public_keys,
         dict(args.peer),
         args.key_version,
         ingestion_grace_seconds=args.ingestion_grace_seconds,
+        signing_key_version=args.signing_key_version,
+        tls=None
+        if args.insecure_demo
+        else TlsFiles(args.tls_cert, args.tls_key, args.tls_ca),
     )
+
+    def reload_keys():
+        if args.key_directory:
+            config_path = Path(
+                args.key_config or Path(args.key_directory) / args.bank / "active.json"
+            )
+            node.reload_key_directory(
+                args.key_directory, json.loads(config_path.read_text())
+            )
+            return
+        local.index.reload_keys()
+        node.signing_key = load_signing_key(args.signing_key)
+        node.public_keys = {
+            (bank, version): load_verification_key(path)
+            for bank, version, path in args.public_key
+        }
+
+    node.reload_keys = reload_keys
+    if args.key_directory:
+        reload_keys()
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
     if args.search and args.workload:

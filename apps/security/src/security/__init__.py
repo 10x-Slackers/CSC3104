@@ -5,14 +5,20 @@ import hmac
 import json
 import re
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 FORBIDDEN_FIELDS = frozenset(
     {
@@ -69,36 +75,77 @@ def _check_hmac_key(key: bytes) -> None:
 
 def derive_token(
     payment_id: str, bank_a: str, bank_b: str, shared_key: bytes, key_version: str
-) -> str:
-    """Return a pair/version-scoped HMAC-SHA256 payment token."""
+) -> bytes:
+    """Return the leftmost 16 raw bytes of the pair/version-scoped HMAC."""
     _check_hmac_key(shared_key)
     message = canonical_token_input(payment_id, bank_a, bank_b, key_version)
-    digest = hmac.new(shared_key, message, hashlib.sha256).hexdigest()
-    return f"ppmc:v1:{key_version}:{digest}"
+    return hmac.new(shared_key, message, hashlib.sha256).digest()[:16]
+
+
+@dataclass(frozen=True)
+class AgreementFiles:
+    """Only this bank's private key and trusted peers' public keys are mounted."""
+
+    private_key: str | Path
+    peer_public_keys: Mapping[str, str | Path]
+
+
+def generate_agreement_key() -> X25519PrivateKey:
+    return X25519PrivateKey.generate()
+
+
+def load_agreement_key(path: str | Path) -> X25519PrivateKey:
+    key = serialization.load_pem_private_key(Path(path).read_bytes(), password=None)
+    if not isinstance(key, X25519PrivateKey):
+        raise TypeError("Expected an X25519 private key")
+    return key
+
+
+def load_agreement_public_key(path: str | Path) -> X25519PublicKey:
+    key = serialization.load_pem_public_key(Path(path).read_bytes())
+    if not isinstance(key, X25519PublicKey):
+        raise TypeError("Expected an X25519 public key")
+    return key
+
+
+def derive_pair_key(
+    bank_id: str,
+    peer: str,
+    key_version: str,
+    local_private_key: X25519PrivateKey,
+    peer_public_key: X25519PublicKey,
+) -> bytes:
+    pair = canonical_pair(bank_id, peer)
+    canonical_token_input("", *pair, key_version)
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=f"csc3104 pair-key {'-'.join(pair)} {key_version}".encode("ascii"),
+    ).derive(local_private_key.exchange(peer_public_key))
 
 
 def load_pairwise_keys(
-    bank_id: str, key_paths: Mapping[tuple[str, str], str | Path]
+    bank_id: str,
+    key_version: str,
+    local_private_key: str | Path,
+    peer_public_keys: Mapping[str, str | Path],
 ) -> dict[tuple[str, str], bytes]:
-    """Read raw Secret-mounted files for this bank; reject shared pair keys."""
-    keys = {}
-    for pair, path in key_paths.items():
-        pair = canonical_pair(*pair)
-        if bank_id not in pair or pair in keys:
-            raise ValueError("Pair is unrelated to this bank or supplied twice")
-        key = Path(path).read_bytes()
-        _check_hmac_key(key)
-        if key in keys.values():
-            raise ValueError("Different bank pairs must use independent keys")
-        keys[pair] = key
-    return keys
+    """Re-read mounted X25519 material and derive, never transport, pair keys."""
+    private = load_agreement_key(local_private_key)
+    return {
+        canonical_pair(bank_id, peer): derive_pair_key(
+            bank_id, peer, key_version, private, load_agreement_public_key(path)
+        )
+        for peer, path in peer_public_keys.items()
+    }
 
 
 def generate_signing_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.generate()
 
 
-def private_key_pem(private_key: Ed25519PrivateKey) -> bytes:
+def private_key_pem(private_key: Ed25519PrivateKey | X25519PrivateKey) -> bytes:
     """Serialize for a protected Secret mount, without a second password layer."""
     return private_key.private_bytes(
         serialization.Encoding.PEM,
@@ -107,7 +154,7 @@ def private_key_pem(private_key: Ed25519PrivateKey) -> bytes:
     )
 
 
-def public_key_pem(public_key: Ed25519PublicKey) -> bytes:
+def public_key_pem(public_key: Ed25519PublicKey | X25519PublicKey) -> bytes:
     return public_key.public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
     )
@@ -125,6 +172,15 @@ def load_verification_key(path: str | Path) -> Ed25519PublicKey:
     if not isinstance(key, Ed25519PublicKey):
         raise TypeError("Expected an Ed25519 public key")
     return key
+
+
+def load_verification_keys(
+    key_paths: Mapping[tuple[str, str], str | Path],
+) -> dict[tuple[str, str], Ed25519PublicKey]:
+    """Trusted signing keys are addressed by (bank, signing key version)."""
+    return {
+        identity: load_verification_key(path) for identity, path in key_paths.items()
+    }
 
 
 def sign(message_bytes: bytes, private_key: Ed25519PrivateKey) -> bytes:

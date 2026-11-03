@@ -22,6 +22,7 @@ class LocalBank:
         self.index = TokenIndex(bank, key_version, key_paths, max_token_references)
         self.scorer = Scorer(bank, **rule)
         self.lock = threading.RLock()
+        self.records = {}  # bank-local snapshots for internal case enrichment only
         self.refs = {}  # (payment_id, direction) -> TokenRef
         self.counterparty = {}  # (payment_id, direction) -> peer bank
         self.onward = {}  # incoming payment_id -> [outgoing payment_id]
@@ -39,6 +40,9 @@ class LocalBank:
         """Publish tokens, references and candidate links before Kafka commits."""
         with self.lock:
             token = self.index.add(event)
+            self.records[event["payment_id"], event["direction"]] = {
+                name: event[name] for name in ("payment_id", "account", "amount")
+            }
             key = (event["payment_id"], event["direction"])
             if token:
                 pair = "-".join(canonical_pair(self.bank, event["counterparty_bank"]))
@@ -62,6 +66,12 @@ class LocalBank:
     def from_workload(cls, workload, bank, key_version, key_paths, **rule):
         with (Path(workload) / f"bank_{bank}.csv").open() as source:
             return cls(bank, key_version, key_paths, csv.DictReader(source), **rule)
+
+    def ref(self, payment_id, direction, key_version):
+        """Read a reference in the search's version, including during overlap."""
+        pair = self.refs[payment_id, direction].pair
+        token = self.index.token_for(payment_id, tuple(pair.split("-")), key_version)
+        return pb.TokenRef(pair=pair, token=token)
 
     def lookup(self, pair, key_version, token, direction):
         """Return this bank's payment_id for a peer token, or None."""

@@ -1,0 +1,10 @@
+﻿# Shared protobuf v1 producer/consumer sample; 16-byte frozen token vector.
+query_id: "sample-q1"
+sender: "A"
+key_version: "k1"
+ref {
+  pair: "A-B"
+  token: "\206\357\116\077\201\034\007\175\315\341\015\234\357\115\200\174"
+}
+direction: DOWNSTREAM
+hops_remaining: 3

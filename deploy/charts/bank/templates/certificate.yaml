@@ -7,7 +7,12 @@ spec:
   secretName: privacy-node-tls
   dnsNames:
     - privacy-node.{{ .Release.Namespace }}.svc
+    - privacy-node.{{ .Release.Namespace }}.svc.cluster.local
+  uris:
+    - spiffe://csc3104/bank/{{ trimPrefix "bank-" .Release.Namespace | upper }}/privacy-node
   usages: [server auth, client auth]
+  privateKey:
+    rotationPolicy: Always
   issuerRef:
     name: bank-ca
     kind: ClusterIssuer

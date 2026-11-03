@@ -110,13 +110,28 @@ scoring, including unflagged and scorer-too-late events. It uses the original
 `derive_token` and `load_pairwise_keys`; same-bank events are skipped. See
 [security.md](security.md) for the token and secret-file contract.
 
-Enable with `--key-version k1` and repeated `--pairwise-key PEER PATH` options on
-`python -m scorer.stream consume`; omitting both keeps scorer-only operation. Missing/invalid
-configuration fails; an event whose pair lacks a key is not committed. A new
-key/version requires a new index and replay; there is no old-key fallback.
+Enable with `--key-version k1 --x25519-private PATH` and repeated
+`--peer-public-key PEER PATH` options on `python -m scorer.stream consume`;
+omitting the key options keeps scorer-only operation. The private PEM belongs
+only to the local bank; peer PEMs are trusted X25519 public keys. Missing/invalid
+configuration fails; an event whose pair lacks a key is not committed.
+
+`TokenIndex(bank, key_version, AgreementFiles(private_key, peer_public_keys))`
+starts one active version. `introduce_version(version, files)` adds fresh X25519
+material and backfills retained local references under it while keeping old
+entries, so retries of old detections also survive the query-version switch.
+It checks capacity before changing the index. `add(event)` indexes every active version.
+`set_query_version(version, peer_versions)` switches the returned/query token
+only after trusted readiness configuration lists that version at every peer.
+`retire_version(version)` removes its keys and entries after old searches and
+retained entries expire. It cannot retire the current query version.
+`reload_keys()` reopens mounted files; use a new version when key bytes change.
+This small library API supports a rolling live demo without a pod restart; the
+standalone consumer CLI starts one version and does not provide an admin API.
 
 The in-memory index maps `(canonical bank pair, key version, token)` to unique
-local `(payment_id, direction, account)` references. `lookup(pair, version, token)`
+local `(payment_id, direction, account)` references. Tokens are 16 raw bytes, never
+internally hex/base64 strings. `lookup(pair, version, token)`
 returns those references in deterministic order and rejects unrelated pairs.
 Duplicate replay adds no duplicate references. The index and lookup results stay
 bank-local; Role 3 must not send them as peer responses. There is currently no
