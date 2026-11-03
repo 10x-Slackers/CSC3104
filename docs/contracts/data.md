@@ -1,6 +1,6 @@
 # Data contract
 
-Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events) and Isaac (pacs.008 batch)
+Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events)
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
@@ -9,7 +9,7 @@ Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job
 > - **Singapore payment types:** `prepare.py` writes Altman's `ACH` as `GIRO` and `Wire` as `MEPS+`; cheque, card, cash and Bitcoin keep their names. The detection rules use only GIRO and MEPS+ ([streaming.md](streaming.md#detection-rule)).
 > - **Labels and splits:** fetch Altman's patterns file and label each laundering transfer with its attempt ID and `altman_pattern` type. Detection is evaluated offline on dev/eval splits by attempt start ([evaluation.md](../evaluation.md#rules)). Planted chains go only into test fixtures, as the acceptance suite.
 > - **Replay and ingestor:** one replay process sends pacs.008 messages over HTTP to each bank's [ingestor](#ingestor), which replaces the stdin pipe.
-> - **Fixture expectations** follow the one ranked alert tier in [case.md](case.md).
+> - **Fixture expectations** follow the alert tiers in [case.md](case.md).
 
 Scope: the synthetic dataset, the split into Banks A, B and C, planted chains, labels, workloads, the committed fixture and replay.
 
@@ -68,7 +68,7 @@ Only the evaluation harness reads this file. Labels never go into bank files, Ka
 
 ## Planted scenarios
 
-Planted chains run between accounts that already exist in the slice, start in its first half, and **cross banks on every hop**. They are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). **pending work:** with one alert tier, each bank alerts on its own rules' hits, so a 2-transfer chain, whose only rule hit is at the middle bank, alerts there only; a chain that two banks' rules link is marked "confirmed by".
+Planted chains run between accounts that already exist in the slice, start in its first half, and **cross banks on every hop**. They are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). **pending work:** with the alert tiers, a chain alerts (Tier 2) only when at least two banks' rules link its transfers, so a 2-transfer chain, which only the middle bank's rule links, is not a Tier 2 alert. Hits that link nothing, such as a new payee hit on a fixture payment (the fixture has no payment history), are Tier 1 cases at that bank.
 
 | Scenario | Shape | Expected result |
 | --- | --- | --- |
@@ -115,9 +115,9 @@ Use `--hours 5` or more: chains start in the first half of the slice and the lon
 | --- | --- | --- | --- |
 | — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert |
 | — | p05 | B→C | `altman_laundering = 1`; not a planted chain |
-| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** an alert at B only, since only B's rule fired |
+| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; a Tier 1 case at B |
 | `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert |
-| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C. **pending work:** alerts at B and C, marked "confirmed by", since B's and C's rules fire; whether A, which signed but whose rule didn't fire, also alerts is open in [case.md](case.md#open) |
+| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it) |
 | `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked |
 | `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4 |
 
@@ -177,7 +177,7 @@ The events and their Kafka headers are in [streaming.md](streaming.md#kafka-even
 
 ### Batches and responses
 
-**draft**, Isaac to approve (he owns the replay Job).
+**agreed** (Isaac, 2 Nov 2026).
 
 | Item | Decision |
 | --- | --- |
@@ -206,9 +206,10 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **draft**, sample [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json); Isaac to approve | Mon 2 Nov |
-| Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json); Cindy to approve | Mon 2 Nov |
+| pacs.008 batch ([Ingestor](data.md#ingestor)) | Replay → ingestor (Macarius); the Job: Isaac | Field subset, BIC table, batch size, 4xx vs 5xx and retry, SGD only | **agreed** (Isaac, 2 Nov 2026), sample [`pacs008_batch.json`](../../apps/ingestor/fixtures/pacs008_batch.json) | Mon 2 Nov |
 | Labels file and splits | Macarius → Isaac | Columns, the split by attempt start, laundering in no attempt counted by day | **draft**, sample TODO | Wed 4 Nov |
+
+Also part of: [Kafka transaction event](streaming.md#interfaces).
 
 ## Open
 

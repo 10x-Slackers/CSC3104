@@ -8,7 +8,7 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > - **Event schema (draft, Macarius → Cindy):** each event gains `counterparty_account` and CloudEvents headers ([Kafka events](#kafka-events)).
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Four rules** replace the single rule: fast pass-through, chain, new payee and quick repeat, on cross-bank bank transfers ([Detection rule](#detection-rule)). The scorer runs as a library over a bank file for the offline evaluator.
-> - **One alert tier:** every rule hit is an alert at this bank; a link another bank's rule also confirms is marked and ranked first ([case.md](case.md#cases-and-alerts)).
+> - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
 > - **State in Valkey:** window state, token index, local links, payee sets and hits move out of memory, shared with the privacy node, which stops running the scorer in-process ([Search handoff](#search-handoff)).
 > - **Event time:** a per-account watermark with allowed lateness = window; trim by event time, with a TTL only for garbage collection. `--max-events` is removed.
 > - **Commits:** `enable.auto.offset.store=false`, `store_offsets()` after the Valkey write, auto-commit on (still at-least-once; duplicates are harmless because `detection_id` is deterministic).
@@ -67,7 +67,7 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | --- | --- | --- |
 | Incoming-to-outgoing value ratio | Outgoing / incoming: 0.90–0.98 inclusive | `--min-ratio`, `--max-ratio`; draft defaults pending team approval |
 | Time window | 1–30 minutes inclusive, using transaction timestamps | `--min-delay` (60 seconds), `--window` (1800 seconds) |
-| Minimum chain length | Replaced by one alert tier | **pending work:** every hit is an alert; a chain that two banks' rules link is marked confirmed and ranked first ([case.md](case.md)) |
+| Minimum chain length | Replaced by the alert tiers | **pending work:** [case.md](case.md#cases-and-alerts) |
 | Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md); checked by a 4/6/8 sweep |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
 | Fees, currencies, insufficient history | Uses Role 1's USD-only data; no separate fee model. Missing/evicted history produces no local match | **pending work:** all amounts in SGD ([data.md](data.md)); history bounded by the event-time trim, not a count |
@@ -81,16 +81,15 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | New payee | A bank transfer to an account at another bank that this customer has never paid, unless that payee already has ≥ 30 distinct payers | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
 
-- Every hit is an alert at this bank ([case.md](case.md#cases-and-alerts)). The fast rule rarely fires on Altman's data (1 laundering link in 4,278 on the dev days), but it stays because it's the cited "immediately" flag and the planted acceptance chains depend on it.
-- Alerts are ranked: confirmed by another bank's rule first, then by how many rules fired (B-1-1, "a combination of such situations may be indicative"), then by amount.
+- Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag and the planted acceptance chains depend on it.
 - Bank transfers carry 87% of Altman's laundering but 12% of transfers, a dataset artefact; the payment-type filter is reported as dev-tuned. Cheque, card and cash laundering, mostly from bank-70 hub accounts whose laundering payments look like their ordinary ones, is out of reach of any rule.
-- **Exploratory sweep** (Macarius, 31 Oct, a scratchpad script, not the offline evaluator; amounts in SGD, three banks, one tier):
+- **Exploratory sweep** (Macarius, 31 Oct, a scratchpad script, not the offline evaluator; amounts in SGD, three banks, every hit counted as caught):
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,272 to 664 a day on HI-Small's held-out days) for 1.1 points of recall.
   - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 8–56% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 67–81%. Payees with ≥ 30 earlier payers (businesses) were 9.8% of its ordinary flags and 0.6% of its laundering.
   - **Quick repeat:** half of the repeat laundering payments to a just-flagged payee came within 18 minutes (ordinary repeats: 28 h). It added about 1 point of recall for about 100 flags a day.
   - **No amount floor:** a S$1,500 floor on both payments of a link cut CYCLE and RANDOM attempts caught from 68 to 63 of 72.
   - **Together:** 94.9% of cross-bank laundering bank transfers on HI-Small's held-out days (1,338 of 1,410) with 1.38% of all payments flagged as ordinary, and 92.1% on HI-Medium (16,373 of 17,777) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
-- **Intra-bank hops:** follow a bank's internal hops locally and emit one link from the first cross-bank payment in to the last cross-bank payment out, so the node signs one claim. Fully internal chains are flagged for the node to post as alerts.
+- **Intra-bank hops:** follow a bank's internal hops locally and emit one link from the first cross-bank payment in to the last cross-bank payment out, so the node signs one claim. Fully internal chains are flagged for the node to post as Tier 1 cases.
 
 The scorer reports every qualifying incoming/outgoing pair for the same local
 account; it does not allocate incoming funds across payments or perform graph
@@ -193,10 +192,10 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
 | Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **draft**, sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json); Cindy to approve | Mon 2 Nov |
-| Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
 | Valkey layout ([streaming.md](streaming.md#search-handoff)) | Cindy → Zane | Key names, token-index value, local links (including collapsed intra-bank links), `hit:` keys, windows, TTL and trim | **draft**, sample TODO | Wed 4 Nov |
-| Alert ranking ([case.md](case.md#cases-and-alerts)) | Cindy, Zane → Jia Rui | Rule-backed claim, the "confirmed by" label, ranking order; thresholds come from the offline sweep | **draft**, sample TODO | Wed 4 Nov |
 | Scorer as a library | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample TODO | Wed 4 Nov |
+
+Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md#interfaces).
 
 ## Open
 
