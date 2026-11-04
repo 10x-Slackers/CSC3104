@@ -23,7 +23,7 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 - **Same code as the live path:** each bank's scorer runs as a library over its bank file, with an in-memory state store. The existing in-process three-node trace (the privacy node's CSV mode) then produces cross-bank chains and tiers. No Kafka, Valkey or gRPC servers.
 - **Output, per Altman pattern type:** attempts caught at Tier 1 (local) and at Tier 2 (cross-bank), precision, and analyst load (cases per bank per day, by tier). An attempt counts as caught if any of its transfers is in a case. Also report **payment-level** recall over the scope, which counts laundering in no attempt (about a third of HI-Small's in-scope laundering), and the false-positive rate as ordinary payments flagged / all payments on the split's own days.
 - **Where it runs:** a laptop for the full splits; CI runs it on the committed fixture as a regression test.
-- **Bridge to the cluster:** replay 1 Sep up to the end of one eval day (e.g. 6 Sep) through k3d at `--speed 0`, so the live rules have the same history as the offline run, and compare that day's stored cases with the offline output for the same day. They must match (experiment 13).
+- **Bridge to the cluster:** replay the `altman-1-6sep` workload (1 Sep to the end of the first eval day) through k3d at `--speed 0`, so the live rules have the same history as the offline run, and compare 6 Sep's stored cases with the offline run over the same workload. They must match (experiment 13).
 
 ## Experiments
 
@@ -43,7 +43,7 @@ Experiments 2–4 and 14 run offline; the rest run on k3d, and 10 on AWS.
 | 10 | Lambda | Ingestor and summary under load | Cold and warm latency separately; CloudWatch invocations, errors, duration |
 | 11 | Valkey loss | Delete Valkey and rebuild by replay from `earliest` | Rebuild time = RTO; RPO 0 |
 | 12 | Key rotation | Rotate a pair key during a live replay | No missed links |
-| 13 | Offline = live | 1–6 Sep through k3d at `--speed 0` (1–5 Sep as history) vs the offline run | Identical cases and tiers on 6 Sep |
+| 13 | Offline = live | The `altman-1-6sep` workload through k3d at `--speed 0` vs the offline run over the same workload | Identical cases and tiers on 6 Sep |
 | 14 | Out of sample | Rules frozen from HI-Small, run once on `altman-medium`, counting its days with ordinary activity (1–16 Sep) ([data.md](contracts/data.md#workloads)) | Recall (attempts and payments), false-positive rate |
 
 Security evidence (sentinel values never leave a bank; bad certificates and claims rejected; cross-bank store access denied) is listed in [security.md](contracts/security.md#tests).

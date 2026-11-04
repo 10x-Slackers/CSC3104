@@ -93,13 +93,14 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 | `slice-6h` | `apps/dataset/out/slice-6h --start 2022-09-05 --hours 6` | 129,415 | Load tests, demo |
 | `slice-48h` | `apps/dataset/out/slice-48h --start 2022-09-05 --hours 48` | 943,939 | Load tests |
 | `altman-small` | `apps/dataset/out/altman-small` (all of HI-Small) | 4,487,133 | Offline evaluation, dev and eval |
+| `altman-1-6sep` | `apps/dataset/out/altman-1-6sep --start 2022-09-01 --hours 144` | 2,696,535 | Offline = live (experiment 13) |
 | `altman-medium` | `apps/dataset/out/altman-medium --altman HI-Medium` | 29,336,378 | Out-of-sample check |
 
 `altman-small` takes about 30 s and 3.9 GB of memory and writes 825 MB; `altman-medium` takes about 4 minutes and 11 GB and writes 5.5 GB. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
 
 **One workload for dev and eval.** The plan named two, `altman-dev` and `altman-eval`. Eval reads 1–5 Sep as history, and dev reads the days after 5 Sep so its attempts can finish, so both would hold every day of HI-Small. They share `altman-small`, and the evaluator applies the split ([Splits](#labels-labelscsv-evaluation-only)).
 
-**Slices.** A slice is every transfer from `--start` for `--hours`; `slice-6h` is 5 Sep, 00:00–06:00. The two slices replace `dev-small`, `eval-small`, `dev-medium` and `eval-medium`, which differed only in their start day and planted-chain seed. A slice starts with no history, so every payee looks new on its first payment and the new payee rule fires more than it does on `altman-small`. Starting empty nearly doubled the ordinary payments flagged in the exploratory sweep ([evaluation.md](../evaluation.md#rules)). Use slices for load tests and the demo, never for detection quality.
+**Slices.** A slice is every transfer from `--start` for `--hours`; `slice-6h` is 5 Sep, 00:00–06:00. `slice-6h` and `slice-48h` replace `dev-small`, `eval-small`, `dev-medium` and `eval-medium`, which differed only in their start day and planted-chain seed. A slice starts with no history, so every payee looks new on its first payment and the new payee rule fires more than it does on `altman-small`. Starting empty nearly doubled the ordinary payments flagged in the exploratory sweep ([evaluation.md](../evaluation.md#rules)). Use slices for load tests and the demo, never for detection quality. The exception is `altman-1-6sep`: it starts where HI-Small starts (1 Sep 00:00), so it misses no history. Its bank files are the first rows of `altman-small`'s, up to the end of 6 Sep, and its labels are `altman-small`'s for those payments.
 
 ## Fixture: `apps/dataset/fixtures/tiny`
 
@@ -107,17 +108,17 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 
 `--transfers` takes a CSV with the columns `payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario`, as in `fixtures/tiny/transfers.csv`. `attempt_id` and `altman_pattern` are empty outside an Altman attempt, and the last three are empty for unplanted transfers.
 
-**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank card) and p04 (card). Each hit is at the sender's bank and is listed below.
+**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank card) and p04 (card). Each hit is at the sender's bank, each a Tier 1 case unless a chain promotes it.
 
 | Chain | Transfers | Banks | Expected (**draft**) |
 | --- | --- | --- | --- |
-| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert. **pending work:** p03 is a Tier 1 case at C (new payee) |
-| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain. **pending work:** a Tier 1 case at B (new payee) |
-| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; Tier 1 cases at A (p06: new payee) and B (p07: chain and new payee) |
-| `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert. **pending work:** Tier 1 cases at A (p08) and B (p09), both new payee |
-| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it). **pending work:** new payee also fires on p10 at A, p11 at B and p12 at C; the chain promotes those Tier 1 cases |
-| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked. **pending work:** Tier 1 cases at A (p13) and C (p14), both new payee |
-| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4. **pending work:** a Tier 2 alert at A, B and C (partial counts; all three banks' rules link it); new payee also fires on p15–p20 |
+| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert |
+| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain |
+| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; a Tier 1 case at B |
+| `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert |
+| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it). **pending work:** the alert promotes the new payee cases on p10, p11 and p12 |
+| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked |
+| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4. **pending work:** a Tier 2 alert at A, B and C (partial counts; all three banks' rules link it) |
 
 Payment IDs shared by each bank pair (useful for token tests):
 
@@ -136,7 +137,7 @@ uv run python -m dataset.replay apps/dataset/fixtures/tiny A --speed 0          
 uv run python -m dataset.replay apps/dataset/out/slice-6h A --speed 60 --start-at <epoch> | <ingestor>
 ```
 
-At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as possible, for load tests. `--until 2022-09-06T23:59:59Z` stops before the first event after that time, so a live run can end exactly where an offline run does (experiment 13).
+At `--speed 60`, a 6-hour workload takes 6 minutes. `--speed 0` sends as fast as possible, for load tests.
 
 ## Ingestor
 
