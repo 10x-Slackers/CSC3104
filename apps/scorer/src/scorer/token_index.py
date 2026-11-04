@@ -1,6 +1,5 @@
 """Bank-local token references. Construct a new index and replay on key rotation."""
 
-from scorer.score import validate
 from security import canonical_pair, derive_token, load_pairwise_keys
 
 
@@ -23,8 +22,7 @@ class TokenIndex:
             derive_token("", *pair, key, key_version)
         self._entries = {}
 
-    def add(self, event):
-        e = validate(event, self.bank)
+    def add(self, e):
         if e["counterparty_bank"] == self.bank:
             return None
         pair = canonical_pair(self.bank, e["counterparty_bank"])
