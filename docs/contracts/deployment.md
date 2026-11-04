@@ -48,7 +48,7 @@ Each owner fills in their own row.
 | --- | --- | --- | --- | --- | --- | --- |
 | Replay Job | Macarius | | — | — | | |
 | Ingestor (Lambda on EKS) | Macarius | | HTTP | HTTP `/healthz` | | |
-| Scorer | Cindy | | — | | | |
+| Scorer | Cindy | The one pattern; entrypoint `python -m scorer.stream`. A Deployment scaled by KEDA (1–6 replicas, one consumer group) | None: a Kafka consumer, no Service routes to it | None (**draft**, Isaac to confirm): it serves no traffic, and KEDA scales on lag, not readiness. A fatal Kafka or Valkey error exits non-zero, so Kubernetes restarts it. SIGTERM finishes the current event, stores its offset and closes the consumer (**pending work**), inside the default 30 s grace | About 39 MB resident when idle (measured, macOS arm64, before the Valkey client); memory request 64Mi, limit 128Mi, since its state is in Valkey; CPU to be measured under load | **pending work** (today: CLI flags, [streaming.md](streaming.md#kafka-events)): `SCORER_BANK` (`A`, `B` or `C`), `KAFKA_BOOTSTRAP_SERVERS` (k3d: `kafka-kafka-bootstrap:9092`), `KAFKA_GROUP` (default `scorer-<bank>`; change it only to rebuild Valkey), `VALKEY_URL` (k3d: `valkey://valkey:6379`), `KEY_VERSION` (default `k1`), `KEY_DIR`: this bank's X25519 key files mounted read-only in the [security.md](security.md) layout. Egress to Kafka 9092 and Valkey 6379 only. One JSON line to stdout per event that writes a link or hit: `ts`, `service: scorer`, `bank`, `payment_id`, `kafka_ts` (the ingestor's record timestamp), `links`, `hits`; errors as `level: error` lines |
 | Privacy node | Zane | | gRPC | gRPC health | | |
 | Case service / UI | Jia Rui | | HTTP | HTTP `/healthz` | | |
 | Summary service (Lambda on EKS) | Jia Rui | | HTTP | HTTP `/healthz` | | |
