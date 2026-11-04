@@ -232,7 +232,7 @@ def test_consumer_failures(failure):
 
 
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])
-def test_replay_is_repeatable(bank, count):
+def test_consume_is_repeatable(bank, count):
     with (TINY / f"bank_{bank}.csv").open() as source:
         events = list(csv.DictReader(source))
 

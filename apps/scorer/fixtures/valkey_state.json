@@ -28,7 +28,6 @@
       ]
     },
     "payees:B-m1": {"type": "set", "members": ["C-m2"]},
-    "payers:C-m2": {"type": "set", "members": ["B-m1"]},
     "flag:B-m1:C-m2": {"type": "string", "value": "1662369900"}
   }
 }
