@@ -334,7 +334,6 @@ def main():
     parser.add_argument("--max-ratio", default="0.98")
     parser.add_argument("--min-delay", type=float, default=60)
     parser.add_argument("--window", type=float, default=1800)
-    parser.add_argument("--max-events", type=int, default=10000)
     parser.add_argument("--max-token-references", type=int)
     parser.add_argument("--key-version", default="k1")
     parser.add_argument("--pairwise-key", nargs=2, action="append", default=[])
@@ -362,7 +361,7 @@ def main():
         keys[args.bank, peer] = path
     rule = {
         name: getattr(args, name)
-        for name in ("min_ratio", "max_ratio", "min_delay", "window", "max_events")
+        for name in ("min_ratio", "max_ratio", "min_delay", "window")
     }
     rule["max_token_references"] = args.max_token_references
     if args.bootstrap_servers:

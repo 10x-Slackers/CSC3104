@@ -27,7 +27,6 @@
         {"hit": "499dcb6187276580f7673e4e0eda89429628c0f3bcaec3908d895a1f3f14ccb8"}
       ]
     },
-    "payees:B-m1": {"type": "set", "members": ["C-m2"]},
-    "flag:B-m1:C-m2": {"type": "string", "value": "1662369900"}
+    "last:B-m1:C-m2": {"type": "string", "value": "1662369900:1"}
   }
 }

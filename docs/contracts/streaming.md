@@ -5,10 +5,8 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
-> - **Four rules** replace the single rule: fast pass-through, chain, new payee and quick repeat, on cross-bank bank transfers ([Detection rule](#detection-rule)). The scorer runs as a library over a bank file for the offline evaluator.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
 > - **State in Valkey:** window state, token index, local links, payee sets and hits move out of memory, shared with the privacy node, which stops running the scorer in-process ([Search handoff](#search-handoff)).
-> - **Event time:** a per-account watermark with allowed lateness = window; trim by event time, with a TTL only for garbage collection. `--max-events` is removed.
 > - **Commits:** `enable.auto.offset.store=false`, `store_offsets()` after the Valkey write, auto-commit on (still at-least-once; duplicates are harmless because `detection_id` is deterministic).
 > - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
 
@@ -24,7 +22,7 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Record headers | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, which latency is measured from ([evaluation.md](../evaluation.md#metric-definitions)) |
 | Intra-bank transfers | Two records, `out` then `in`, with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, then key `B-carol`, `ce_id` `p02-in` |
 | Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order no longer matters |
-| Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window`. Events are retained for twice `--window` so an accepted late event still finds its partner |
+| Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events more than 72 h (the chain window) behind the latest event seen for that account. Events are kept for twice that, so an accepted late event still finds its partner |
 
 The [ingestor](data.md#ingestor) (`apps/ingestor/`) validates every event and
 produces these records; the scorer only consumes them and trusts their fields. It
@@ -36,9 +34,9 @@ because the broker advertises in-cluster addresses. The consumer may start befor
 the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
-Scorer history is in memory: at most `--max-events` (default 10,000) globally,
-with time expiry per account. Capacity eviction removes the oldest arrival; each
-account's watermark is kept, so late events stay ignored after eviction. Consumer offsets
+Scorer state is in a `MemoryState` ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)), trimmed by event
+time per account; there is no count cap. An account's watermark is its latest
+kept event, so nothing else needs storing. Consumer offsets
 commit synchronously after optional indexing, scoring and output flush succeed;
 processing and fatal Kafka errors stop the consumer without committing the failed record.
 
@@ -69,9 +67,9 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | Minimum chain length | Replaced by the alert tiers | **pending work:** [case.md](case.md#cases-and-alerts) |
 | Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md); checked by a 4/6/8 sweep |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
-| Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing/evicted history produces no local match | **pending work:** history bounded by the event-time trim, not a count |
+| Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing or trimmed history produces no local match | History is bounded by the event-time trim, not a count |
 
-**pending work (Cindy):** four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` (Altman's ACH and Wire, relabelled in [data.md](data.md)). Cheque, card, cash and Bitcoin payments are never replayed or ingested ([data.md](data.md#preparation-rules-preparepy)), so the scorer never sees them, and a customer's payment history (new payee, quick repeat) is bank transfers only. Starting thresholds come from the exploratory sweep below and are confirmed on the dev split ([evaluation.md](../evaluation.md#rules)). No regulator publishes numeric thresholds, so each rule cites a red flag and its numbers come from tuning.
+Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` (Altman's ACH and Wire, relabelled in [data.md](data.md)). Cheque, card, cash and Bitcoin payments are never replayed or ingested ([data.md](data.md#preparation-rules-preparepy)), so the scorer never sees them, and a customer's payment history (new payee, quick repeat) is bank transfers only. Starting thresholds come from the exploratory sweep below and are confirmed on the dev split ([evaluation.md](../evaluation.md#rules)). No regulator publishes numeric thresholds, so each rule cites a red flag and its numbers come from tuning.
 
 | Rule | Starting thresholds | Basis | Output |
 | --- | --- | --- | --- |
@@ -94,7 +92,8 @@ The scorer reports every qualifying incoming/outgoing pair for the same local
 account; it does not allocate incoming funds across payments or perform graph
 search. Ground-truth labels are never used. JSONL output contains local candidate
 links, not confirmed chains or analyst alerts: bank, account, incoming/outgoing
-payment IDs and times, ratio, delay in seconds and `detection_id`.
+payment IDs and times, ratio, delay in seconds, `detection_id` and `rules` (`fast`,
+`chain` or both). Rule hits (chain, new payee, quick repeat) go to the state, not the output.
 
 `detection_id` is SHA-256 of the UTF-8 compact JSON array
 `[bank, incoming_payment_id, outgoing_payment_id]`, with default JSON escaping.
@@ -157,8 +156,7 @@ are unchanged.
 | `link:in:<payment_id>` / `link:out:<payment_id>` | set | Outgoing payments a fast or chain rule linked to this incoming one, and the reverse | Node: onward and backward links |
 | `hit:<hit_id>` | hash | `rule` (`chain`, `new_payee`, `quick_repeat`; the fast rule writes no hit), `account`, `payments` (JSON list), `event_time` | Node |
 | `hits` | stream | One entry `hit <hit_id>` per new hit | Node, with `XREADGROUP` |
-| `payees:<account>` | set | Accounts at other banks this customer has paid by bank transfer | Scorer: new payee |
-| `flag:<account>:<counterparty_account>` | string | Unix seconds of the last flagged payment between them | Scorer: quick repeat |
+| `last:<account>:<counterparty_account>` | string | `<unix seconds>:<0 or 1>`: this customer's last payment to that payee, and whether it was flagged (a new payee hit or a chain's outgoing leg). None yet means a new payee | Scorer: new payee, quick repeat |
 
 - **IDs:** `hit_id` is SHA-256 of the compact JSON `[bank, rule, *payment_ids]`, so a replay rewrites the same key.
 - **Watermark and trim:** an account's watermark is the highest score in `win:<account>`, so there's no separate key. Events more than 72 h (the longest rule window, the chain rule's) behind it are ignored as late. Each write runs `ZREMRANGEBYSCORE win:<account> -inf (<watermark − 2 × 72 h>`, which keeps twice the longest rule window.
@@ -166,7 +164,7 @@ are unchanged.
 - **One transaction per event:** the scorer reads first, then writes all keys for the event in one `MULTI`/`EXEC`, then calls `store_offsets()`. A crash before `EXEC` writes nothing; after it, the redelivered event is a repeat. So `hits` gets one entry per hit, except after a full rebuild, when the node skips hit IDs it already has.
 - **Concurrency:** every key is per account or per payment, so partition ownership gives each one writer and replicas share no mutable state.
 - **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, within `HOP_LIMIT`. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
-- **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `payees:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
+- **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `last:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
 - **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group.
 
 Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The card payment `p02` gets only `pay:` keys (**pending work:** `p02` becomes GIRO, since only GIRO and MEPS+ are ingested, so its keys here change; [data.md](data.md#ingestor)). Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
@@ -196,7 +194,7 @@ incoming transfer for an endpoint before its outgoing leg arrives.
 `uv run python -m scorer.baseline apps/dataset/fixtures/tiny B` reads only that bank's
 CSV and exports JSONL candidates using the same scorer, without Kafka or peers.
 Repeat for A and C. Defaults can be overridden with `--min-ratio`, `--max-ratio`,
-`--min-delay`, `--window` and `--max-events`.
+`--min-delay` and `--window` (the fast rule).
 
 Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 
@@ -210,21 +208,20 @@ Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 
 ## Scorer as a library (**draft**, Cindy → Isaac)
 
-**pending work (Cindy):** the offline evaluator runs the live rule code over bank files, with no Kafka or Valkey.
+The offline evaluator runs the live rule code over bank files, with no Kafka or Valkey.
 
 ```python
 from scorer import score_file
 
-state = score_file("apps/dataset/fixtures/tiny", "B", keys=None)
+state = score_file("apps/dataset/fixtures/tiny", "B")
 ```
 
-- `score_file(workload, bank, keys=None)` reads `<workload>/bank_<bank>.csv` in file order, keeps only `GIRO` and `MEPS+` rows (as replay does), runs every rule and returns a `MemoryState`. `keys` is the key directory from [security.md](security.md); without it, no tokens are written.
-- `MemoryState` holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. The node and the evaluator read it with:
+- `score_file(workload, bank)` reads `<workload>/bank_<bank>.csv` in file order, runs every rule (they skip anything but `GIRO` and `MEPS+`, as replay does) and returns a `MemoryState`. **pending work:** tokens (`tok:` and `lookup`) come with the 16-byte token API in #26; the node's CSV mode still indexes its own.
+- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` (**pending work**) will have the same methods, so the rules are one piece of code. The node and the evaluator read it with:
   - `links(payment_id, direction)`: the `link:in:` or `link:out:` payment IDs, sorted
   - `payment(payment_id, direction)`: the `pay:` entry, or `None`
-  - `lookup(pair, key_version, token)`: the `tok:` entry, or `None`
   - `hits()`: every hit as `{rule, account, payments, hit_id}`, in the order written
-- Sample: [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json), every bank's links and hits on the tiny fixture. It matches issue #27's fixture table and was generated from #27's reference script (chain, new payee, quick repeat) plus today's fast rule. The fixture has no quick repeat.
+- Sample: [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json), every bank's links and hits on the tiny fixture. It matches issue #27's fixture table and was generated from #27's reference script (chain, new payee, quick repeat) plus the fast rule; `test_score_file_matches_library_sample` checks the scorer against it. The fixture has no quick repeat.
 
 ## Interfaces
 
@@ -244,4 +241,4 @@ Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md
 - [ ] TTL for `tok:` and `pay:`: a peer's query can arrive up to 72 h after the event under the chain rule, longer than the 24 h pending-search expiry in [protocol.md](protocol.md) (Cindy, with Caleb for PDPA retention).
 - [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
-- [ ] TTL for the `payees:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).
+- [ ] TTL for the `last:` keys, which keep the whole history (Cindy, with Caleb for PDPA retention).

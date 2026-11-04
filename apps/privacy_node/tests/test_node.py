@@ -209,13 +209,15 @@ def test_peer_error_fails_search_without_retry(banks, monkeypatch):
 
 def test_intra_bank_detection_is_not_searched(tmp_path):
     make_keys(tmp_path)
-    event = {"bank": "B", "account": "B-x", "payment_format": "Wire"}
+    event = {"bank": "B", "account": "B-x", "payment_format": "MEPS+"}
     events = [
         event
         | {"payment_id": "q1", "direction": "in", "counterparty_bank": "B"}
+        | {"counterparty_account": "B-y"}
         | {"event_time": "2022-09-05T09:00:00Z", "amount": "100"},
         event
         | {"payment_id": "q2", "direction": "out", "counterparty_bank": "C"}
+        | {"counterparty_account": "C-z"}
         | {"event_time": "2022-09-05T09:05:00Z", "amount": "95"},
     ]
     scorer = Scorer("B")
