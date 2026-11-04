@@ -70,7 +70,7 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | Minimum chain length | Replaced by the alert tiers | **pending work:** [case.md](case.md#cases-and-alerts) |
 | Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md); checked by a 4/6/8 sweep |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
-| Fees, currencies, insufficient history | Uses Role 1's USD-only data; no separate fee model. Missing/evicted history produces no local match | **pending work:** all amounts in SGD ([data.md](data.md)); history bounded by the event-time trim, not a count |
+| Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing/evicted history produces no local match | **pending work:** history bounded by the event-time trim, not a count |
 
 **pending work (Cindy):** four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` (Altman's ACH and Wire, relabelled in [data.md](data.md)). Cheque, card, cash and Bitcoin payments are never flagged. Starting thresholds come from the exploratory sweep below and are confirmed on the dev split ([evaluation.md](../evaluation.md#rules)). No regulator publishes numeric thresholds, so each rule cites a red flag and its numbers come from tuning.
 
@@ -78,17 +78,17 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | --- | --- | --- | --- |
 | Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link; starts a search |
 | Chain (slow pass-through) | Bank transfer in and out of one account, out/in 0.90–1.10 within 72 h; at least one of the two payments is with another bank | B-4(i) "high velocity of funds", B-5(iv) "within a short period"; Altman's 90th-percentile hop delay is 69.7 h | Local link; starts a search |
-| New payee | A bank transfer to an account at another bank that this customer has never paid, unless that payee already has ≥ 30 distinct payers | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
+| New payee | A bank transfer to an account at another bank that this customer has never paid | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
 
 - Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag and the planted acceptance chains depend on it.
 - Bank transfers carry 87% of Altman's laundering but 12% of transfers, a dataset artefact; the payment-type filter is reported as dev-tuned. Cheque, card and cash laundering, mostly from bank-70 hub accounts whose laundering payments look like their ordinary ones, is out of reach of any rule.
 - **Exploratory sweep** (Macarius, 31 Oct, a scratchpad script, not the offline evaluator; amounts in SGD, three banks, every hit counted as caught):
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,272 to 664 a day on HI-Small's held-out days) for 1.1 points of recall.
-  - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 8–56% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 67–81%. Payees with ≥ 30 earlier payers (businesses) were 9.8% of its ordinary flags and 0.6% of its laundering.
-  - **Quick repeat:** half of the repeat laundering payments to a just-flagged payee came within 18 minutes (ordinary repeats: 28 h). It added about 1 point of recall for about 100 flags a day.
+  - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 8–56% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 67–81%. An exception for payees with ≥ 30 earlier payers (businesses) was dropped: only the payee's bank sees all of a payee's payers, and counting this bank's own customers removed 16 ordinary flags a day.
+  - **Quick repeat:** on HI-Small's held-out days, 71% of the repeat laundering payments to a just-flagged payee came within 24 h (61% in the same minute), against 3% of ordinary repeats, which are mostly weekly (median 166 h). It added 1.5 points of recall (21 of 1,410) for about 70 ordinary flags a day.
   - **No amount floor:** a S$1,500 floor on both payments of a link cut CYCLE and RANDOM attempts caught from 68 to 63 of 72.
-  - **Together:** 94.9% of cross-bank laundering bank transfers on HI-Small's held-out days (1,338 of 1,410) with 1.38% of all payments flagged as ordinary, and 92.1% on HI-Medium (16,373 of 17,777) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
+  - **Together:** 95.2% of cross-bank laundering bank transfers on HI-Small's held-out days (1,343 of 1,410) with 1.53% of all payments flagged as ordinary, and 92.5% on HI-Medium (16,450 of 17,777, 2.17% flagged) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
 - **Intra-bank hops:** follow a bank's internal hops locally and emit one link from the first cross-bank payment in to the last cross-bank payment out, so the node signs one claim. Fully internal chains are flagged for the node to post as Tier 1 cases.
 
 The scorer reports every qualifying incoming/outgoing pair for the same local
@@ -228,4 +228,4 @@ Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md
 - [ ] TTL for `tok:` and `pay:`: a peer's query can arrive up to 72 h after the event under the chain rule, longer than the 24 h search retention in [security.md](security.md) (Cindy, with Caleb).
 - [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
-- [ ] TTL for the `payees:` and `payers:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).
+- [ ] TTL for the `payees:` sets, which keep the whole history (Cindy, with Caleb for PDPA retention).

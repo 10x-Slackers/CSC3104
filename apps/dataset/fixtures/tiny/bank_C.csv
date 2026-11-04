@@ -1,13 +1,13 @@
-payment_id,event_time,bank,direction,account,counterparty_bank,amount,payment_format
-p03,2022-09-05T09:20:00Z,C,out,C-dave,A,3000.0,ACH
-p07,2022-09-05T09:25:00Z,C,in,C-m2,B,9500.0,Wire
-p04,2022-09-05T09:40:00Z,C,in,C-erin,A,80.0,Credit Card
-p09,2022-09-05T09:50:00Z,C,in,C-l2,B,3200.0,ACH
-p05,2022-09-05T10:10:00Z,C,in,C-dave,B,600.0,ACH
-p11,2022-09-05T10:15:00Z,C,in,C-o2,B,6650.0,Wire
-p12,2022-09-05T10:30:00Z,C,out,C-o2,A,6317.5,Wire
-p14,2022-09-05T11:10:00Z,C,out,C-x2,A,4512.5,ACH
-p16,2022-09-05T11:10:00Z,C,in,C-v2,B,19000.0,Wire
-p17,2022-09-05T11:20:00Z,C,out,C-v2,A,18050.0,Wire
-p19,2022-09-05T11:40:00Z,C,in,C-v5,B,16290.12,Wire
-p20,2022-09-05T11:50:00Z,C,out,C-v5,A,15475.61,Wire
+payment_id,event_time,bank,direction,account,counterparty_account,counterparty_bank,amount,payment_format
+p03,2022-09-05T09:20:00Z,C,out,C-dave,A-alice,A,3000.0,GIRO
+p07,2022-09-05T09:25:00Z,C,in,C-m2,B-m1,B,9500.0,MEPS+
+p04,2022-09-05T09:40:00Z,C,in,C-erin,A-alice,A,80.0,Credit Card
+p09,2022-09-05T09:50:00Z,C,in,C-l2,B-l1,B,3200.0,GIRO
+p05,2022-09-05T10:10:00Z,C,in,C-dave,B-carol,B,600.0,GIRO
+p11,2022-09-05T10:15:00Z,C,in,C-o2,B-o1,B,6650.0,MEPS+
+p12,2022-09-05T10:30:00Z,C,out,C-o2,A-o0,A,6317.5,MEPS+
+p14,2022-09-05T11:10:00Z,C,out,C-x2,A-x3,A,4512.5,GIRO
+p16,2022-09-05T11:10:00Z,C,in,C-v2,B-v1,B,19000.0,MEPS+
+p17,2022-09-05T11:20:00Z,C,out,C-v2,A-v3,A,18050.0,MEPS+
+p19,2022-09-05T11:40:00Z,C,in,C-v5,B-v4,B,16290.12,MEPS+
+p20,2022-09-05T11:50:00Z,C,out,C-v5,A-v6,A,15475.61,MEPS+
