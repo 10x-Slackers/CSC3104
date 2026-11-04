@@ -1,0 +1,55 @@
+{
+  "workload": "apps/dataset/fixtures/tiny",
+  "about": "score_file(workload, bank) on each bank file: links (fast, chain) and hits (chain, new_payee, quick_repeat). Matches issue #27's fixture table.",
+  "A": {
+    "links": [
+      {"incoming": "p17", "outgoing": "p18", "account": "A-v3", "rules": ["fast", "chain"]}
+    ],
+    "hits": [
+      {"rule": "chain", "account": "A-v3", "payments": ["p17", "p18"], "hit_id": "fb4ac937287b7c07d0242f5618faf483042688f2661fccfafa7cb2087b6313d5"},
+      {"rule": "new_payee", "account": "A-m0", "payments": ["p06"], "hit_id": "fe39d25427cd3d9d931382c096a7e9cd20e4423b1213a17ab69846af956aab29"},
+      {"rule": "new_payee", "account": "A-l0", "payments": ["p08"], "hit_id": "a9d5f7916d9863e3fce341ef893749c62348b178a144cb0232c362454db1776f"},
+      {"rule": "new_payee", "account": "A-o0", "payments": ["p10"], "hit_id": "c60ac73dc6315710c2e669cea53ff0b22ed877422921393786ba53500f6f4f69"},
+      {"rule": "new_payee", "account": "A-x0", "payments": ["p13"], "hit_id": "0452c9b0b25bc9cc2a660b8d2a7d837e85b8b1701960817fc1e3dcd8c0c82da5"},
+      {"rule": "new_payee", "account": "A-v0", "payments": ["p15"], "hit_id": "68fa6cc1c67b70128308de21d61f0247b3c4029c7b825950fd095675e732f203"},
+      {"rule": "new_payee", "account": "A-v3", "payments": ["p18"], "hit_id": "326bb92afca4a32c8c98fd5e6c5f8614b11706b4cf5155dc6c4a9216029155f8"}
+    ]
+  },
+  "B": {
+    "links": [
+      {"incoming": "p06", "outgoing": "p07", "account": "B-m1", "rules": ["fast", "chain"]},
+      {"incoming": "p10", "outgoing": "p11", "account": "B-o1", "rules": ["fast", "chain"]},
+      {"incoming": "p15", "outgoing": "p16", "account": "B-v1", "rules": ["fast", "chain"]},
+      {"incoming": "p18", "outgoing": "p19", "account": "B-v4", "rules": ["fast", "chain"]}
+    ],
+    "hits": [
+      {"rule": "chain", "account": "B-m1", "payments": ["p06", "p07"], "hit_id": "2786683b9066ec8c04e45efbc107732992bbc6c12daf23c5f8d5f67c670eabd1"},
+      {"rule": "chain", "account": "B-o1", "payments": ["p10", "p11"], "hit_id": "ac1e568454baf811d1aa99a589d96e3f1dd17d0f4e6edf8a3463ad37e58b0293"},
+      {"rule": "chain", "account": "B-v1", "payments": ["p15", "p16"], "hit_id": "f4f89da6dc51598843729b6671be34dc985cd9c71b6d77734cdc1c61683f7c73"},
+      {"rule": "chain", "account": "B-v4", "payments": ["p18", "p19"], "hit_id": "ff992d43aadd7fe4ed06de9cdff341e3e58632a71d64ef6740026bab4bc65eb2"},
+      {"rule": "new_payee", "account": "B-carol", "payments": ["p05"], "hit_id": "ba2de106c8f782df7ec369bb1b60c08a8b12497e4d228b749a9a5bca8b7fc2ec"},
+      {"rule": "new_payee", "account": "B-m1", "payments": ["p07"], "hit_id": "499dcb6187276580f7673e4e0eda89429628c0f3bcaec3908d895a1f3f14ccb8"},
+      {"rule": "new_payee", "account": "B-l1", "payments": ["p09"], "hit_id": "03ef57b141da133e3153d71c928ed23f1d5ef5bccda6d7daeb19e8b8b2cdb66c"},
+      {"rule": "new_payee", "account": "B-o1", "payments": ["p11"], "hit_id": "d6f631511c955bc003027bbc957153d00de185bffa0cb0645f54d152f73dc0d5"},
+      {"rule": "new_payee", "account": "B-v1", "payments": ["p16"], "hit_id": "bac22f5c846d88ee0dfc62f632b6f5a8be7b51afa7bdd6a9ab59481612f8cd1f"},
+      {"rule": "new_payee", "account": "B-v4", "payments": ["p19"], "hit_id": "fe4043b88205cbd868f50aa6ced0045c8ec047cb85eaf6764aeb191c047c43a0"}
+    ]
+  },
+  "C": {
+    "links": [
+      {"incoming": "p11", "outgoing": "p12", "account": "C-o2", "rules": ["fast", "chain"]},
+      {"incoming": "p16", "outgoing": "p17", "account": "C-v2", "rules": ["fast", "chain"]},
+      {"incoming": "p19", "outgoing": "p20", "account": "C-v5", "rules": ["fast", "chain"]}
+    ],
+    "hits": [
+      {"rule": "chain", "account": "C-o2", "payments": ["p11", "p12"], "hit_id": "0506465fe70be67506d0221f6691adb108303a18a805689a1fc3571c246bfae0"},
+      {"rule": "chain", "account": "C-v2", "payments": ["p16", "p17"], "hit_id": "f62a30b94fdf82e09cd1289391e416d9857a144444313268e8fa777b39c64a82"},
+      {"rule": "chain", "account": "C-v5", "payments": ["p19", "p20"], "hit_id": "bb28b84c7dc6a444bdb6a5a8e5e34f01cee2282539af7a6d42ede8cfef3fbce4"},
+      {"rule": "new_payee", "account": "C-dave", "payments": ["p03"], "hit_id": "f4236884cbed2b79e887a3ba479d7c74b1d2db70e6bdc44db1a6accaf1c3259b"},
+      {"rule": "new_payee", "account": "C-o2", "payments": ["p12"], "hit_id": "3d1bb40aca095313341ec4c3220643434571179f5f3d35628199e61bdb808c59"},
+      {"rule": "new_payee", "account": "C-x2", "payments": ["p14"], "hit_id": "ca086806252f39ef7c58c9e2f6c5d5e05ca7076bf0ccce63fb28ebdea5ed26f0"},
+      {"rule": "new_payee", "account": "C-v2", "payments": ["p17"], "hit_id": "771b5e35cb045a3a0e4536473b11a53a0c83cdb940f0cde20b07dd7237b6d9f6"},
+      {"rule": "new_payee", "account": "C-v5", "payments": ["p20"], "hit_id": "c0fa77bb8e70b4ec56f84d3c83916f339f3d221b7ed221465f05139dd337933e"}
+    ]
+  }
+}
