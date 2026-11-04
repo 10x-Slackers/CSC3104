@@ -1,3 +1,4 @@
+import base64
 import copy
 import json
 import threading
@@ -118,9 +119,24 @@ def test_undelivered_event_gives_503_so_replay_resends(kafka):
     assert app.handle(BODY) == (503, {"error": "KafkaError{code=_MSG_TIMED_OUT}"})
 
 
-def test_lambda_function_url(kafka):
-    reply = app.lambda_handler({"body": BODY.decode()}, None)
+@pytest.mark.parametrize(
+    "encoded_flag",
+    [True, False, None],
+    ids=["base64-body", "plain-body", "missing-flag"],
+)
+def test_lambda_function_url(kafka, encoded_flag):
+    body = BODY.decode("utf-8")
+    if encoded_flag:
+        body = base64.b64encode(BODY).decode("ascii")
+
+    event = {"body": body}
+    if encoded_flag is not None:
+        event["isBase64Encoded"] = encoded_flag
+
+    reply = app.lambda_handler(event, None)
     assert reply["statusCode"] == 200 and json.loads(reply["body"]) == {"events": 4}
+    events = json.loads((FIXTURES / "kafka_events.json").read_text())
+    assert [{k: r[k] for k in events[0]} for r in kafka.sent] == events
 
 
 def test_http_server(kafka):

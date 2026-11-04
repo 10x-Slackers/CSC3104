@@ -7,6 +7,7 @@ URL on EKS. Settings (environment): INGESTOR_BANK, KAFKA_BOOTSTRAP_SERVERS, PORT
     curl -d @apps/ingestor/fixtures/pacs008_batch.json localhost:8080
 """
 
+import base64
 import json
 import os
 import time
@@ -39,6 +40,11 @@ def handle(body):
     except (KeyError, TypeError, ValueError) as e:  # the whole batch, nothing produced
         out, status, reply = [], 400, {"error": f"{type(e).__name__}: {e}"}
     else:
+
+        def delivered(err, _):
+            if err:
+                errors.append(str(err))
+
         errors = []
         for r in out:
             producer.produce(
@@ -47,10 +53,13 @@ def handle(body):
                 value=json.dumps(r["value"]),
                 headers=r["headers"],
                 timestamp=int(ts * 1000),
-                on_delivery=lambda err, _: err and errors.append(str(err)),
+                on_delivery=delivered,
             )
         producer.flush()  # returns within message.timeout.ms
-        status, reply = (503, {"error": errors[0]}) if errors else (200, {"events": len(out)})  # fmt: skip
+        if errors:
+            status, reply = 503, {"error": errors[0]}
+        else:
+            status, reply = 200, {"events": len(out)}
     # One JSON line per batch; the evaluation joins payment_id to ts.
     ids = [r["value"]["payment_id"] for r in out]
     ms = round((time.time() - ts) * 1000, 1)
@@ -60,8 +69,11 @@ def handle(body):
 
 
 def lambda_handler(event, context):
+    body = event.get("body") or ""
+    if event.get("isBase64Encoded", False):
+        body = base64.b64decode(body).decode("utf-8")
     # Function URL, payload format 2.0: the batch is the body.
-    status, reply = handle(event.get("body", ""))
+    status, reply = handle(body)
     return {
         "statusCode": status,
         "headers": {"content-type": "application/json"},
@@ -74,8 +86,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         # Readiness only: a Kafka outage shows as 503 on POST, not here.
-        ok = self.path == "/healthz"
-        self.reply(*((200, {"ok": True}) if ok else (404, {"error": "not found"})))
+        if self.path == "/healthz":
+            self.reply(200, {"ok": True})
+        else:
+            self.reply(404, {"error": "not found"})
 
     def do_POST(self):
         self.reply(*handle(self.rfile.read(int(self.headers["Content-Length"]))))
