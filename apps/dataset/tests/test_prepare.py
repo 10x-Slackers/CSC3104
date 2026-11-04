@@ -3,15 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from dataset import prepare
-from dataset.prepare import (
-    FORWARD,
-    HOP_LIMIT,
-    LOOKALIKE_FORWARD,
-    pid,
-    plant,
-    read_transfers,
-    split,
-)
+from dataset.prepare import pid, read_transfers, split
 
 TINY = Path(__file__).parents[1] / "fixtures/tiny"
 
@@ -24,71 +16,52 @@ def test_fixture_split():
     assert len(ev) == 2 * len(t)
     assert (ev.groupby(["payment_id", "direction"]).size() == 1).all()
     m = ev.merge(t, on="payment_id")
-    assert (m.bank == m.from_bank)[m.direction == "out"].all()
-    assert (m.bank == m.to_bank)[m.direction == "in"].all()
+    out, inc = m.direction == "out", m.direction == "in"
+    assert (m.bank == m.from_bank)[out].all() and (m.bank == m.to_bank)[inc].all()
+    assert (m.counterparty_account == m.to_account)[out].all()
+    assert (m.counterparty_account == m.from_account)[inc].all()
     # labels stay out of bank files; only labelled transfers are listed
-    assert not {"chain_id", "scenario", "altman_laundering"} & set(ev.columns)
+    assert not set(prepare.LABEL_COLS[1:]) & set(ev.columns)
     assert set(labels.payment_id) == set(t.payment_id) - {"p01", "p02", "p03", "p04"}
     # intra-bank transfer: `out` before `in`
     assert list(banks["B"][banks["B"].payment_id == "p02"].direction) == ["out", "in"]
     # committed fixture outputs are up to date (regenerate with prepare.py, see docstring)
     for b, e in banks.items():
-        committed = pd.read_csv(TINY / f"bank_{b}.csv", dtype=str)
-        assert committed.equals(e.astype(str).reset_index(drop=True))
+        assert e.to_csv(index=False) == (TINY / f"bank_{b}.csv").read_text()
     assert labels.to_csv(index=False) == (TINY / "labels.csv").read_text()
 
 
 def test_altman(tmp_path, monkeypatch):
-    source = tmp_path / "HI-Small_Trans.csv"
-    source.write_text(
+    (tmp_path / "HI-Small_Trans.csv").write_text(
         "Timestamp,From Bank,Account,To Bank,Account,Amount Received,Receiving Currency,Amount Paid,Payment Currency,Payment Format,Is Laundering\n"
         "2022/09/05 09:00,010,8000A,0011,8000B,100,US Dollar,100,US Dollar,ACH,0\n"
         "2022/09/05 09:01,010,8000A,0010,8000A,100,US Dollar,100,US Dollar,ACH,0\n"  # self-transfer
-        "2022/09/05 09:02,010,8000A,0011,8000B,100,Euro,100,Euro,ACH,0\n"
+        "2022/09/05 09:02,010,8000A,0011,8000B,0.001,Euro,0.001,Euro,Cheque,0\n"
         "2022/09/05 10:00,010,8000A,0011,8000B,100,US Dollar,100,US Dollar,ACH,0\n"  # slice end
         "2022/09/05 09:03,011,8000A,010,8000A,50,US Dollar,50,US Dollar,Wire,1\n"
+        "2022/09/05 09:04,011,8000C,010,8000D,110,US Dollar,100,Euro,Wire,1\n"  # 1 EUR = 1.1 USD
     )  # fmt: skip
-    monkeypatch.setattr(prepare.kagglehub, "dataset_download", lambda *a, **k: source)
-    t = prepare.altman("2022-09-05 09:00", 1)
-    assert list(t.payment_id) == [pid("altman:0"), pid("altman:4")]
-    assert list(t.from_bank + t.from_account) == ["B10-8000A", "C11-8000A"]
-    assert list(t.to_bank + t.to_account) == ["C11-8000B", "B10-8000A"]
-    assert list(t.altman_laundering) == [0, 1]
-
-
-def test_plant():
-    accounts = [(b, f"{b}-{i}") for b in "ABC" for i in range(50)]
-    bg = pd.DataFrame(
-        [
-            [f"bg{i}", pd.Timestamp("2022-09-05") + pd.Timedelta(minutes=i), *accounts[i % 150], *accounts[(i * 7 + 1) % 150], 100.0, "ACH", 0]
-            for i in range(360)
-        ],
-        columns=["payment_id", "time", "from_bank", "from_account", "to_bank", "to_account", "amount", "payment_format", "altman_laundering"],
+    (tmp_path / "HI-Small_Patterns.txt").write_text(
+        "BEGIN LAUNDERING ATTEMPT - CYCLE:  Max 2 hops\n"
+        "2022/09/01 00:00,001,800X,002,800Y,5,US Dollar,5,US Dollar,ACH,1\n"  # not in the slice
+        "END LAUNDERING ATTEMPT - CYCLE\n\n"
+        "BEGIN LAUNDERING ATTEMPT - FAN-OUT:  Max 2-degree Fan-Out\n"
+        "2022/09/05 09:03,0011,8000A,0010,8000A,50.00,US Dollar,50.00,US Dollar,Wire,1\n"
+        "END LAUNDERING ATTEMPT - FAN-OUT\n"
     )  # fmt: skip
-    t = plant(bg, 5, seed=7)
-    assert t.equals(plant(bg, 5, seed=7))  # reproducible
-    chains = t[t.chain_id.notna()].sort_values(["chain_id", "hop"])
-    assert (chains.from_bank != chains.to_bank).all()  # every hop crosses banks
-    assert chains.time.max() <= bg.time.max()  # chains end inside the slice
-    midpoint = bg.time.min() + (bg.time.max() - bg.time.min()) / 2
-    assert chains.groupby("chain_id").time.min().max() <= midpoint
-    planted = set(chains.from_account) | set(chains.to_account)
-    assert planted <= set(bg.from_account) | set(bg.to_account)
-    for (scenario, _), c in chains.groupby(["scenario", "chain_id"]):
-        hops = list(c.hop)
-        ratio = (c.amount.shift(-1) / c.amount).dropna()
-        if scenario == "absent_link":
-            assert hops == [0, 2]
-            continue
-        assert hops == list(range(len(hops)))
-        assert (c.to_account.iloc[:-1].values == c.from_account.iloc[1:].values).all()
-        if scenario == "lookalike":
-            assert ratio.between(*LOOKALIKE_FORWARD).all()
-        else:
-            assert ratio.between(*FORWARD).all()
-        if scenario == "loop":
-            assert c.to_account.iloc[-1] == c.from_account.iloc[0]
-        if scenario == "over_limit":
-            assert len(hops) > HOP_LIMIT
-        if scenario == "mule_chain":
-            assert 2 <= len(hops) <= HOP_LIMIT
+    monkeypatch.setattr(
+        prepare.kagglehub, "dataset_download", lambda *a, path: tmp_path / path
+    )
+    t = prepare.altman("HI-Small", "2022-09-05 09:00", 1)
+    assert list(t.payment_id) == [pid(f"HI-Small:{i}") for i in (0, 2, 4, 5)]
+    assert list(t.from_bank.astype(str) + t.from_account) == ["B10-8000A", "B10-8000A", "C11-8000A", "C11-8000C"]  # fmt: skip
+    assert list(t.to_bank.astype(str) + t.to_account) == ["C11-8000B", "C11-8000B", "B10-8000A", "B10-8000D"]  # fmt: skip
+    # SGD via USD: 100 USD -> 141.36; 100 EUR -> 110 USD -> 155.50; at least 0.01
+    assert list(t.amount) == [141.36, 0.01, 70.68, 155.5]
+    assert list(t.payment_format) == ["GIRO", "Cheque", "MEPS+", "MEPS+"]
+    assert list(t.altman_laundering) == [0, 0, 1, 1]
+    # the second attempt in the file; the last laundering transfer is in no attempt
+    assert t.attempt_id.tolist() == [pd.NA, pd.NA, 1, pd.NA]
+    assert t.altman_pattern.fillna("").tolist() == ["", "", "FAN-OUT", ""]
+    assert t.time.dtype.kind == "M"  # datetimes, not categories
+    assert len(prepare.altman("HI-Small")) == 5  # whole file, self-transfer dropped

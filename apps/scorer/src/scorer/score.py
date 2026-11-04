@@ -1,45 +1,13 @@
-"""Bank-local rules, independent of Kafka. Amounts are compared as decimals."""
+"""Bank-local rules, independent of Kafka. Amounts are compared as decimals.
+
+Events are trusted as they are: the ingestor validates them before Kafka.
+"""
 
 import hashlib
 import json
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
-
-FIELDS = (
-    "payment_id",
-    "event_time",
-    "bank",
-    "direction",
-    "account",
-    "counterparty_bank",
-    "amount",
-    "payment_format",
-)
-
-
-def validate(event, bank):
-    """Accept CSV or JSON events; strip extra fields (including evaluation labels)."""
-    if not isinstance(event, dict) or any(key not in event for key in FIELDS):
-        raise ValueError("missing transaction fields")
-    e = {key: event[key] for key in FIELDS}
-    if any(not isinstance(e[k], str) or not e[k] for k in FIELDS if k != "amount"):
-        raise ValueError("transaction fields must be nonempty strings")
-    if e["bank"] != bank or bank not in ("A", "B", "C"):
-        raise ValueError("wrong bank")
-    if e["counterparty_bank"] not in ("A", "B", "C") or e["direction"] not in (
-        "in",
-        "out",
-    ):
-        raise ValueError("invalid bank or direction")
-    try:
-        amount = Decimal(str(e["amount"]))
-        timestamp = datetime.fromisoformat(e["event_time"])
-    except (ValueError, TypeError, InvalidOperation) as exc:
-        raise ValueError("invalid amount or timestamp") from exc
-    if not amount.is_finite() or amount <= 0 or timestamp.utcoffset() != timedelta(0):
-        raise ValueError("amount must be positive and finite; timestamp must be UTC")
-    return e
+from decimal import Decimal
 
 
 class Scorer:
@@ -86,8 +54,7 @@ class Scorer:
         if not self.accounts[account]:
             del self.accounts[account]
 
-    def process(self, event):
-        e = validate(event, self.bank)
+    def process(self, e):
         account = e["account"]
         now = datetime.fromisoformat(e["event_time"])
         latest = max(self.latest.get(account, now), now)
