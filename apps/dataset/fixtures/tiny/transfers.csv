@@ -1,21 +1,21 @@
-payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,chain_id,hop,scenario
-p01,2022-09-05T09:00:00,A,A-alice,B,B-bob,120.00,Cheque,0,,,
-p02,2022-09-05T09:05:00,B,B-bob,B,B-carol,45.50,Credit Card,0,,,
-p03,2022-09-05T09:20:00,C,C-dave,A,A-alice,3000.00,ACH,0,,,
-p04,2022-09-05T09:40:00,A,A-alice,C,C-erin,80.00,Credit Card,0,,,
-p05,2022-09-05T10:10:00,B,B-carol,C,C-dave,600.00,ACH,1,,,
-p06,2022-09-05T09:10:00,A,A-m0,B,B-m1,10000.00,Wire,0,m1,0,mule_chain
-p07,2022-09-05T09:25:00,B,B-m1,C,C-m2,9500.00,Wire,0,m1,1,mule_chain
-p08,2022-09-05T09:30:00,A,A-l0,B,B-l1,8000.00,ACH,0,l1,0,lookalike
-p09,2022-09-05T09:50:00,B,B-l1,C,C-l2,3200.00,ACH,0,l1,1,lookalike
-p10,2022-09-05T10:00:00,A,A-o0,B,B-o1,7000.00,Wire,0,o1,0,loop
-p11,2022-09-05T10:15:00,B,B-o1,C,C-o2,6650.00,Wire,0,o1,1,loop
-p12,2022-09-05T10:30:00,C,C-o2,A,A-o0,6317.50,Wire,0,o1,2,loop
-p13,2022-09-05T10:40:00,A,A-x0,B,B-x1,5000.00,ACH,0,x1,0,absent_link
-p14,2022-09-05T11:10:00,C,C-x2,A,A-x3,4512.50,ACH,0,x1,2,absent_link
-p15,2022-09-05T11:00:00,A,A-v0,B,B-v1,20000.00,Wire,0,v1,0,over_limit
-p16,2022-09-05T11:10:00,B,B-v1,C,C-v2,19000.00,Wire,0,v1,1,over_limit
-p17,2022-09-05T11:20:00,C,C-v2,A,A-v3,18050.00,Wire,0,v1,2,over_limit
-p18,2022-09-05T11:30:00,A,A-v3,B,B-v4,17147.50,Wire,0,v1,3,over_limit
-p19,2022-09-05T11:40:00,B,B-v4,C,C-v5,16290.12,Wire,0,v1,4,over_limit
-p20,2022-09-05T11:50:00,C,C-v5,A,A-v6,15475.61,Wire,0,v1,5,over_limit
+payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario
+p01,2022-09-05T09:00:00,A,A-alice,B,B-bob,120.00,Cheque,0,,,,,
+p02,2022-09-05T09:05:00,B,B-bob,B,B-carol,45.50,Credit Card,0,,,,,
+p03,2022-09-05T09:20:00,C,C-dave,A,A-alice,3000.00,GIRO,0,,,,,
+p04,2022-09-05T09:40:00,A,A-alice,C,C-erin,80.00,Credit Card,0,,,,,
+p05,2022-09-05T10:10:00,B,B-carol,C,C-dave,600.00,GIRO,1,0,FAN-OUT,,,
+p06,2022-09-05T09:10:00,A,A-m0,B,B-m1,10000.00,MEPS+,0,,,m1,0,mule_chain
+p07,2022-09-05T09:25:00,B,B-m1,C,C-m2,9500.00,MEPS+,0,,,m1,1,mule_chain
+p08,2022-09-05T09:30:00,A,A-l0,B,B-l1,8000.00,GIRO,0,,,l1,0,lookalike
+p09,2022-09-05T09:50:00,B,B-l1,C,C-l2,3200.00,GIRO,0,,,l1,1,lookalike
+p10,2022-09-05T10:00:00,A,A-o0,B,B-o1,7000.00,MEPS+,0,,,o1,0,loop
+p11,2022-09-05T10:15:00,B,B-o1,C,C-o2,6650.00,MEPS+,0,,,o1,1,loop
+p12,2022-09-05T10:30:00,C,C-o2,A,A-o0,6317.50,MEPS+,0,,,o1,2,loop
+p13,2022-09-05T10:40:00,A,A-x0,B,B-x1,5000.00,GIRO,0,,,x1,0,absent_link
+p14,2022-09-05T11:10:00,C,C-x2,A,A-x3,4512.50,GIRO,0,,,x1,2,absent_link
+p15,2022-09-05T11:00:00,A,A-v0,B,B-v1,20000.00,MEPS+,0,,,v1,0,over_limit
+p16,2022-09-05T11:10:00,B,B-v1,C,C-v2,19000.00,MEPS+,0,,,v1,1,over_limit
+p17,2022-09-05T11:20:00,C,C-v2,A,A-v3,18050.00,MEPS+,0,,,v1,2,over_limit
+p18,2022-09-05T11:30:00,A,A-v3,B,B-v4,17147.50,MEPS+,0,,,v1,3,over_limit
+p19,2022-09-05T11:40:00,B,B-v4,C,C-v5,16290.12,MEPS+,0,,,v1,4,over_limit
+p20,2022-09-05T11:50:00,C,C-v5,A,A-v6,15475.61,MEPS+,0,,,v1,5,over_limit

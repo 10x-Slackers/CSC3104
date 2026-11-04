@@ -1,16 +1,16 @@
-payment_id,event_time,bank,direction,account,counterparty_bank,amount,payment_format
-p01,2022-09-05T09:00:00Z,B,in,B-bob,A,120.0,Cheque
-p02,2022-09-05T09:05:00Z,B,out,B-bob,B,45.5,Credit Card
-p02,2022-09-05T09:05:00Z,B,in,B-carol,B,45.5,Credit Card
-p06,2022-09-05T09:10:00Z,B,in,B-m1,A,10000.0,Wire
-p07,2022-09-05T09:25:00Z,B,out,B-m1,C,9500.0,Wire
-p08,2022-09-05T09:30:00Z,B,in,B-l1,A,8000.0,ACH
-p09,2022-09-05T09:50:00Z,B,out,B-l1,C,3200.0,ACH
-p10,2022-09-05T10:00:00Z,B,in,B-o1,A,7000.0,Wire
-p05,2022-09-05T10:10:00Z,B,out,B-carol,C,600.0,ACH
-p11,2022-09-05T10:15:00Z,B,out,B-o1,C,6650.0,Wire
-p13,2022-09-05T10:40:00Z,B,in,B-x1,A,5000.0,ACH
-p15,2022-09-05T11:00:00Z,B,in,B-v1,A,20000.0,Wire
-p16,2022-09-05T11:10:00Z,B,out,B-v1,C,19000.0,Wire
-p18,2022-09-05T11:30:00Z,B,in,B-v4,A,17147.5,Wire
-p19,2022-09-05T11:40:00Z,B,out,B-v4,C,16290.12,Wire
+payment_id,event_time,bank,direction,account,counterparty_account,counterparty_bank,amount,payment_format
+p01,2022-09-05T09:00:00Z,B,in,B-bob,A-alice,A,120.0,Cheque
+p02,2022-09-05T09:05:00Z,B,out,B-bob,B-carol,B,45.5,Credit Card
+p02,2022-09-05T09:05:00Z,B,in,B-carol,B-bob,B,45.5,Credit Card
+p06,2022-09-05T09:10:00Z,B,in,B-m1,A-m0,A,10000.0,MEPS+
+p07,2022-09-05T09:25:00Z,B,out,B-m1,C-m2,C,9500.0,MEPS+
+p08,2022-09-05T09:30:00Z,B,in,B-l1,A-l0,A,8000.0,GIRO
+p09,2022-09-05T09:50:00Z,B,out,B-l1,C-l2,C,3200.0,GIRO
+p10,2022-09-05T10:00:00Z,B,in,B-o1,A-o0,A,7000.0,MEPS+
+p05,2022-09-05T10:10:00Z,B,out,B-carol,C-dave,C,600.0,GIRO
+p11,2022-09-05T10:15:00Z,B,out,B-o1,C-o2,C,6650.0,MEPS+
+p13,2022-09-05T10:40:00Z,B,in,B-x1,A-x0,A,5000.0,GIRO
+p15,2022-09-05T11:00:00Z,B,in,B-v1,A-v0,A,20000.0,MEPS+
+p16,2022-09-05T11:10:00Z,B,out,B-v1,C-v2,C,19000.0,MEPS+
+p18,2022-09-05T11:30:00Z,B,in,B-v4,A-v3,A,17147.5,MEPS+
+p19,2022-09-05T11:40:00Z,B,out,B-v4,C-v5,C,16290.12,MEPS+

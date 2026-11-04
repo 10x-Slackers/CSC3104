@@ -5,7 +5,7 @@ them to the bank-local Kafka. Run one replay per bank with the same --start-at s
 all three stay in step. Contract: docs/contracts/data.md.
 
     uv run python -m dataset.replay apps/dataset/fixtures/tiny A --speed 0
-    uv run python -m dataset.replay apps/dataset/out/dev-small A --speed 60 --start-at 1791500000 | <ingestor>
+    uv run python -m dataset.replay apps/dataset/out/slice-6h A --speed 60 --start-at 1791500000 | <ingestor>
 """
 
 import argparse
