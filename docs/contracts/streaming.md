@@ -169,7 +169,7 @@ are unchanged.
 - **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `payees:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
 - **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group.
 
-Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The card payment `p02` gets only `pay:` keys (**pending work:** replaced by an intra-bank bank transfer, since only GIRO and MEPS+ are ingested; [data.md](data.md#ingestor)). Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
+Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The card payment `p02` gets only `pay:` keys (**pending work:** `p02` becomes GIRO, since only GIRO and MEPS+ are ingested, so its keys here change; [data.md](data.md#ingestor)). Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
 
 Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
 `PENDING` until a fixed deadline from that search's first attempt. Retries use
