@@ -41,6 +41,7 @@ def changed(edit):
         lambda hdr, tx: tx["PmtId"].update(EndToEndId=""),
         lambda hdr, tx: tx["CdtrAgt"]["FinInstnId"].update(BICFI="TSTDSGSG"),
         lambda hdr, tx: tx.pop("PmtTpInf"),
+        lambda hdr, tx: tx["PmtTpInf"]["LclInstrm"].update(Prtry="Cheque"),
     ],
     ids=[
         "count",
@@ -51,6 +52,7 @@ def changed(edit):
         "empty-id",
         "unknown-bic",
         "missing",
+        "not-a-bank-transfer",
     ],
 )
 def test_bad_batch_is_rejected_whole(edit):

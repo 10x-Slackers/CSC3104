@@ -3,13 +3,13 @@
     "topic": "bank-B-transactions",
     "key": "B-bob",
     "headers": {"ce_specversion": "1.0", "ce_id": "p02-out", "ce_source": "/bank/B/ingestor", "ce_type": "payment.out", "ce_time": "2022-09-05T09:05:00Z", "content-type": "application/json"},
-    "value": {"payment_id": "p02", "event_time": "2022-09-05T09:05:00Z", "bank": "B", "direction": "out", "account": "B-bob", "counterparty_account": "B-carol", "counterparty_bank": "B", "amount": 45.5, "payment_format": "Credit Card"}
+    "value": {"payment_id": "p02", "event_time": "2022-09-05T09:05:00Z", "bank": "B", "direction": "out", "account": "B-bob", "counterparty_account": "B-carol", "counterparty_bank": "B", "amount": 45.5, "payment_format": "GIRO"}
   },
   {
     "topic": "bank-B-transactions",
     "key": "B-carol",
     "headers": {"ce_specversion": "1.0", "ce_id": "p02-in", "ce_source": "/bank/B/ingestor", "ce_type": "payment.in", "ce_time": "2022-09-05T09:05:00Z", "content-type": "application/json"},
-    "value": {"payment_id": "p02", "event_time": "2022-09-05T09:05:00Z", "bank": "B", "direction": "in", "account": "B-carol", "counterparty_account": "B-bob", "counterparty_bank": "B", "amount": 45.5, "payment_format": "Credit Card"}
+    "value": {"payment_id": "p02", "event_time": "2022-09-05T09:05:00Z", "bank": "B", "direction": "in", "account": "B-carol", "counterparty_account": "B-bob", "counterparty_bank": "B", "amount": 45.5, "payment_format": "GIRO"}
   },
   {
     "topic": "bank-B-transactions",

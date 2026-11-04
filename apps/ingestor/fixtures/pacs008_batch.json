@@ -4,7 +4,7 @@
     "CdtTrfTxInf": [
       {
         "PmtId": {"EndToEndId": "p02"},
-        "PmtTpInf": {"LclInstrm": {"Prtry": "Credit Card"}},
+        "PmtTpInf": {"LclInstrm": {"Prtry": "GIRO"}},
         "IntrBkSttlmAmt": {"Ccy": "SGD", "Amt": "45.50"},
         "AccptncDtTm": "2022-09-05T09:05:00Z",
         "DbtrAcct": {"Id": {"Othr": {"Id": "B-bob"}}},

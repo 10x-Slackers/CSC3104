@@ -19,7 +19,8 @@ def records(batch, bank):
 
     Any KeyError, TypeError or ValueError rejects the whole batch (HTTP 400). These
     are the scorer's validate() checks, moved here: every field present and a
-    nonempty string, a known bank on both sides, a positive SGD amount, UTC time.
+    nonempty string, a known bank on both sides, a positive SGD amount, UTC time,
+    and a GIRO or MEPS+ bank transfer (nothing else is replayed or ingested).
     An intra-bank transfer gives two events, `out` then `in`.
     """
     msg = batch["FIToFICstmrCdtTrf"]
@@ -31,6 +32,8 @@ def records(batch, bank):
         amount = float(tx["IntrBkSttlmAmt"]["Amt"])
         if tx["IntrBkSttlmAmt"]["Ccy"] != "SGD" or not 0 < amount < math.inf:
             raise ValueError("amount must be a positive SGD amount")
+        if tx["PmtTpInf"]["LclInstrm"]["Prtry"] not in ("GIRO", "MEPS+"):
+            raise ValueError("only GIRO and MEPS+ bank transfers are ingested")
         debtor = BANKS[tx["DbtrAgt"]["FinInstnId"]["BICFI"]]
         creditor = BANKS[tx["CdtrAgt"]["FinInstnId"]["BICFI"]]
         if bank not in (debtor, creditor):

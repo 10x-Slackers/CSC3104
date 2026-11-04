@@ -1,7 +1,7 @@
 payment_id,event_time,bank,direction,account,counterparty_account,counterparty_bank,amount,payment_format
 p01,2022-09-05T09:00:00Z,B,in,B-bob,A-alice,A,120.0,Cheque
-p02,2022-09-05T09:05:00Z,B,out,B-bob,B-carol,B,45.5,Credit Card
-p02,2022-09-05T09:05:00Z,B,in,B-carol,B-bob,B,45.5,Credit Card
+p02,2022-09-05T09:05:00Z,B,out,B-bob,B-carol,B,45.5,GIRO
+p02,2022-09-05T09:05:00Z,B,in,B-carol,B-bob,B,45.5,GIRO
 p06,2022-09-05T09:10:00Z,B,in,B-m1,A-m0,A,10000.0,MEPS+
 p07,2022-09-05T09:25:00Z,B,out,B-m1,C-m2,C,9500.0,MEPS+
 p08,2022-09-05T09:30:00Z,B,in,B-l1,A-l0,A,8000.0,GIRO

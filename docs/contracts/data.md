@@ -108,7 +108,7 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 
 `--transfers` takes a CSV with the columns `payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario`, as in `fixtures/tiny/transfers.csv`. `attempt_id` and `altman_pattern` are empty outside an Altman attempt, and the last three are empty for unplanted transfers.
 
-**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank card) and p04 (card). Each hit is at the sender's bank, each a Tier 1 case unless a chain promotes it.
+**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank) and p04 (card). Each hit is at the sender's bank, each a Tier 1 case unless a chain promotes it.
 
 | Chain | Transfers | Banks | Expected (**draft**) |
 | --- | --- | --- | --- |
@@ -175,7 +175,7 @@ Bank identifiers are fictional BICs: A `TSTASGSG`, B `TSTBSGSG`, C `TSTCSGSG`. T
 | `account`, `counterparty_account` | `DbtrAcct` / `CdtrAcct`, by direction |
 | `counterparty_bank` | The other agent's BIC, mapped back to `A`/`B`/`C` |
 | `amount` | `IntrBkSttlmAmt.Amt` (a decimal string), written as a JSON number; `Ccy` must be `SGD` |
-| `payment_format` | `PmtTpInf.LclInstrm.Prtry`: `GIRO` and `MEPS+` for bank transfers (Altman's ACH and Wire), and `Cheque`, `Cash`, `Credit Card` and `Bitcoin` as proprietary local instruments. **pending work:** `GIRO` or `MEPS+` only; anything else is a `400` |
+| `payment_format` | `PmtTpInf.LclInstrm.Prtry`: `GIRO` or `MEPS+`, the bank transfers (Altman's ACH and Wire); anything else is a `400` |
 
 The events and their Kafka headers are in [streaming.md](streaming.md#kafka-events).
 
@@ -186,10 +186,10 @@ The events and their Kafka headers are in [streaming.md](streaming.md#kafka-even
 | Item | Decision |
 | --- | --- |
 | Endpoint | `POST /` with the batch as the JSON body; `GET /healthz` for the readiness probe |
-| What a batch holds | Only payments that involve this bank (**pending work:** and only GIRO and MEPS+). Replay sends each payment to both banks involved, or once if it's intra-bank: `p06` goes to A and to B, `p02` (GIRO once relabelled) only to B |
+| What a batch holds | Only GIRO and MEPS+ payments that involve this bank. Replay sends each payment to both banks involved, or once if it's intra-bank: `p06` goes to A and to B, `p02` only to B |
 | Batch size | The payments due at the same moment, at most 100. At `--speed 60` one Altman minute replays in one second; on HI-Small, 1–10 Sep, a bank receives 158–192 payments a second on average (p99 418–471, busiest minute 1,870), so usually two batches a second. 100 payments are about 40 KB, far under the function URL's [6 MB request limit](https://docs.aws.amazon.com/lambda/latest/dg/API_CreateFunctionUrlConfig.html) |
 | `200` | Kafka confirmed every event: `flush()` returned and no delivery failed. Body `{"events": <n>}` |
-| `400` | The whole batch is rejected and nothing is produced: `NbOfTxs` doesn't match the transaction count, a payment names neither agent as this bank, `Ccy` isn't `SGD`, the amount isn't positive, `AccptncDtTm` isn't UTC (`Z`), a field is missing or empty, or a BIC is unknown. Body `{"error": "<reason>"}`. Replay stops with an error, because resending the same batch can't succeed |
+| `400` | The whole batch is rejected and nothing is produced: `NbOfTxs` doesn't match the transaction count, a payment names neither agent as this bank, `Ccy` isn't `SGD`, the amount isn't positive, `AccptncDtTm` isn't UTC (`Z`), a field is missing or empty, a BIC is unknown, or a payment isn't `GIRO` or `MEPS+` (e.g. `Cheque`). Body `{"error": "<reason>"}`. Replay stops with an error, because resending the same batch can't succeed |
 | `5xx`, `429`, timeout | Replay resends the same batch (same `MsgId` and `EndToEndId`s) with exponential backoff and full jitter, from 1 s doubling to at most 30 s, until it succeeds ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)). `503` means Kafka didn't confirm every event within `message.timeout.ms`; `429` is Lambda throttling. Replay keeps one queue per bank, so a bank that's down delays only its own batches |
 | Duplicates | A resent batch can write some events twice; consumers drop repeats by `ce_id` ([streaming.md](streaming.md#kafka-events)) |
 
@@ -201,7 +201,7 @@ Behaviour:
 - **Code shape:** one `handle(body) -> (status, reply)` with two thin adapters: `Handler`, for the standard library's `ThreadingHTTPServer`, with keep-alive, `POST /` and `GET /healthz`; and `lambda_handler`, for the function URL's payload format 2.0, whose `body` is the batch.
 - **Logs:** one JSON line per batch to stdout, e.g. `{"ts": 1793500000.123, "service": "ingestor", "bank": "B", "status": 200, "ms": 4.2, "events": 4, "payment_ids": ["p02", "p02", "p06", "p07"]}`. `ts` is also every record's Kafka timestamp, so the evaluation joins each `payment_id` to it ([evaluation.md](../evaluation.md#metric-definitions)). A rejected batch logs its `error` and no IDs.
 - **Why not gRPC:** Lambda can't be a gRPC target (ALB gRPC target groups don't allow Lambda), and the input is a payment-network message, not a schema we design. gRPC is used between long-lived peers; HTTP + JSON at the serverless edge.
-- **Stated simplifications:** JSON instead of FAST's XML; a subset of pacs.008 that leaves out elements a real message requires but detection doesn't need, such as the charge bearer (`ChrgBr`) and the debtor and creditor parties (`Dbtr`, `Cdtr`); intra-bank book transfers wouldn't go through FAST; cheque, cash and card aren't credit transfers, so they're carried as a proprietary local instrument. **pending work:** they aren't sent at all, so the only instruments are GIRO and MEPS+. The fixture's `p02` (`B-bob → B-carol`, S$45.50) becomes GIRO instead of Credit Card, so the fixture and the shared samples keep an intra-bank transfer; it changes no rule hit.
+- **Stated simplifications:** JSON instead of FAST's XML; a subset of pacs.008 that leaves out elements a real message requires but detection doesn't need, such as the charge bearer (`ChrgBr`) and the debtor and creditor parties (`Dbtr`, `Cdtr`); intra-bank book transfers wouldn't go through FAST; cheque, cash and card aren't credit transfers, so they aren't sent at all and the only instruments are GIRO and MEPS+. The fixture's `p02` (`B-bob → B-carol`, S$45.50) is GIRO rather than a card payment, so the fixture and the shared samples keep an intra-bank transfer; that changes no rule hit.
 
 **Replay (**pending work**):** one process feeds all three banks from one clock and sends only GIRO and MEPS+ payments, so `--start-at` coordination goes away. It retries a batch on 5xx, adds `--rate` (events/s, open-loop) for load tests, and keeps `--speed` for the demo. On k3d it runs as a Job in its own `replay` namespace; on EKS it signs requests with SigV4.
 
