@@ -669,6 +669,12 @@ wheels = [
 name = "ingestor"
 version = "0.1.0"
 source = { editable = "apps/ingestor" }
+dependencies = [
+    { name = "confluent-kafka" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "confluent-kafka", specifier = ">=2.6" }]
 
 [[package]]
 name = "iniconfig"

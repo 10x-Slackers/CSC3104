@@ -1,6 +1,6 @@
 payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario
 p01,2022-09-05T09:00:00,A,A-alice,B,B-bob,120.00,Cheque,0,,,,,
-p02,2022-09-05T09:05:00,B,B-bob,B,B-carol,45.50,Credit Card,0,,,,,
+p02,2022-09-05T09:05:00,B,B-bob,B,B-carol,45.50,GIRO,0,,,,,
 p03,2022-09-05T09:20:00,C,C-dave,A,A-alice,3000.00,GIRO,0,,,,,
 p04,2022-09-05T09:40:00,A,A-alice,C,C-erin,80.00,Credit Card,0,,,,,
 p05,2022-09-05T10:10:00,B,B-carol,C,C-dave,600.00,GIRO,1,0,FAN-OUT,,,

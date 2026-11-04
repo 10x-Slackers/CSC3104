@@ -20,17 +20,19 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | --- | --- |
 | Topic names | `bank-A-transactions`, `bank-B-transactions`, `bank-C-transactions` |
 | Event identity / dedup key | `(payment_id, direction, account)` within one bank; scorer deduplication lasts only while the event is retained. The `ce_id` header, `<payment_id>-<direction>`, names the same event; a batch the ingestor resends can write an event twice, and the scorer drops the repeat by this key |
-| Record value | JSON with nine fields: the eight in [data.md](data.md#bank-event-files-bank_abccsv) plus `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
-| Record headers | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, which latency is measured from ([evaluation.md](../evaluation.md#metric-definitions)) |
-| Intra-bank transfers | Two records, `out` then `in`, with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, then key `B-carol`, `ce_id` `p02-in` |
+| Record value | JSON with the nine fields of a [bank event](data.md#bank-event-files-bank_abccsv), including `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
+| Record headers | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, the same for a whole batch and logged as its `ts`; latency is measured from it ([evaluation.md](../evaluation.md#metric-definitions)) |
+| Intra-bank transfers | Two records with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, and key `B-carol`, `ce_id` `p02-in`. The ingestor produces `out` first, but the keys differ, so the records usually land in different partitions and a consumer can read them in either order. Only the bank files keep `out` before `in`; consumers rely on `event_time`, which both records share |
 | Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order no longer matters |
 | Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events older than the latest timestamp seen for that account minus `--window`. Events are retained for twice `--window` so an accepted late event still finds its partner |
 
-The [ingestor](data.md#ingestor) (`apps/ingestor/`) validates every event and
-produces these records; the scorer only consumes them and trusts their fields. It
-still checks the topic and account key. Run it with
+The [ingestor](data.md#ingestor) (`apps/ingestor/`) receives pacs.008 batches over
+HTTP, rejects invalid or wrong-bank ones whole, and produces these records; the
+scorer only consumes them and trusts their fields. It still checks the topic and
+account key. The ingestor reads the broker list from `KAFKA_BOOTSTRAP_SERVERS`; run
+the scorer with
 `uv run python -m scorer.stream B --bootstrap-servers <brokers> --group <fresh-group>`
-(default `localhost:9092`). The k3d Kafka has only an in-cluster listener, so run it
+(both default `localhost:9092`). The k3d Kafka has only an in-cluster listener, so run it
 inside the cluster with `kafka-kafka-bootstrap:9092`; a port-forward does not work
 because the broker advertises in-cluster addresses. The consumer may start before
 the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
