@@ -1,5 +1,5 @@
-# Security review: Isaac must apply the app labels below to his workload templates.
-# Policies are additive: do not restore a namespace-wide allow policy.
+# Deny everything, then allow: traffic inside this bank, DNS, the Kubernetes API, and the platform operators (KEDA reads Kafka lag).
+# TODO: narrow to per-service paths and add privacy node <-> other banks (docs/contracts/security.md).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -7,147 +7,24 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
-  ingress: []
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [strimzi, cnpg-system, keda]
   egress:
     - to:
+        - podSelector: {}
+    - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: kube-system}
-          podSelector:
-            matchLabels: {k8s-app: kube-dns}
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
-
-# Each local path grants destination ingress and source egress.
-# Valkey is the agreed scorer/node path; its workload is Isaac-owned/pending.
-{{- $paths := list
-  (dict "name" "ingestor-kafka" "source" "ingestor" "label" "strimzi.io/name" "target" "kafka-kafka" "port" 9092)
-  (dict "name" "scorer-kafka" "source" "scorer" "label" "strimzi.io/name" "target" "kafka-kafka" "port" 9092)
-  (dict "name" "node-kafka" "source" "privacy-node" "label" "strimzi.io/name" "target" "kafka-kafka" "port" 9092)
-  (dict "name" "scorer-valkey" "source" "scorer" "label" "app" "target" "valkey" "port" 6379)
-  (dict "name" "node-valkey" "source" "privacy-node" "label" "app" "target" "valkey" "port" 6379)
-  (dict "name" "node-postgres" "source" "privacy-node" "label" "cnpg.io/cluster" "target" "postgres" "port" 5432)
-  (dict "name" "case-postgres" "source" "case" "label" "cnpg.io/cluster" "target" "postgres" "port" 5432)
-  (dict "name" "node-case" "source" "privacy-node" "label" "app" "target" "case" "port" 8000)
-  (dict "name" "case-intake" "source" "case" "label" "app" "target" "intake" "port" 8001)
-}}
-{{- range $paths }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ .name }}-egress
-spec:
-  podSelector:
-    matchLabels: {app: {{ .source }}}
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - podSelector:
-            matchLabels: {"{{ .label }}": {{ .target }}}
-      ports: [{protocol: TCP, port: {{ .port }}}]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ .name }}-ingress
-spec:
-  podSelector:
-    matchLabels: {"{{ .label }}": {{ .target }}}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {app: {{ .source }}}
-      ports: [{protocol: TCP, port: {{ .port }}}]
-{{- end }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: privacy-node-peers
-spec:
-  podSelector:
-    matchLabels: {app: privacy-node}
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}
-          podSelector:
-            matchLabels: {app: privacy-node}
-      ports: [{protocol: TCP, port: 50051}]
-  egress:
-    - to:
-        - namespaceSelector:
-            matchExpressions:
-              - {key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}
-          podSelector:
-            matchLabels: {app: privacy-node}
-      ports: [{protocol: TCP, port: 50051}]
----
-# Store replication and operator control ports; never whole operator namespaces.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: kafka-control
-spec:
-  podSelector:
-    matchLabels: {strimzi.io/name: kafka-kafka}
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {strimzi.io/name: kafka-kafka}
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: strimzi}
-          podSelector:
-            matchLabels: {name: strimzi-cluster-operator}
-      ports:
-        - {protocol: TCP, port: 9090}
-        - {protocol: TCP, port: 9091}
-        - {protocol: TCP, port: 8443}
-    - from:
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: keda}
-          podSelector:
-            matchLabels: {app: keda-operator}
-      ports: [{protocol: TCP, port: 9092}]
-  egress:
-    - to:
-        - podSelector:
-            matchLabels: {strimzi.io/name: kafka-kafka}
-      ports:
-        - {protocol: TCP, port: 9090}
-        - {protocol: TCP, port: 9091}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: postgres-control
-spec:
-  podSelector:
-    matchLabels: {cnpg.io/cluster: postgres}
-  policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {cnpg.io/cluster: postgres}
-        - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: cnpg-system}
-          podSelector:
-            matchLabels: {app.kubernetes.io/name: cloudnative-pg}
-      ports:
-        - {protocol: TCP, port: 5432}
-        - {protocol: TCP, port: 8000}
-  egress:
-    - to:
-        - podSelector:
-            matchLabels: {cnpg.io/cluster: postgres}
-      ports:
-        - {protocol: TCP, port: 5432}
-        - {protocol: TCP, port: 8000}
     - to:
         {{- range .Values.apiServerCIDRs }}
         - ipBlock: {cidr: {{ . }}}

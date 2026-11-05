@@ -20,7 +20,6 @@ from privacy_node.claims import (
     chain_digest,
     check_result,
     complete,
-    reject_unknown_fields,
     valid_chain,
     valid_claim,
 )
@@ -46,6 +45,8 @@ def banks(tmp_path):
     yield nodes, servers
     for server in servers.values():
         server.stop(0)
+    for node in nodes.values():
+        node.close()
 
 
 def run_all(nodes):
@@ -70,6 +71,7 @@ def trace(node, payment, direction, sender, **changes):
         "key_version": "k1",
         "direction": direction,
         "hops_remaining": 3,
+        "deadline": (now() + timedelta(seconds=5)).isoformat(),
     }
     return node.Trace(pb.TraceRequest(**fields | changes), None)
 
@@ -116,7 +118,6 @@ def test_one_chain_row_per_bank_after_repeats(banks):
 def test_peer_messages_carry_no_raw_fields(banks):
     nodes, _ = banks
     for result in run_all(nodes).values():
-        reject_unknown_fields(result)
         wire = result.SerializeToString()
         for raw in (b"p06", b"p07", b"B-m1", b"A-m0", b"9500.0", b"Wire"):
             assert raw not in wire
@@ -141,7 +142,7 @@ def test_tampered_or_wrongly_signed_claims_rejected(banks):
 
     tampered.chain_digest = chain_digest(tampered.claims)
     with pytest.raises(grpc.RpcError) as error:
-        nodes["A"].call("C", "Deliver", tampered, 5)
+        nodes["A"].call("C", "Deliver", tampered, now() + timedelta(seconds=5))
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert [c.chain_digest for c in nodes["C"].store.chains()] == [result.chain_digest]
 
@@ -150,7 +151,7 @@ def test_retried_query_gets_stored_reply(banks, monkeypatch):
     nodes, _ = banks
     first = trace(nodes["C"], "p07", pb.DOWNSTREAM, "B")
     assert first.state == pb.CONFIRMED and first.claims[0].signer == "C"
-    monkeypatch.setattr(nodes["C"], "follow", lambda *args: pytest.fail("redone"))
+    monkeypatch.setattr(nodes["C"], "follow", lambda request: pytest.fail("redone"))
     assert trace(nodes["C"], "p07", pb.DOWNSTREAM, "B") == first
 
 
@@ -160,16 +161,11 @@ def test_unknown_token_wrong_sender_and_deadline(banks):
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
     inbound = c.local.refs["p07", "in"]
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
-    request = pb.TraceRequest(
-        query_id="late",
-        sender="B",
-        key_version="k1",
-        ref=inbound,
-        direction=pb.DOWNSTREAM,
+    late = (now() - timedelta(seconds=1)).isoformat()
+    assert (
+        trace(c, "p07", pb.DOWNSTREAM, "B", query_id="q9", deadline=late).state
+        == pb.TIMED_OUT
     )
-    context = Mock()
-    context.time_remaining.return_value = 0
-    assert c.Trace(request, context).state == pb.TIMED_OUT
 
 
 def test_visited_token_closes_loop_without_forwarding(banks):
@@ -195,7 +191,7 @@ def test_delivered_state_is_checked(banks):
     nodes, _ = banks
     result = nodes["B"].search("p15", "p16")
     nodes["C"].store = Store()
-    deadline = 5
+    deadline = now() + timedelta(seconds=5)
     result.state = pb.CONFIRMED  # sender lies about a cut chain
     nodes["B"].call("C", "Deliver", result, deadline)
     assert [c.state for c in nodes["C"].store.chains()] == [pb.PARTIAL]
@@ -207,7 +203,7 @@ def test_delivered_state_is_checked(banks):
 
 def test_peer_error_fails_search_without_retry(banks, monkeypatch):
     nodes, _ = banks
-    monkeypatch.setattr(nodes["C"], "follow", lambda *args: 1 / 0)
+    monkeypatch.setattr(nodes["C"], "follow", lambda request: 1 / 0)
     assert nodes["B"].search("p06", "p07").state == pb.FAILED
     assert nodes["B"].store.unfinished_searches() == []
 
@@ -265,7 +261,7 @@ def test_undelivered_result_is_redelivered_after_restart(banks):
 
 
 def test_messages_pass_allowlist_and_reject_forbidden_fields():
-    reject_unknown_fields(pb.TraceRequest(query_id="q", sender="A"))
+    check_peer_payload({"query_id": "q", "sender": "A"}, ALLOWED_FIELDS)
     with pytest.raises(ValueError):
         check_peer_payload({"amount": 1}, ALLOWED_FIELDS)
 
@@ -356,7 +352,6 @@ def test_kafka_state_drives_real_peer_search(tmp_path, monkeypatch, reverse):
             if k[1] in {"p15", "p16", "p17", "p18", "p19"}
         )
         for result in results.values():
-            reject_unknown_fields(result)
             assert b"B-m1" not in result.SerializeToString()
         for bank, node in nodes.items():
             identities = {d["detection_id"] for d in node.local.detections}
@@ -717,8 +712,11 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
 
     # An old in-flight search still forwards k1 even though each node now queries k2.
     ref = nodes["B"].local.ref("p10", "in", "k1")
-    request = nodes["A"].request("old-flight", ref, pb.DOWNSTREAM, 3, [ref], "k1")
-    reply = nodes["A"].call("B", "Trace", request, 5)
+    deadline = now() + timedelta(seconds=5)
+    request = nodes["A"].request(
+        "old-flight", ref, pb.DOWNSTREAM, 3, deadline.isoformat(), [ref], "k1"
+    )
+    reply = nodes["A"].call("B", "Trace", request, deadline)
     assert reply.state == pb.CONFIRMED
     assert {c.key_version for c in reply.claims} == {"k1"}
     assert valid_chain(reply.claims, nodes["B"].public_keys)
@@ -740,26 +738,6 @@ def test_branch_cap_is_a_signed_cut(banks, monkeypatch):
     assert reply.state == pb.PARTIAL
     assert reply.claims[0].truncated
     assert valid_chain(reply.claims, nodes["B"].public_keys)
-
-
-def test_relative_budget_includes_local_lookup_time(banks, monkeypatch):
-    nodes, _ = banks
-    node = nodes["C"]
-    clock = [10.0]
-    monkeypatch.setattr(node_module, "monotonic", lambda: clock[0])
-
-    def lookup(*args):
-        clock[0] += 4
-        return "p07"
-
-    monkeypatch.setattr(node.local, "lookup", lookup)
-    extend = Mock(return_value=pb.TraceReply(state=pb.CONFIRMED))
-    monkeypatch.setattr(node, "extend", extend)
-    request = nodes["B"].request(
-        "budget", node.local.refs["p07", "in"], pb.DOWNSTREAM, 3, []
-    )
-    node.follow(request, timeout=5)
-    assert extend.call_args.args[-1] == 1
 
 
 def test_signing_reload_cannot_mix_key_and_version_within_a_claim(banks, monkeypatch):
@@ -792,3 +770,121 @@ def test_signing_reload_cannot_mix_key_and_version_within_a_claim(banks, monkeyp
     )
     assert second.signing_key_version == "k2"
     assert valid_claim(second, node.public_keys)
+
+
+def test_slow_key_reload_does_not_block_housekeeping_or_state(
+    banks, tmp_path, monkeypatch
+):
+    nodes, _ = banks
+    node = nodes["B"]
+    prepare_demo_keys(tmp_path, "k2")
+    started, release = threading.Event(), threading.Event()
+    load = node_module.load_pairwise_keys
+
+    def slow_load(*args):
+        started.set()
+        assert release.wait(5)
+        return load(*args)
+
+    monkeypatch.setattr(node_module, "load_pairwise_keys", slow_load)
+    node.reload_keys = lambda: node.reload_key_directory(
+        tmp_path,
+        {
+            "active_versions": ["k1", "k2"],
+            "query_version": "k2",
+            "signing_key_version": "k2",
+            "peer_versions": {bank: ["k1", "k2"] for bank in "AC"},
+        },
+    )
+    deliveries = Mock()
+    monkeypatch.setattr(node, "deliver_pending", deliveries)
+    try:
+        node.housekeeping()
+        assert started.wait(3)
+        reload_thread = node._key_reload
+        assert deliveries.call_count == 1
+        assert node.local.lock.acquire(timeout=1)
+        node.local.lock.release()
+        node.housekeeping()
+        assert node._key_reload is reload_thread  # no overlapping reloads
+        assert deliveries.call_count == 2
+    finally:
+        release.set()
+        node._key_reload.join(timeout=5)
+    assert not node._key_reload.is_alive()
+    assert node.key_version == node.signing_key_version == "k2"
+
+
+@pytest.mark.parametrize("failure", ["signing_file", "readiness"])
+def test_failed_key_reload_preserves_previous_working_set(
+    banks, tmp_path, monkeypatch, failure
+):
+    nodes, _ = banks
+    node = nodes["B"]
+    prepare_demo_keys(tmp_path, "k2")
+    original = node.local.index, node.signing_key, node.public_keys
+    config = {
+        "active_versions": ["k1", "k2"],
+        "query_version": "k2",
+        "signing_key_version": "k2",
+        "peer_versions": {bank: ["k1", "k2"] for bank in "AC"},
+    }
+    if failure == "signing_file":
+        monkeypatch.setattr(
+            node_module, "own_key", Mock(side_effect=ValueError("bad PEM"))
+        )
+    else:
+        config["peer_versions"]["C"] = ["k1"]
+    with pytest.raises(ValueError):
+        node.reload_key_directory(tmp_path, config)
+    assert (node.local.index, node.signing_key, node.public_keys) == original
+    assert node.key_version == node.signing_key_version == "k1"
+    assert node.local.index.active_versions == ("k1",)
+    assert node.search("p06", "p07").state == pb.CONFIRMED
+
+
+def test_unchanged_key_reload_keeps_existing_index(banks, tmp_path):
+    nodes, _ = banks
+    node = nodes["B"]
+    original = node.local.index
+    node.reload_key_directory(
+        tmp_path,
+        {
+            "active_versions": ["k1"],
+            "query_version": "k1",
+            "signing_key_version": "k1",
+            "peer_versions": {bank: ["k1"] for bank in "AC"},
+        },
+    )
+    assert node.local.index is original
+
+
+def test_query_version_switch_during_search_keeps_one_token_scope(
+    banks, tmp_path, monkeypatch
+):
+    nodes, _ = banks
+    prepare_demo_keys(tmp_path, "k2")
+    for node in nodes.values():
+        node.reload_key_directory(
+            tmp_path,
+            {
+                "active_versions": ["k1", "k2"],
+                "query_version": "k1",
+                "signing_key_version": "k1",
+                "peer_versions": {bank: ["k1", "k2"] for bank in "ABC"},
+            },
+        )
+    initiator = nodes["B"]
+    leg = initiator.leg
+
+    def rotate_before_leg(*args):
+        for node in nodes.values():
+            node.set_query_version("k2", {bank: ["k1", "k2"] for bank in "ABC"})
+        return leg(*args)
+
+    monkeypatch.setattr(initiator, "leg", rotate_before_leg)
+    result = initiator.search("p06", "p07")
+    assert result.state == pb.CONFIRMED
+    assert initiator.key_version == "k2"
+    assert {claim.key_version for claim in result.claims} == {"k1"}
+    assert check_result(result, initiator.public_keys, "B").state == pb.CONFIRMED

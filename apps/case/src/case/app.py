@@ -7,7 +7,6 @@ Chain results arrive from the bank's privacy node on POST /results. Alerts and m
 go straight to this UI's inbox; reports go to the mock intake (intake.py).
 """
 
-import json
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -21,7 +20,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.protobuf.message import DecodeError
 
 from case.case_store import SqliteCaseStore, neighbours
-from case.enrichment import own_legs
 from case.evidence import check_result, load_public_keys
 from case.outbox import run, webhook
 from case.report import TemplateClient, draft_report, when
@@ -54,8 +52,7 @@ def display_case(case):
     for claim in claims:
         for field in ("in_token", "out_token"):
             claim[field] = claim[field].hex()
-    legs = [leg | {"token": leg["token"].hex()} for leg in case["own_legs"]]
-    return case | {"claims": claims, "own_legs": legs}
+    return case | {"claims": claims}
 
 
 def page(bank, title, body):
@@ -146,11 +143,6 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
             f"<li>{when(t)}: {ACTIONS[a]}" for a, t in case["decisions"]
         )
         merged = case["merged_into"]
-        details = "".join(
-            f"<li>{escape(leg['direction'])}: payment {escape(leg['payment_id'])}, "
-            f"account {escape(leg['account'])}, amount {escape(str(leg['amount']))}"
-            for leg in case["own_legs"]
-        )
         reports = "".join(
             f"<h3>Report {r['report_id']} · {escape(r['source'])} · {escape(r['status'])}"
             f" · {when(r['created_at'])}</h3><pre>{escape(r['body'])}</pre>"
@@ -181,7 +173,6 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
             "confirmed by the signing bank; a signature doesn't prove its records are true."
             "<h2>Links</h2><table><tr><th>#<th>Banks (from → confirming → to)"
             f"<th>Confirmed by<th>Incoming token<th>Outgoing token</tr>{links}</table>"
-            f"<h2>Own-bank details</h2><ul>{details or '<li>None supplied'}</ul>"
             f"<h2>Chain results received</h2><ul>{results}</ul>"
             f"<h2>Decisions</h2><ul>{decisions or '<li>None yet'}</ul>"
             f"<form method=post action='/cases/{escape(case_id)}/decision'>{buttons}</form>"
@@ -200,7 +191,7 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
 
     @app.post("/cases/{case_id}/report")
     def generate(case_id: str):
-        draft_report(store(), load(case_id), client, bank)
+        draft_report(store(), load(case_id), client)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
     @app.post("/cases/{case_id}/reports/{report_id}/review")
@@ -211,26 +202,14 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
 
     @app.post("/results")
     async def results(request: Request):
-        """Internal node delivery: protobuf, optionally with own-bank multipart details."""
-        legs = []
+        """Verify one bank-internal protobuf result before storing its normalized copy."""
         try:
-            if request.headers.get("content-type", "").startswith(
-                "multipart/form-data"
-            ):
-                async with request.form() as form:
-                    payload = await form["result"].read()
-                    legs = json.loads(form["own_legs"])
-            else:
-                payload = await request.body()
-            result = pb.ChainResult.FromString(payload)
+            result = pb.ChainResult.FromString(await request.body())
             keys = public_keys() if callable(public_keys) else public_keys
             result = check_result(result, keys, bank)
-            details = own_legs(result, legs, bank)
-        except (DecodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise HTTPException(
-                422, "Invalid chain result or own-bank details"
-            ) from exc
-        store().record(result, details)
+        except (DecodeError, ValueError) as exc:
+            raise HTTPException(422, "Invalid chain result") from exc
+        store().record(result)
         return {"chain_digest": result.chain_digest}
 
     @app.get("/api/cases")

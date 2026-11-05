@@ -22,7 +22,6 @@ class LocalBank:
         self.index = TokenIndex(bank, key_version, key_paths, max_token_references)
         self.scorer = Scorer(bank, **rule)
         self.lock = threading.RLock()
-        self.records = {}  # bank-local snapshots for internal case enrichment only
         self.refs = {}  # (payment_id, direction) -> TokenRef
         self.counterparty = {}  # (payment_id, direction) -> peer bank
         self.onward = {}  # incoming payment_id -> [outgoing payment_id]
@@ -40,9 +39,6 @@ class LocalBank:
         """Publish tokens, references and candidate links before Kafka commits."""
         with self.lock:
             token = self.index.add(event)
-            self.records[event["payment_id"], event["direction"]] = {
-                name: event[name] for name in ("payment_id", "account", "amount")
-            }
             key = (event["payment_id"], event["direction"])
             if token:
                 pair = "-".join(canonical_pair(self.bank, event["counterparty_bank"]))

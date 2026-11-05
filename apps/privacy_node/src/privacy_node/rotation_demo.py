@@ -67,6 +67,8 @@ def main():
                 "k1 retired after demo work drained: k2 still CONFIRMED; no missed link"
             )
         finally:
+            for node in nodes.values():
+                node.close()
             for server in servers.values():
                 server.stop(0)
 

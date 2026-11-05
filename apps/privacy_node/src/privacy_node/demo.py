@@ -70,6 +70,8 @@ def main():
                 for c in node.store.chains()
             ]
             print(f"bank {bank} stores {len(chains)} chains: {', '.join(chains)}")
+        for node in nodes.values():
+            node.close()
         for server in servers.values():
             server.stop(0)
 

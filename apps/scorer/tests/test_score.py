@@ -638,22 +638,12 @@ def test_token_capacity_never_evicts(pair_key_paths):
         TokenIndex("B", "k1", key_files(pair_key_paths, "B", "A"), max_references=0)
 
 
-def test_overlapping_rotation_no_missed_link(pair_key_paths, tmp_path):
+def test_overlapping_rotation_no_missed_link(pair_key_paths):
     old = key_files(pair_key_paths, "B")
     index = TokenIndex("B", "k1", old)
     old_token = index.add(event())
-    fresh_root = tmp_path / "k2"
-    fresh_root.mkdir()
-    for bank in "ABC":
-        key = generate_agreement_key()
-        (fresh_root / f"{bank}-private.pem").write_bytes(private_key_pem(key))
-        (fresh_root / f"{bank}-public.pem").write_bytes(
-            public_key_pem(key.public_key())
-        )
-    fresh = key_files(fresh_root, "B")
-    with pytest.raises(ValueError, match="fresh"):
-        index.introduce_version("k2", old)
-    index.introduce_version("k2", fresh)
+    # HKDF includes the version, even when provisioned X25519 files are unchanged.
+    index.introduce_version("k2", old)
     assert index.active_versions == ("k1", "k2")
     assert index.lookup(("A", "B"), "k1", old_token)
     backfilled = index.token_for("in", ("A", "B"), "k2")
@@ -672,7 +662,7 @@ def test_overlapping_rotation_no_missed_link(pair_key_paths, tmp_path):
         index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1"]})
     index.set_query_version("k2", {"A": ["k1", "k2"], "C": ["k1", "k2"]})
     assert index.add(event("overlap")) == tokens["k2"]
-    index.reload_keys()
+    index.introduce_version("k1", old)
     assert index.lookup(("A", "B"), "k1", tokens["k1"])
     with pytest.raises(ValueError, match="Switch"):
         index.retire_version("k2")
@@ -697,15 +687,15 @@ def test_rotation_capacity_failure_keeps_old_index(pair_key_paths, tmp_path):
     assert index.lookup(("A", "B"), "k1", token)
 
 
-def test_reload_reopens_secret_mount_and_requires_version_change(pair_key_paths):
+def test_changed_pair_key_requires_version_change(pair_key_paths):
     files = key_files(pair_key_paths, "B")
     index = TokenIndex("B", "k1", files)
     token = index.add(event())
-    index.reload_keys()
+    index.introduce_version("k1", files)
     assert index.add(event()) == token
     files.private_key.write_bytes(private_key_pem(generate_agreement_key()))
     with pytest.raises(ValueError, match="new version"):
-        index.reload_keys()
+        index.introduce_version("k1", files)
 
 
 def test_incomplete_rotated_peer_set_cannot_drop_unseen_bank_pair(

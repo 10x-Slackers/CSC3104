@@ -4,7 +4,7 @@ import hashlib
 from itertools import pairwise
 
 from privacy_node import privacy_node_pb2 as pb
-from security import canonical_pair, verify
+from security import verify
 
 # Per-message approved field names; descriptor tests require explicit approval of additions.
 APPROVED_FIELDS = {
@@ -16,6 +16,7 @@ APPROVED_FIELDS = {
         "ref",
         "direction",
         "hops_remaining",
+        "deadline",
         "visited",
     },
     "LinkClaim": {
@@ -34,6 +35,7 @@ APPROVED_FIELDS = {
     "Ack": {"chain_digest"},
 }
 ALLOWED_FIELDS = frozenset().union(*APPROVED_FIELDS.values())
+PAIRS = {"A-B", "A-C", "B-C"}
 
 
 def key(ref):
@@ -68,28 +70,8 @@ def claim_bytes(c):
     )
 
 
-def reject_unknown_fields(message):
-    """Reject unknown wire fields, including fields nested inside known messages."""
-    clean = type(message)()
-    clean.CopyFrom(message)
-    clean.DiscardUnknownFields()
-    if clean.SerializeToString(deterministic=True) != message.SerializeToString(
-        deterministic=True
-    ):
-        raise ValueError("unknown protobuf field")
-
-
 def _valid_ref(ref):
-    if not ref.token:
-        return not ref.pair
-    parts = ref.pair.split("-")
-    return (
-        len(ref.token) == 16
-        and len(parts) == 2
-        and parts[0] != parts[1]
-        and all(bank in ("A", "B", "C") for bank in parts)
-        and tuple(parts) == canonical_pair(*parts)
-    )
+    return len(ref.token) == 16 and ref.pair in PAIRS if ref.token else not ref.pair
 
 
 def valid_claim(c, public_keys):
@@ -104,19 +86,30 @@ def valid_claim(c, public_keys):
         and bool(c.signing_key_version)
         and all(_valid_ref(r) for r in (c.in_ref, c.out_ref))
         and all(c.signer in r.pair.split("-") for r in vouched)
+        and (not c.in_ref.token or key(c.in_ref) != key(c.out_ref))
+        and (
+            c.recipient == c.signer
+            or any(c.recipient in r.pair.split("-") for r in vouched)
+        )
         and verify(claim_bytes(c), c.signature, public_key)
     )
 
 
 def valid_chain(claims, public_keys):
-    """Every claim verifies; adjacent transfer and token-version scopes match."""
+    """Each shared transfer is vouched for by its two distinct endpoint banks."""
+    witnesses = {}
+    for claim in claims:
+        for ref in refs([claim]):
+            witnesses.setdefault(key(ref), []).append(claim.signer)
     return (
         bool(claims)
         and all(valid_claim(c, public_keys) for c in claims)
+        and all(len(banks) == 1 or len(set(banks)) == 2 for banks in witnesses.values())
         and all(
             bool(a.out_ref.token)
             and key(a.out_ref) == key(b.in_ref)
             and a.key_version == b.key_version
+            and a.signer != b.signer
             for a, b in pairwise(claims)
         )
     )
@@ -160,7 +153,6 @@ def check_result(result, public_keys, bank):
     Shared by peer Deliver and bank-local case /results; neither consumer may
     store the unnormalised input after calling this function.
     """
-    reject_unknown_fields(result)
     claims, sender = list(result.claims), result.sender
     own = [i for i, c in enumerate(claims) if c.signer == c.recipient == sender]
     if (

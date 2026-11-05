@@ -19,16 +19,16 @@ LINK_FIELDS = (
     "signing_key_version",
     "truncated",
 )
-# Peer/minimal evidence and internal own-bank details have distinct boundaries.
-LOCAL_FIELDS = ("bank", "direction", "payment_id", "account", "amount")
+# Everything a report client may see. Signatures, accounts, amounts and payment IDs
+# are not listed, so they can never reach a report.
 ALLOWED = {
     "case_id", "state", "raised_at", "merged_into", "links", "results", "decisions",
     "chain_digest", "sender", "action", "decided_at", *LINK_FIELDS,
 }  # fmt: skip
 
 
-def report_input(case, bank=None):
-    """Human report JSON: hex tokens plus explicitly selected own-bank details."""
+def report_input(case):
+    """Select only approved evidence fields, with tokens as readable hex."""
     data = {k: case[k] for k in ("case_id", "state", "raised_at", "merged_into")}
     data["links"] = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
     for link in data["links"]:
@@ -39,12 +39,6 @@ def report_input(case, bank=None):
     ]
     data["decisions"] = [{"action": a, "decided_at": t} for a, t in case["decisions"]]
     check_peer_payload(data, ALLOWED)
-    if bank is not None:
-        if any(leg["bank"] != bank for leg in case.get("own_legs", ())):
-            raise ValueError("A report may contain only its own bank's raw legs")
-        data["own_legs"] = [
-            {f: leg[f] for f in LOCAL_FIELDS} for leg in case.get("own_legs", ())
-        ]
     return data
 
 
@@ -88,12 +82,6 @@ class TemplateClient:
                 f"  {i}. {start} -> {link['signer']} -> {end}, confirmed by"
                 f" {link['signer']}: {link['in_token'] or '-'} -> {link['out_token'] or '-'}"
             )
-        if data.get("own_legs"):
-            lines += ["", "Own-bank details (internal):"]
-            lines += [
-                f"  {leg['direction']}: payment {leg['payment_id']}, account {leg['account']}, amount {leg['amount']}"
-                for leg in data["own_legs"]
-            ]
         lines += ["", "Chain results received:"]
         lines += [
             f"  {r['state']} from {r['sender']} (digest {r['chain_digest'][:16]})"
@@ -119,10 +107,10 @@ class TemplateClient:
         return "\n".join(lines)
 
 
-def draft_report(store, case, client, bank=None):
+def draft_report(store, case, client):
     """Filter, draft and store as a draft; return the new report ID.
 
     A client has a `source` label (stored with the report) and `draft(data) -> str`.
     """
-    data = report_input(case, bank)
+    data = report_input(case)
     return store.save_report(case["case_id"], client.source, client.draft(data))

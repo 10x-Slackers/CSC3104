@@ -1,11 +1,11 @@
 """Attack cases for the authoritative result validator and the peer schema."""
 
+from datetime import timedelta
 from pathlib import Path
 
 import grpc
 import pytest
 from google.protobuf.descriptor import FieldDescriptor
-from google.protobuf.text_format import Parse
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import (
@@ -13,10 +13,11 @@ from privacy_node.claims import (
     chain_digest,
     check_result,
     claim_bytes,
-    reject_unknown_fields,
+    valid_chain,
     valid_claim,
 )
 from privacy_node.demo import start_banks
+from privacy_node.node import now
 from security import FORBIDDEN_FIELDS, generate_signing_key, sign
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
@@ -59,34 +60,6 @@ def test_schema_explicitly_approves_every_recursive_peer_field():
         pb.TokenRef.DESCRIPTOR.fields_by_name["token"].type
         == FieldDescriptor.TYPE_BYTES
     )
-    assert "deadline" not in pb.TraceRequest.DESCRIPTOR.fields_by_name
-
-
-def test_unknown_fields_rejected_recursively_by_receivers(banks):
-    request = pb.TraceRequest(query_id="unknown", sender="B")
-    request.ref.CopyFrom(pb.TokenRef.FromString(b"\x98\x06\x01"))
-    with pytest.raises(ValueError, match="unknown protobuf"):
-        reject_unknown_fields(request)
-    with pytest.raises(ValueError, match="unknown protobuf"):
-        banks["B"].call("C", "Trace", request, 5)
-
-
-def test_unknown_wire_field_rejected_by_grpc_receiver(banks):
-    result = banks["B"].search("p06", "p07")
-    target = banks["B"].peers["C"]
-    with grpc.insecure_channel(target) as channel:
-        for method, payload in (
-            ("Trace", pb.TraceRequest(sender="B").SerializeToString()),
-            ("Deliver", result.SerializeToString()),
-        ):
-            call = channel.unary_unary(
-                f"/csc3104.privacy.v1.PrivacyNode/{method}",
-                request_serializer=lambda value: value,
-                response_deserializer=lambda value: value,
-            )
-            with pytest.raises(grpc.RpcError) as error:
-                call(payload + b"\x98\x06\x01", timeout=5)
-            assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
 
 def test_shared_validator_accepts_confirmed_and_partial(banks):
@@ -95,7 +68,77 @@ def test_shared_validator_accepts_confirmed_and_partial(banks):
         ("p15", "p16", pb.PARTIAL),
     ):
         result = banks["B"].search(payment, outgoing)
+        assert {c.signer for c in result.claims} == {"A", "B", "C"}
         assert check_result(result, banks["B"].public_keys, "B").state == state
+
+
+def test_one_bank_cannot_sign_both_sides_of_a_shared_transfer(banks):
+    result = banks["B"].search("p06", "p07")
+    # Add an A-B transfer allegedly confirmed on both sides by A. All signatures
+    # and query/recipient bindings remain genuine; B never vouched for this token.
+    unconfirmed = pb.TokenRef(pair="A-B", token=b"x" * 16)
+    first = result.claims[0]
+    first.in_ref.CopyFrom(unconfirmed)
+    result.claims.insert(
+        0, banks["A"].claim("A", first.query_id, pb.TokenRef(), unconfirmed)
+    )
+    resign(result, banks)
+    keys = banks["B"].public_keys
+    assert all(valid_claim(c, keys) for c in result.claims)
+    assert not valid_chain(result.claims, keys)
+    with pytest.raises(ValueError, match="invalid chain result"):
+        check_result(result, keys, "B")
+    with pytest.raises(grpc.RpcError) as error:
+        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5))
+    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert banks["C"].store.chains() == []
+
+
+def test_one_claim_cannot_count_the_same_transfer_as_both_sides(banks):
+    ref = pb.TokenRef(pair="A-B", token=b"x" * 16)
+    claim = banks["A"].claim("A", "self", ref, ref)
+    result = pb.ChainResult(
+        sender="A",
+        state=pb.CONFIRMED,
+        claims=[claim],
+        chain_digest=chain_digest([claim]),
+    )
+    assert not valid_claim(claim, banks["A"].public_keys)
+    with pytest.raises(ValueError, match="invalid chain result"):
+        check_result(result, banks["A"].public_keys, "A")
+
+
+def test_one_bank_cannot_close_a_loop_with_its_own_unconfirmed_endpoints(banks):
+    ab = pb.TokenRef(pair="A-B", token=b"x" * 16)
+    ac_in = pb.TokenRef(pair="A-C", token=b"y" * 16)
+    ac_out = pb.TokenRef(pair="A-C", token=b"z" * 16)
+    claims = [
+        banks["A"].claim("C", "up", ab, ac_in),
+        banks["C"].claim("C", "anchor", ac_in, ac_out),
+        banks["A"].claim("C", "down", ac_out, ab),
+    ]
+    result = pb.ChainResult(
+        sender="C", state=pb.CONFIRMED, claims=claims, chain_digest=chain_digest(claims)
+    )
+    keys = banks["C"].public_keys
+    assert all(valid_claim(c, keys) for c in claims)
+    # The interior A-C transfers are independently signed. Only A signed the
+    # repeated A-B endpoint, so it cannot turn this cut into a confirmed loop.
+    assert not valid_chain(claims, keys)
+    with pytest.raises(ValueError, match="invalid chain result"):
+        check_result(result, keys, "C")
+    with pytest.raises(grpc.RpcError) as error:
+        banks["C"].call("A", "Deliver", result, now() + timedelta(seconds=5))
+    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert banks["A"].store.chains() == []
+
+
+def test_legitimate_loop_with_repeated_banks_keeps_independent_witnesses(banks):
+    for bank, incoming, outgoing in (("B", "p10", "p11"), ("C", "p11", "p12")):
+        result = banks[bank].search(incoming, outgoing)
+        signers = [c.signer for c in result.claims]
+        assert len(signers) > len(set(signers))
+        assert check_result(result, banks[bank].public_keys, bank).state == pb.CONFIRMED
 
 
 @pytest.mark.parametrize(
@@ -172,16 +215,10 @@ def test_old_and_new_signing_keys_coexist_and_wrong_version_fails(banks):
     assert not valid_claim(new, keys)
 
 
-def test_shared_sample_matches_producer_and_consumer(banks):
-    sample_path = (
-        Path(__file__).parents[3] / "docs/contracts/samples/trace_request.textproto"
-    )
-    sample = Parse(sample_path.read_text(encoding="utf-8-sig"), pb.TraceRequest())
-    producer = banks["A"].request("sample-q1", sample.ref, pb.DOWNSTREAM, 3, [], "k1")
-    assert producer == sample
-    assert sample.ref.token.hex() == "86ef4e3f811c077dcde10d9cef4d807c"
-    consumed = pb.TraceRequest.FromString(sample.SerializeToString())
-    assert banks["B"].Trace(consumed, None).state == pb.NO_MATCH
+def test_raw_token_roundtrips_without_text_encoding():
+    token = bytes.fromhex("86ef4e3f811c077dcde10d9cef4d807c")
+    ref = pb.TokenRef(pair="A-B", token=token)
+    assert pb.TokenRef.FromString(ref.SerializeToString()).token == token
 
 
 def test_signed_branch_cut_cannot_create_confirmed_evidence(banks):
@@ -210,6 +247,6 @@ def test_disconnected_signed_fragments_are_rejected_by_validator_and_deliver(ban
     with pytest.raises(ValueError, match="invalid chain result"):
         check_result(result, banks["B"].public_keys, "C")
     with pytest.raises(grpc.RpcError) as error:
-        banks["B"].call("C", "Deliver", result, 5)
+        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5))
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert banks["C"].store.chains() == []

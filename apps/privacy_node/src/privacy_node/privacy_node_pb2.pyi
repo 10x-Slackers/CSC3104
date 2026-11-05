@@ -44,13 +44,14 @@ class TokenRef(_message.Message):
     def __init__(self, pair: _Optional[str] = ..., token: _Optional[bytes] = ...) -> None: ...
 
 class TraceRequest(_message.Message):
-    __slots__ = ("query_id", "sender", "key_version", "ref", "direction", "hops_remaining", "visited")
+    __slots__ = ("query_id", "sender", "key_version", "ref", "direction", "hops_remaining", "deadline", "visited")
     QUERY_ID_FIELD_NUMBER: _ClassVar[int]
     SENDER_FIELD_NUMBER: _ClassVar[int]
     KEY_VERSION_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     DIRECTION_FIELD_NUMBER: _ClassVar[int]
     HOPS_REMAINING_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_FIELD_NUMBER: _ClassVar[int]
     VISITED_FIELD_NUMBER: _ClassVar[int]
     query_id: str
     sender: str
@@ -58,8 +59,9 @@ class TraceRequest(_message.Message):
     ref: TokenRef
     direction: Direction
     hops_remaining: int
+    deadline: str
     visited: _containers.RepeatedCompositeFieldContainer[TokenRef]
-    def __init__(self, query_id: _Optional[str] = ..., sender: _Optional[str] = ..., key_version: _Optional[str] = ..., ref: _Optional[_Union[TokenRef, _Mapping]] = ..., direction: _Optional[_Union[Direction, str]] = ..., hops_remaining: _Optional[int] = ..., visited: _Optional[_Iterable[_Union[TokenRef, _Mapping]]] = ...) -> None: ...
+    def __init__(self, query_id: _Optional[str] = ..., sender: _Optional[str] = ..., key_version: _Optional[str] = ..., ref: _Optional[_Union[TokenRef, _Mapping]] = ..., direction: _Optional[_Union[Direction, str]] = ..., hops_remaining: _Optional[int] = ..., deadline: _Optional[str] = ..., visited: _Optional[_Iterable[_Union[TokenRef, _Mapping]]] = ...) -> None: ...
 
 class LinkClaim(_message.Message):
     __slots__ = ("signer", "recipient", "query_id", "key_version", "in_ref", "out_ref", "signature", "signing_key_version", "truncated")

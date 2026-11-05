@@ -1,6 +1,6 @@
 """Bank-local case store: verified chain results, case identity and one alert per case.
 
-Holds verified byte tokens and separately snapshotted own-bank leg details.
+Holds only tokens, bank IDs and claim metadata; never accounts, amounts or payment IDs.
 Input is Role 3's ChainResult (privacy_node/privacy_node.proto), already verified
 with claims.check_result. Contract: docs/contracts/case.md. SQLite for now.
 """
@@ -103,19 +103,6 @@ CREATE TABLE IF NOT EXISTS claims (
     case_id TEXT NOT NULL,
     PRIMARY KEY (signer, key_version, in_pair, in_token, out_pair, out_token)
 );
--- Raw details are internal only and bound to this bank's signed token reference.
-CREATE TABLE IF NOT EXISTS own_legs (
-    case_id TEXT NOT NULL,
-    bank TEXT NOT NULL,
-    key_version TEXT NOT NULL,
-    pair TEXT NOT NULL,
-    token BLOB NOT NULL,
-    direction TEXT NOT NULL,
-    payment_id TEXT NOT NULL,
-    account TEXT NOT NULL,
-    amount REAL NOT NULL,
-    PRIMARY KEY (case_id, bank, key_version, pair, token, direction)
-);
 -- Every delivered result, once per (digest, sending bank, state).
 CREATE TABLE IF NOT EXISTS results (
     chain_digest TEXT NOT NULL,
@@ -196,7 +183,7 @@ class SqliteCaseStore:
             raise
         self.db.execute("COMMIT")
 
-    def record(self, result, own_legs=()):
+    def record(self, result):
         """Store a verified ChainResult; return its case ID."""
         if result.state not in STATES:
             raise ValueError(f"Not a deliverable result: {pb.State.Name(result.state)}")
@@ -220,10 +207,6 @@ class SqliteCaseStore:
                 f" VALUES ({', '.join('?' * (len(fields(Claim)) + 1))})"
                 " ON CONFLICT DO NOTHING",
                 [astuple(claim) + (case_id,) for claim in claims],
-            )
-            db.executemany(
-                "INSERT INTO own_legs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                [(case_id, *leg) for leg in own_legs],
             )
             confirmed = db.execute(
                 "SELECT 1 FROM results WHERE case_id = ? AND state = 'confirmed'",
@@ -283,14 +266,7 @@ class SqliteCaseStore:
             # Tell the analyst an alerted case now lives on under the surviving case.
             if db.execute("SELECT 1 FROM alerts WHERE case_id = ?", (old,)).fetchone():
                 notify(db, "merged", old)
-            for table in (
-                "transfers",
-                "claims",
-                "results",
-                "decisions",
-                "reports",
-                "own_legs",
-            ):
+            for table in ("transfers", "claims", "results", "decisions", "reports"):
                 db.execute(
                     f"UPDATE {table} SET case_id = ? WHERE case_id = ?", (case_id, old)
                 )
@@ -333,14 +309,6 @@ class SqliteCaseStore:
             "claims": [Claim(*claim) for claim in claims],
             "results": [tuple(result) for result in results],
             "decisions": [tuple(decision) for decision in decisions],
-            "own_legs": [
-                dict(leg)
-                for leg in self.db.execute(
-                    "SELECT bank, key_version, pair, token, direction, payment_id, account, amount"
-                    " FROM own_legs WHERE case_id = ? ORDER BY rowid",
-                    (case_id,),
-                )
-            ],
         }
 
     def decide(self, case_id, action):

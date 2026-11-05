@@ -40,9 +40,9 @@ class TlsFiles:
             for path in (self.certificate, self.private_key, self.ca)
         )
 
-    def channel(self, target):
+    def channel(self, target, material=None):
         """A new channel uses current mounted credentials and verifies the target DNS."""
-        certificate, private_key, ca = self.read()
+        certificate, private_key, ca = self.read() if material is None else material
         credentials = grpc.ssl_channel_credentials(ca, private_key, certificate)
         return grpc.secure_channel(target, credentials)
 

@@ -1,5 +1,6 @@
 """Real local TLS handshakes; all test-only keys live in pytest's temporary dir."""
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.node import Node, serve
+from privacy_node.node import Node, now, serve
 from privacy_node.transport import TlsFiles, authenticated_bank
 
 
@@ -202,7 +203,10 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
     )
     request = pb.TraceRequest(sender="A", query_id="cached-query")
     try:
-        assert sender.call("B", "Trace", request, 3).state == pb.NO_MATCH
+        assert (
+            sender.call("B", "Trace", request, now() + timedelta(seconds=3)).state
+            == pb.NO_MATCH
+        )
         store.get_reply.assert_called_once()
         store.reset_mock()
         material(client_tls.certificate.parent, ca, "C")
@@ -211,9 +215,109 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
             ("Deliver", pb.ChainResult(sender="A")),
         ]:
             with pytest.raises(grpc.RpcError) as error:
-                sender.call("B", method, message, 3)
+                sender.call("B", method, message, now() + timedelta(seconds=3))
             assert error.value.code() == grpc.StatusCode.PERMISSION_DENIED
         store.get_reply.assert_not_called()
         store.save_chain.assert_not_called()
     finally:
+        sender.close()
+        server.stop(0).wait()
+
+
+@pytest.mark.parametrize("renew_ca", [False, True])
+def test_node_reuses_channel_until_mounted_tls_material_changes(
+    tmp_path, monkeypatch, renew_ca
+):
+    ca = authority()
+    server_tls = material(tmp_path / "server", ca, "B")
+    client_tls = material(tmp_path / "client", ca, "A")
+    store = Mock()
+    store.get_reply.return_value = pb.TraceReply(state=pb.NO_MATCH)
+    receiver = Node(
+        SimpleNamespace(bank="B"), store, None, {}, {}, "k1", tls=server_tls
+    )
+    server, port = serve(receiver)
+    sender = Node(
+        SimpleNamespace(bank="A"),
+        Mock(),
+        None,
+        {},
+        {"B": f"localhost:{port}"},
+        "k1",
+        tls=client_tls,
+    )
+    create_channel = Mock(wraps=grpc.secure_channel)
+    monkeypatch.setattr(grpc, "secure_channel", create_channel)
+    request = pb.TraceRequest(sender="A", query_id="cached-query")
+
+    def trace():
+        return sender.call("B", "Trace", request, now() + timedelta(seconds=3))
+
+    try:
+        assert trace().state == trace().state == pb.NO_MATCH
+        assert create_channel.call_count == 1
+        original = sender._channels[f"localhost:{port}"][1]
+        # The same caller gets renewed files without restarting the node.
+        renewed = authority() if renew_ca else ca
+        if renew_ca:
+            material(server_tls.certificate.parent, renewed, "B")
+        material(client_tls.certificate.parent, renewed, "A")
+        assert trace().state == pb.NO_MATCH
+        assert create_channel.call_count == 2
+        assert sender._channels[f"localhost:{port}"][1] is not original
+        assert trace().state == pb.NO_MATCH
+        assert create_channel.call_count == 2
+    finally:
+        sender.close()
+        server.stop(0).wait()
+
+
+def test_tls_renewal_preserves_inflight_call(tmp_path):
+    ca = authority()
+    server_tls = material(tmp_path / "server", ca, "B")
+    client_tls = material(tmp_path / "client", ca, "A")
+    started, release = threading.Event(), threading.Event()
+    store = Mock()
+
+    def stored(query_id, _):
+        if query_id == "inflight":
+            started.set()
+            assert release.wait(5)
+        return pb.TraceReply(state=pb.NO_MATCH)
+
+    store.get_reply.side_effect = stored
+    receiver = Node(
+        SimpleNamespace(bank="B"), store, None, {}, {}, "k1", tls=server_tls
+    )
+    server, port = serve(receiver)
+    sender = Node(
+        SimpleNamespace(bank="A"),
+        Mock(),
+        None,
+        {},
+        {"B": f"localhost:{port}"},
+        "k1",
+        tls=client_tls,
+    )
+
+    def trace(query_id):
+        return sender.call(
+            "B",
+            "Trace",
+            pb.TraceRequest(sender="A", query_id=query_id),
+            now() + timedelta(seconds=5),
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            inflight = worker.submit(trace, "inflight")
+            try:
+                assert started.wait(3)
+                material(client_tls.certificate.parent, ca, "A")
+                assert trace("renewed").state == pb.NO_MATCH
+            finally:
+                release.set()
+            assert inflight.result(timeout=3).state == pb.NO_MATCH
+    finally:
+        sender.close()
         server.stop(0).wait()

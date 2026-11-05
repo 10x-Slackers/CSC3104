@@ -1,7 +1,4 @@
-"""Case receiver attacks and the own-bank enrichment/report boundary."""
-
-import json
-from types import SimpleNamespace
+"""Shared result validation and byte-token storage at the case receiver."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,9 +6,8 @@ from fastapi.testclient import TestClient
 from case.app import create_app
 from case.case_store import SqliteCaseStore
 from case.evidence import check_result
-from case.report import TemplateClient, report_input
+from case.report import report_input
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.case_delivery import own_case_legs
 from privacy_node.claims import chain_digest, claim_bytes
 from security import generate_signing_key, sign
 
@@ -48,20 +44,6 @@ def client_for(tmp_path, keys):
     )
 
 
-def post_enriched(client, result, legs):
-    return client.post(
-        "/results",
-        files={
-            "result": (
-                "result.pb",
-                result.SerializeToString(),
-                "application/x-protobuf",
-            )
-        },
-        data={"own_legs": json.dumps(legs)},
-    )
-
-
 def test_case_calls_the_authoritative_validator(evidence, tmp_path):
     result, keys, _ = evidence
     from privacy_node.claims import check_result as authoritative
@@ -87,7 +69,6 @@ def test_case_calls_the_authoritative_validator(evidence, tmp_path):
         "anchor",
         "binding",
         "signing_version",
-        "unknown",
         "state",
     ],
 )
@@ -110,11 +91,10 @@ def test_invalid_results_never_enter_case_store(evidence, tmp_path, attack):
         result.claims[0].signing_key_version = "k2"
     elif attack == "state":
         result.state = pb.PENDING
-    payload = result.SerializeToString() + (
-        b"\x98\x06\x01" if attack == "unknown" else b""
-    )
     client = client_for(tmp_path, keys)
-    assert client.post("/results", content=payload).status_code == 422
+    assert (
+        client.post("/results", content=result.SerializeToString()).status_code == 422
+    )
     assert client.get("/api/cases").json() == []
 
 
@@ -130,26 +110,14 @@ def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_pa
     assert case["state"] == "partial" and case["raised_at"] is None
 
 
-def local_leg(bank="B", claim_index=1):
-    return {
-        "bank": bank,
-        "claim_index": claim_index,
-        "direction": "in",
-        "payment_id": "own-payment",
-        "account": "own-account",
-        "amount": 123.5,
-    }
-
-
-def test_own_bank_enrichment_is_internal_and_allowed_in_analyst_report(
-    evidence, tmp_path
-):
+def test_tokens_remain_raw_bytes_in_case_storage(evidence, tmp_path):
     result, keys, _ = evidence
     client = client_for(tmp_path, keys)
-    assert post_enriched(client, result, [local_leg()]).status_code == 200
+    assert (
+        client.post("/results", content=result.SerializeToString()).status_code == 200
+    )
     store = SqliteCaseStore(tmp_path / "cases.db")
     case = store.get(result.chain_digest)
-    assert case["own_legs"][0]["account"] == "own-account"
     assert case["claims"][1].in_token == b"a" * 16
     assert (
         store.db.execute(
@@ -157,54 +125,29 @@ def test_own_bank_enrichment_is_internal_and_allowed_in_analyst_report(
         ).fetchone()[0]
         == "blob"
     )
-    report = report_input(case, "B")
-    assert report["own_legs"][0]["payment_id"] == "own-payment"
-    assert "own-account" in TemplateClient().draft(report)
-    assert "own-account" in client.get(f"/cases/{result.chain_digest}").text
-    assert "own_legs" not in report_input(case)  # legacy mock intake is minimal
-    assert "own-payment" not in str(result)  # enrichment never mutated peer evidence
 
 
-@pytest.mark.parametrize(
-    "leg",
-    [local_leg("A", 0), local_leg("B", 0), local_leg() | {"customer_id": "foreign"}],
-)
-def test_other_banks_raw_legs_and_unapproved_fields_are_rejected(
-    evidence, tmp_path, leg
-):
-    result, keys, _ = evidence
-    client = client_for(tmp_path, keys)
-    assert post_enriched(client, result, [leg]).status_code == 422
-    assert client.get("/api/cases").json() == []
-
-
-def test_report_rejects_foreign_raw_details(evidence, tmp_path):
-    result, _, _ = evidence
-    store = SqliteCaseStore(tmp_path / "cases.db")
-    case = store.get(store.record(result))
-    case["own_legs"] = [local_leg("A", 0)]
-    with pytest.raises(ValueError, match="own bank"):
-        report_input(case, "B")
-
-
-def test_node_case_producer_selects_only_own_signed_legs(evidence):
-    result, _, _ = evidence
-    local = SimpleNamespace(
-        bank="B",
-        lookup=lambda pair, version, token, direction: direction,
-        records={
-            (direction, direction): {
-                "payment_id": f"B-{direction}",
-                "account": "B-local",
-                "amount": 10,
-            }
-            for direction in ("in", "out")
-        },
+def test_case_rejects_one_bank_signing_both_sides_of_a_transfer(evidence, tmp_path):
+    result, keys, private = evidence
+    ref = pb.TokenRef(pair="A-B", token=b"x" * 16)
+    result.claims[0].in_ref.CopyFrom(ref)
+    result.claims[0].signature = sign(claim_bytes(result.claims[0]), private["A"])
+    first = pb.LinkClaim(
+        signer="A",
+        recipient="A",
+        query_id=result.claims[0].query_id,
+        key_version="k1",
+        signing_key_version="k1",
+        out_ref=ref,
     )
-    legs = own_case_legs(result, local)
-    assert len(legs) == 2
-    assert all(leg["bank"] == "B" and leg["claim_index"] == 1 for leg in legs)
-    assert {leg["payment_id"] for leg in legs} == {"B-in", "B-out"}
+    first.signature = sign(claim_bytes(first), private["A"])
+    result.claims.insert(0, first)
+    result.chain_digest = chain_digest(result.claims)
+    client = client_for(tmp_path, keys)
+    assert (
+        client.post("/results", content=result.SerializeToString()).status_code == 422
+    )
+    assert client.get("/api/cases").json() == []
 
 
 def test_case_rejects_disconnected_genuinely_signed_fragments(evidence, tmp_path):

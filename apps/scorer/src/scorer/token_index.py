@@ -1,14 +1,7 @@
 """Bank-local raw-byte token references with overlapping key versions."""
 
 from scorer.score import validate
-from security import (
-    canonical_pair,
-    derive_token,
-    load_agreement_key,
-    load_agreement_public_key,
-    load_pairwise_keys,
-    public_key_pem,
-)
+from security import canonical_pair, derive_token, load_pairwise_keys
 
 
 class TokenIndex:
@@ -21,7 +14,7 @@ class TokenIndex:
         self.max_references = max_references
         self._reference_count = 0
         self.key_version = key_version
-        self._files, self._keys, self._public_material = {}, {}, {}
+        self._keys = {}
         self._entries = {}
         self.introduce_version(key_version, key_paths)
 
@@ -29,41 +22,40 @@ class TokenIndex:
     def active_versions(self):
         return tuple(self._keys)
 
+    def matches_versions(self, keys, query_version):
+        """Whether prepared configuration leaves the current token index unchanged."""
+        return self._keys == keys and self.key_version == query_version
+
     def introduce_version(self, version, files):
-        """Backfill retained references and enable dual indexing with fresh keys."""
+        """Load one version and backfill retained references for overlapping rotation."""
         keys = load_pairwise_keys(
             self.bank, version, files.private_key, files.peer_public_keys
         )
+        self.apply_version(version, keys)
+
+    def apply_version(self, version, keys):
+        """Apply prepared pair keys without filesystem access."""
         if not keys:
             raise ValueError("Token indexing requires trusted peer public keys")
         if self._keys and set(keys) != set(next(iter(self._keys.values()))):
             raise ValueError("Active versions must cover the same bank pairs")
         if any(peer not in ("A", "B", "C") for pair in keys for peer in pair):
             raise ValueError("Unknown bank in key configuration")
-        material = {
-            self.bank: public_key_pem(
-                load_agreement_key(files.private_key).public_key()
-            ),
-            **{
-                peer: public_key_pem(load_agreement_public_key(path))
-                for peer, path in files.peer_public_keys.items()
-            },
-        }
-        for old_version, old in self._public_material.items():
-            if old_version == version:
-                if material != old:
-                    raise ValueError("Use a new version for changed X25519 material")
-            elif any(old.get(bank) == public for bank, public in material.items()):
-                raise ValueError("Rotation requires fresh X25519 key pairs")
+        if version in self._keys and self._keys[version] != keys:
+            raise ValueError("Use a new version for changed X25519 material")
         additions = {}
         if version not in self._keys:
             for (pair, _, _), references in self._entries.items():
-                if pair not in keys:
-                    raise ValueError("Missing key for retained transaction bank pair")
                 for reference in references:
                     token = derive_token(reference[0], *pair, keys[pair], version)
                     additions.setdefault((pair, version, token), set()).add(reference)
         count = sum(map(len, additions.values()))
+        self._check_capacity(count)
+        self._keys[version] = keys
+        self._entries.update(additions)
+        self._reference_count += count
+
+    def _check_capacity(self, count):
         if (
             self.max_references is not None
             and self._reference_count + count > self.max_references
@@ -71,16 +63,6 @@ class TokenIndex:
             raise RuntimeError(
                 "Token index reference limit reached; no records were evicted"
             )
-        self._files[version] = files
-        self._keys[version] = keys
-        self._public_material[version] = material
-        self._entries.update(additions)
-        self._reference_count += count
-
-    def reload_keys(self):
-        """Re-open Secret mount paths; no pod restart is required."""
-        for version, files in self._files.copy().items():
-            self.introduce_version(version, files)
 
     def set_query_version(self, version, peer_versions):
         """Switch only after trusted configuration confirms both endpoints ready."""
@@ -96,8 +78,6 @@ class TokenIndex:
         if version == self.key_version:
             raise ValueError("Switch queries before retiring their key version")
         del self._keys[version]
-        del self._files[version]
-        del self._public_material[version]
         self._entries = {k: v for k, v in self._entries.items() if k[1] != version}
         self._reference_count = sum(map(len, self._entries.values()))
 
@@ -126,13 +106,7 @@ class TokenIndex:
             for version, token in tokens.items()
             if reference not in self._entries.get((pair, version, token), ())
         ]
-        if (
-            self.max_references is not None
-            and self._reference_count + len(additions) > self.max_references
-        ):
-            raise RuntimeError(
-                "Token index reference limit reached; no records were evicted"
-            )
+        self._check_capacity(len(additions))
         for scope in additions:
             self._entries.setdefault(scope, set()).add(reference)
         self._reference_count += len(additions)
