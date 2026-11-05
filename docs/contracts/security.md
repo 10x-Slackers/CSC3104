@@ -172,8 +172,9 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
 | Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
-| `.proto` v1 ([protocol.md](protocol.md#messages)) | Zane ↔ Caleb | `bytes` token, no absolute deadline, unknown fields rejected, the schema test's allow and forbid lists | **draft**, sample TODO | Wed 4 Nov |
 | `check_result` ([security.md](security.md)) | Caleb → Zane, Jia Rui | Signature, the six conditions, how a failure is reported | **draft** | Wed 4 Nov |
+
+Also part of: [`.proto` v1](protocol.md#interfaces).
 
 ## Open
 

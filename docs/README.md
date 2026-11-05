@@ -14,7 +14,7 @@ Start with [overview.md](overview.md). Its requirements section is fixed by the 
 | [contracts/streaming.md](contracts/streaming.md) | Kafka events, detection rules, scorer, Valkey state, scaling | Cindy (event schema: Macarius) |
 | [contracts/protocol.md](contracts/protocol.md) | Peer messages, search algorithm, failure handling, delivery to the case service | Zane |
 | [contracts/security.md](contracts/security.md) | Tokens, key agreement and rotation, signing, disclosure boundary, mTLS, NetworkPolicy intent | Caleb |
-| [contracts/case.md](contracts/case.md) | Cases, ranked alerts, read-only analyst UI, summary service | Jia Rui |
+| [contracts/case.md](contracts/case.md) | Cases, alert tiers, read-only analyst UI, summary service | Jia Rui |
 | [contracts/deployment.md](contracts/deployment.md) | k3d/EKS, Helm, per-service settings, network paths, monitoring | Isaac |
 | [evaluation.md](evaluation.md) | Method, offline detection evaluation, experiments, metrics, demo | Isaac |
 
@@ -35,5 +35,5 @@ Every doc in `contracts/` follows the same frame; the sections in between are th
 2. A `> [!NOTE]` banner, **Pending work (decided 30 Oct 2026)**, listing what changes today's design. Remove it when it's empty.
 3. `Scope:` in one sentence.
 4. The owner's sections, describing what exists today, with inline **pending work** where it changes.
-5. `## Interfaces`: one row per interface the owner produces or consumes (interface, from → to, what it pins down, status, agree-by date). Both sides list it.
+5. `## Interfaces`: one row per interface this doc owns (interface, from → to, what it pins down, status, agree-by date), stated nowhere else. Interfaces the owner only takes part in follow as one `Also part of:` line of links to the owning doc.
 6. `## Open`: a checklist, unresolved items first, each ending with its owner in parentheses; resolved items stay ticked with the decision.

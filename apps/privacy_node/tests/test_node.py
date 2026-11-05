@@ -118,7 +118,7 @@ def test_peer_messages_carry_no_raw_fields(banks):
     for result in run_all(nodes).values():
         check_payload(result)
         wire = result.SerializeToString()
-        for raw in (b"p06", b"p07", b"B-m1", b"A-m0", b"9500.0", b"Wire"):
+        for raw in (b"p06", b"p07", b"B-m1", b"A-m0", b"9500.0", b"MEPS+"):
             assert raw not in wire
 
 

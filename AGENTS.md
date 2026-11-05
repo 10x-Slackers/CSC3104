@@ -4,17 +4,16 @@
 
 This is a **university coursework project** done by undergraduates. It is not a production system and will never be deployed to real users.
 
-## Research First
+## Research
 
-- Always research before implementing a task — both the codebase and online. Understand existing patterns, dependencies, and conventions before writing code.
-- Refer to the latest documentation and existing implementations of any libraries or frameworks in use.
-- Check `docs/` for architectural and planning details relevant to the task.
+- Before implementing, read the code and `docs/` relevant to the task so changes follow existing patterns. Scale this to the task; a small fix needs only the files it touches.
+- Check library and framework APIs against current documentation rather than memory. The versions here may be newer than your training data.
 - Fetch and branch from the latest `origin/main` before starting work or a review.
 
-## Ask When Unsure
+## When to ask
 
-- Clarify ambiguities before proceeding — ask rather than guess.
-- When in doubt about scope, priorities, or critical decisions, surface the uncertainty and let the user decide.
+- Ask before deciding anything that changes scope, priorities, the design in `docs/`, or is hard to reverse.
+- For smaller ambiguities, pick the option most consistent with the existing code and state the assumption in your summary.
 
 ## Engineering posture
 
@@ -22,13 +21,12 @@ Optimize for **low line count, readability, and simplicity** — not for product
 
 - **Prefer fewer lines of code.** Skip defensive checks, input validation, retry logic, and abstractions that a production codebase would require.
 - **Prefer readability.** A short, obvious solution beats a clever, dense one.
-- **Security and robustness may be traded for simplicity.** It is acceptable to a certain degree to trust inputs, skip edge-case handling, and omit safeguards (rate limiting, sanitization layers, error boundaries, etc.) if removing them makes the code clearer and shorter.
+- **Security and robustness may be traded for simplicity.** Within reason, it is acceptable to trust inputs, skip edge-case handling, and omit safeguards (rate limiting, sanitization layers, error boundaries, etc.) if removing them makes the code clearer and shorter.
 - **Don't over-engineer.** No speculative extensibility, no config layers for options nobody uses yet, no premature abstraction.
 
 ## Checks
 
-- After every task, run formatting and linting checks if applicable.
-- For example, for Python, run the following commands from the repository root:
+After each change, run from the repository root:
 
 ```sh
 uv sync --all-packages --locked

@@ -14,7 +14,7 @@ We build a system in which simulated banks cooperate to find these chains, while
 - Trace a mule chain across three banks in real time, peer to peer, with **no central coordinator**, including for key setup.
 - Keep raw customer and payment fields out of interbank messages. Banks exchange only opaque transfer tokens and limited signed link claims.
 - Keep detecting among the remaining banks when one bank is offline.
-- Keep exactly **one durable case per bank per chain**, despite delayed or repeated messages, retries and restarted pods. Every rule hit is an alert at the bank whose rule fired, and a link that another bank's rule also confirmed is marked and ranked first. This is guaranteed after recovery with intact storage, not after permanent data loss.
+- Keep exactly **one durable case per bank per chain**, despite delayed or repeated messages, retries and restarted pods. Push an alert only when at least two banks' own rules fired. This is guaranteed after recovery with intact storage, not after permanent data loss.
 - Measure detection quality offline against labelled data, and latency, scaling and recovery on the cluster.
 
 ## Requirements
@@ -73,10 +73,10 @@ flowchart LR
 ```
 
 1. **Replay** sends each transfer as an ISO 20022 pacs.008 message to the **ingestor** of both banks involved. The ingestor validates it and writes `out` and `in` events to the bank's **Kafka** topic, keyed by account ([data.md](contracts/data.md)).
-2. **Scorer workers** each own some of the topic's partitions and keep their state in **Valkey**. They index each cross-bank transfer under its token and apply four rules to cross-bank bank transfers (GIRO and MEPS+): fast pass-through, chain, new payee and quick repeat ([streaming.md](contracts/streaming.md)). A pass-through or chain link starts a search; every rule hit becomes an alert at that bank.
+2. **Scorer workers** each own some of the topic's partitions and keep their state in **Valkey**. They index each cross-bank transfer under its token and apply four rules to cross-bank bank transfers (GIRO and MEPS+): fast pass-through, chain, new payee and quick repeat ([streaming.md](contracts/streaming.md)). A pass-through or chain link starts a search; a chain, new payee or quick repeat hit becomes local (Tier 1) suspicion.
 3. The **privacy node** queries the next bank with the transfer's token. Both banks on a transfer derive the same token from the shared payment ID, using a key the pair agreed ([security.md](contracts/security.md)). The receiving bank checks its own records and applies its own rules. If they match, it replies with an Ed25519-signed claim linking the two tokens and forwards the query onward ([protocol.md](contracts/protocol.md)).
 4. A search stops at the hop limit or its deadline, and visited tokens stop loops. The initiator verifies the chain, stores it in PostgreSQL and delivers it to every bank that signed a claim.
-5. Each node posts its hits and chains to its **case service** through an outbox. There is **one alert tier**: every hit is an alert in the bank's list, ranked with links that another bank's rule confirmed first ("confirmed by Bank X"), then by the number of rules fired ([case.md](contracts/case.md)). The analyst views and bookmarks cases and reads a summary draft. What the bank then does is outside the system.
+5. Each node posts its hits and chains to its **case service** through an outbox. A chain on which at least two banks' rules fired is a **Tier 2 alert**; everything else is a **Tier 1** case, shown but not pushed and ranked by the number of rules fired ([case.md](contracts/case.md)). The analyst views and bookmarks cases and reads a summary draft. What the bank then does is outside the system.
 
 ## Trust and failure model
 
@@ -103,5 +103,6 @@ flowchart LR
 
 | Event | Date (2026) |
 | --- | --- |
-| Progress presentation (live progress check) | 29 Oct |
-| Final submission (working system, tested in containers) | 15 Nov, 23:59 |
+| Progress presentation (live progress check) | Tue 27 Oct |
+| Final submission (working system, tested in containers) | Fri 20 Nov, 23:59 |
+| Dell Cloud Native Award presentation (top 3 teams only) | Wed 2 Dec |

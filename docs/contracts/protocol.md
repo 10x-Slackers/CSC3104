@@ -72,7 +72,7 @@ A claim is valid only if the signature verifies with the signer's configured pub
 | --- | --- |
 | Query ID and idempotency | `query_id` is a UUID per leg. Each bank stores its reply under `(query_id, sender, ref)` and returns the stored reply to a retry. Only final states are stored; `PENDING` and `TIMED_OUT` are recomputed |
 | Search ID | `sha256("<bank>:<incoming payment>:<outgoing payment>")`, bank-local only. The same detection always maps to the same search row |
-| Hop accounting and limit | `HOP_LIMIT = 4` (matches `prepare.py`): a chain holds hops 0–4, so at most 5 transfers. The initiator already knows 2, so the legs share a budget of 3 extra transfers. The downstream leg runs first; the upstream leg gets what is left. `hops_remaining` drops by one each time a bank adds a transfer |
+| Hop accounting and limit | `HOP_LIMIT = 4`: a chain holds hops 0–4, so at most 5 transfers. The initiator already knows 2, so the legs share a budget of 3 extra transfers. The downstream leg runs first; the upstream leg gets what is left. `hops_remaining` drops by one each time a bank adds a transfer |
 | Deadline | `SEARCH_SECONDS = 10`. One absolute UTC deadline, set by the initiator and passed on unchanged. Each gRPC call's timeout is the time left until it. **pending work:** relative; only the initiator keeps a local deadline, and each nested call gets the time remaining |
 | Visited-token handling (loop prevention) | The request carries every token already in the search, including those found by the other leg. A bank whose next token is already visited signs the closing link and stops |
 | Branching cap | `BRANCH_CAP = 1`: linear chains only. If a bank's rule finds more than one onward link, it follows the first (lowest payment ID) and the result becomes `PARTIAL` |
@@ -125,7 +125,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 | Payload | Key | Contents |
 | --- | --- | --- |
 | Chain | `chain_digest` | The `ChainResult`, plus this bank's own legs (payment ID, account, amount) from the token index. Sent when the `chains` row is inserted or upgraded |
-| Hit | hit ID | The scorer's hit from Valkey: rule, account, payments; it becomes an alert |
+| Tier 1 hit | hit ID | The scorer's hit from Valkey: rule, account, payments |
 | Pending search | search ID | "Waiting for bank X", upgraded when the retry confirms |
 | Fully internal chain | hit ID | A local-only chain, with no peer search |
 
@@ -162,12 +162,10 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
-| Valkey layout ([streaming.md](streaming.md#search-handoff)) | Cindy → Zane | Key names, token-index value, local links (including collapsed intra-bank links), `hit:` keys, windows, TTL and trim | **draft**, sample TODO | Wed 4 Nov |
 | `.proto` v1 ([protocol.md](protocol.md#messages)) | Zane ↔ Caleb | `bytes` token, no absolute deadline, unknown fields rejected, the schema test's allow and forbid lists | **draft**, sample TODO | Wed 4 Nov |
-| Node → case service ([protocol.md](protocol.md#result-delivery-to-the-case-service)) | Zane → Jia Rui | Payloads (chains with own legs, hits, pending and internal cases), keys, retry and dead letter | **draft**, sample TODO | Wed 4 Nov |
-| Alert ranking ([case.md](case.md#cases-and-alerts)) | Cindy, Zane → Jia Rui | Rule-backed claim, the "confirmed by" label, ranking order; thresholds come from the offline sweep | **draft**, sample TODO | Wed 4 Nov |
-| `check_result` ([security.md](security.md)) | Caleb → Zane, Jia Rui | Signature, the six conditions, how a failure is reported | **draft** | Wed 4 Nov |
+| Node → case service ([protocol.md](protocol.md#result-delivery-to-the-case-service)) | Zane → Jia Rui | Payloads (chains with own legs, Tier 1 hits, pending and internal cases), keys, retry and dead letter | **draft**, sample TODO | Wed 4 Nov |
+
+Also part of: [Token and key API](security.md#interfaces), [Valkey layout](streaming.md#interfaces), [Alert tiers](case.md#interfaces), [`check_result`](security.md#interfaces).
 
 ## Open
 
