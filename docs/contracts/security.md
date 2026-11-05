@@ -157,9 +157,11 @@ Zane/Jia Rui; this PR supplies only the security rule.
 The schema security test recursively checks every RPC input/output and nested message
 against exact per-message `APPROVED_FIELDS` and unchanged `FORBIDDEN_FIELDS`.
 Caleb must review schema field additions before updating that approval list.
-Runtime unknown-field rejection and deadline/retry semantics belong to Zane's #17;
-this implementation does not duplicate them. The existing absolute deadline is retained
-pending his agreed protocol changes. `check_result` remains the shared security hook.
+Zane's #17 supplies the integrated `has_unknown_fields` helper: Trace rejects unknown
+fields before cache access, and shared `check_result` rejects them for both result
+receivers. Outgoing calls reject unreadable replies, including undefined states.
+The existing absolute deadline and Zane's transient/dead-letter behaviour are retained;
+future deadline changes remain his protocol work.
 
 ## mTLS and deployment requirements
 
@@ -208,7 +210,9 @@ No Lambda deployment/client or cloud acceptance evidence is supplied here.
 ## Interfaces and verification
 
 Cindy integrates the raw-byte pair/version API and overlap lifecycle into Valkey/TTLs.
-Zane integrates shared validation with #17 and durable case delivery. Jia Rui keeps
+The consume-only scorer CLI uses `--key-version k1 --x25519-private PATH` and repeated
+`--peer-public-key PEER PATH` options. Ingestor events pass through unchanged.
+Zane owns durable case delivery; his #17 checks use the shared result validator. Jia Rui keeps
 `/results` on `check_result`, owns enrichment, and updates case.md's report field list
 for `signing_key_version` and `truncated`. Cross-version case reconciliation is not
 implemented. Isaac owns deployment/mounts and the live evidence above.

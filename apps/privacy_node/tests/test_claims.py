@@ -153,6 +153,7 @@ def test_legitimate_loop_with_repeated_banks_keeps_independent_witnesses(banks):
         "anchor",
         "query",
         "recipient",
+        "unknown",
     ],
 )
 def test_shared_result_attack_cases(banks, attack):
@@ -186,6 +187,11 @@ def test_shared_result_attack_cases(banks, attack):
     elif attack == "recipient":
         result.claims[0].recipient = "C"
         resign(result, banks)
+    elif attack == "unknown":
+        claim = result.claims[0]
+        claim.CopyFrom(
+            pb.LinkClaim.FromString(claim.SerializeToString() + b"\x98\x06\x01")
+        )
     with pytest.raises(ValueError):
         check_result(result, keys, bank)
 

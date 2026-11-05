@@ -147,12 +147,22 @@ def chain_digest(claims):
     ).hexdigest()
 
 
+def has_unknown_fields(message):
+    """True if the message, or any message nested in it, carries fields our .proto doesn't define."""
+    known = type(message)()
+    known.CopyFrom(message)
+    known.DiscardUnknownFields()  # recursive
+    return known.ByteSize() != message.ByteSize()
+
+
 def check_result(result, public_keys, bank):
     """Return a verified copy (cuts become PARTIAL), or raise ValueError.
 
     Shared by peer Deliver and bank-local case /results; neither consumer may
     store the unnormalised input after calling this function.
     """
+    if has_unknown_fields(result):
+        raise ValueError("unknown fields")
     claims, sender = list(result.claims), result.sender
     own = [i for i, c in enumerate(claims) if c.signer == c.recipient == sender]
     if (

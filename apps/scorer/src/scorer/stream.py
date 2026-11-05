@@ -1,62 +1,22 @@
-"""Pipe replay into `python -m scorer.stream ingest B`; run `... consume B` separately.
+"""Consume `bank-<X>-transactions` and print local candidate links as JSONL.
 
-Both accept --bootstrap-servers (default localhost:9092). Consumers use one
-bank-specific group; use a fresh --group to replay history after a restart.
-Output is JSONL local candidate links, not confirmed cross-bank alerts.
+The ingestor (apps/ingestor) produces the events. Use a fresh --group to replay
+history after a restart. Output is local candidates, not confirmed cross-bank alerts.
 """
 
 import argparse
 import json
 import sys
-import time
 
-from confluent_kafka import Consumer, KafkaException, Producer
+from confluent_kafka import Consumer, KafkaException
 
 from scorer.baseline import make_scorer, thresholds
-from scorer.score import validate
 from scorer.token_index import TokenIndex
 from security import AgreementFiles
 
 
 def topic(bank):
     return f"bank-{bank}-transactions"
-
-
-def ingest(lines, bank, producer):
-    errors = []
-
-    def delivered(error, message):
-        if error:
-            errors.append(str(error))
-
-    try:
-        for line in lines:
-            event = validate(json.loads(line), bank)
-            deadline = time.monotonic() + 30
-            while True:
-                if errors:
-                    raise RuntimeError(errors[0])
-                try:
-                    producer.produce(
-                        topic(bank),
-                        key=event["account"],
-                        value=json.dumps(event),
-                        on_delivery=delivered,
-                    )
-                    break
-                except BufferError:
-                    producer.poll(0.1)
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            "Kafka producer queue remained full for 30 seconds"
-                        ) from None
-            producer.poll(0)
-            if errors:
-                raise RuntimeError(errors[0])
-    finally:
-        remaining = producer.flush(30)
-    if remaining or errors:
-        raise RuntimeError(f"Kafka delivery failed: {remaining} pending, {errors}")
 
 
 def require_full_replay(consumer, partitions):
@@ -109,8 +69,8 @@ def consume(
                     raise KafkaException(message.error())
                 print(message.error(), file=sys.stderr)
                 continue
-            # Fail without committing malformed or wrongly routed records.
-            event = validate(json.loads(message.value()), scorer.bank)
+            # Fail without committing wrongly routed records.
+            event = json.loads(message.value())
             if (
                 message.topic() != topic(scorer.bank)
                 or message.key() != event["account"].encode()
@@ -135,7 +95,6 @@ def consume(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("ingest", "consume"))
     thresholds(parser)
     parser.add_argument("--bootstrap-servers", default="localhost:9092")
     parser.add_argument("--group", help="default: scorer-<bank>")
@@ -162,14 +121,9 @@ def main():
         or args.x25519_private
         or args.max_token_references is not None
     ):
-        if (
-            args.mode != "consume"
-            or not args.key_version
-            or not args.peer_public_key
-            or not args.x25519_private
-        ):
+        if not args.key_version or not args.peer_public_key or not args.x25519_private:
             parser.error(
-                "Indexing requires consume, --key-version, --x25519-private "
+                "Indexing requires --key-version, --x25519-private "
                 "and --peer-public-key"
             )
         paths = {}
@@ -183,23 +137,19 @@ def main():
             AgreementFiles(args.x25519_private, paths),
             args.max_token_references,
         )
-    config = {"bootstrap.servers": args.bootstrap_servers}
-    if args.mode == "ingest":
-        ingest(sys.stdin, args.bank, Producer(config | {"enable.idempotence": True}))
-    else:
-        scorer = make_scorer(args)
-        consumer = Consumer(
-            config
-            | {
-                "group.id": args.group or f"scorer-{args.bank}",
-                "auto.offset.reset": "earliest",
-                "enable.auto.commit": False,
-            }
-        )
-        try:
-            consume(consumer, scorer, token_index=token_index)
-        except KeyboardInterrupt:
-            pass
+    scorer = make_scorer(args)
+    consumer = Consumer(
+        {
+            "bootstrap.servers": args.bootstrap_servers,
+            "group.id": args.group or f"scorer-{args.bank}",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+    try:
+        consume(consumer, scorer, token_index=token_index)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

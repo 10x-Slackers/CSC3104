@@ -26,7 +26,7 @@ from privacy_node.claims import (
 from privacy_node.demo import prepare_demo_keys, start_banks
 from privacy_node.keys import pair_paths, public_keys
 from privacy_node.local_state import LocalBank
-from privacy_node.node import HOP_LIMIT, Node, now, serve
+from privacy_node.node import HOP_LIMIT, Node, failure_state, now, serve
 from privacy_node.store import Store
 from scorer.score import Scorer
 from scorer.stream import consume
@@ -119,7 +119,7 @@ def test_peer_messages_carry_no_raw_fields(banks):
     nodes, _ = banks
     for result in run_all(nodes).values():
         wire = result.SerializeToString()
-        for raw in (b"p06", b"p07", b"B-m1", b"A-m0", b"9500.0", b"Wire"):
+        for raw in (b"p06", b"p07", b"B-m1", b"A-m0", b"9500.0", b"MEPS+"):
             assert raw not in wire
 
 
@@ -888,3 +888,107 @@ def test_query_version_switch_during_search_keeps_one_token_scope(
     assert initiator.key_version == "k2"
     assert {claim.key_version for claim in result.claims} == {"k1"}
     assert check_result(result, initiator.public_keys, "B").state == pb.CONFIRMED
+
+
+# Field 99 is not in our .proto: tag 0x9a 0x06 (field 99, length-delimited), length 10.
+SMUGGLED = b"\x9a\x06\x0a9500.00USD"
+
+
+def test_request_with_unknown_fields_is_rejected(banks):
+    nodes, _ = banks
+    request = pb.TraceRequest(
+        query_id="q1",
+        sender="B",
+        key_version="k1",
+        ref=nodes["C"].local.refs["p07", "in"],
+        direction=pb.DOWNSTREAM,
+        hops_remaining=3,
+        deadline=(now() + timedelta(seconds=5)).isoformat(),
+    )
+    raw = request.SerializeToString() + SMUGGLED  # bytes a modified peer could send
+    with grpc.insecure_channel(nodes["B"].peers["C"]) as channel:
+        send_raw = channel.unary_unary(
+            "/csc3104.privacy.v1.PrivacyNode/Trace",
+            response_deserializer=pb.TraceReply.FromString,
+        )
+        with pytest.raises(grpc.RpcError) as error:
+            send_raw(raw, timeout=5)
+    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_reply_with_unknown_fields_is_not_relayed(banks, monkeypatch):
+    nodes, _ = banks
+    real_follow = nodes["C"].follow
+
+    def smuggling_follow(request):
+        reply = real_follow(request)
+        tainted = reply.claims[0].SerializeToString() + SMUGGLED
+        reply.claims[0].CopyFrom(pb.LinkClaim.FromString(tainted))
+        return reply
+
+    monkeypatch.setattr(nodes["C"], "follow", smuggling_follow)
+    assert nodes["B"].search("p06", "p07").state == pb.INVALID_CLAIM
+    assert all(n.store.chains() == [] for n in nodes.values())
+
+
+def test_reply_with_undefined_state_is_invalid(banks, monkeypatch):
+    nodes, _ = banks
+    real_follow = nodes["C"].follow
+
+    def undefined_state_follow(request):
+        reply = real_follow(request)
+        reply.state = 99  # proto3 keeps an unknown enum number as a plain int
+        return reply
+
+    monkeypatch.setattr(nodes["C"], "follow", undefined_state_follow)
+    assert nodes["B"].search("p06", "p07").state == pb.INVALID_CLAIM
+    assert all(n.store.chains() == [] for n in nodes.values())
+    nodes["B"].housekeeping()  # the background loop keeps running
+
+
+def test_delivery_with_unknown_fields_is_rejected(banks):
+    nodes, _ = banks
+    result = nodes["B"].search("p06", "p07")  # valid: C would store it
+    nodes["C"].store = Store()
+    raw = result.SerializeToString() + SMUGGLED
+    with grpc.insecure_channel(nodes["B"].peers["C"]) as channel:
+        send_raw = channel.unary_unary(
+            "/csc3104.privacy.v1.PrivacyNode/Deliver",
+            response_deserializer=pb.Ack.FromString,
+        )
+        with pytest.raises(grpc.RpcError) as error:
+            send_raw(raw, timeout=5)
+    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert nodes["C"].store.chains() == []
+
+
+@pytest.mark.parametrize(
+    ("code", "state"),
+    [
+        (grpc.StatusCode.UNAVAILABLE, pb.PENDING),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, pb.PENDING),
+        (grpc.StatusCode.ABORTED, pb.PENDING),
+        (grpc.StatusCode.DEADLINE_EXCEEDED, pb.TIMED_OUT),
+        (grpc.StatusCode.INVALID_ARGUMENT, pb.FAILED),
+        (grpc.StatusCode.INTERNAL, pb.FAILED),
+    ],
+)
+def test_failure_state_mapping(code, state):
+    error = Mock()
+    error.code.return_value = code
+    assert failure_state(error) == state
+
+
+def test_rejected_delivery_is_dead_lettered(banks):
+    nodes, _ = banks
+    result = nodes["B"].search("p06", "p07")
+    nodes["B"].deliver_pending()
+    forged = pb.ChainResult()
+    forged.CopyFrom(result)
+    forged.claims[0].signer = "C"  # C rejects it: A signed that claim, not C
+    forged.chain_digest = "forged"
+    nodes["B"].store.save_chain(forged, deliver_to=["C"])
+
+    nodes["B"].deliver_pending()
+    assert nodes["B"].store.pending_deliveries() == []
+    assert nodes["B"].store.dead_letters() == [("forged", "C")]

@@ -1,6 +1,5 @@
 """Bank-local raw-byte token references with overlapping key versions."""
 
-from scorer.score import validate
 from security import canonical_pair, derive_token, load_pairwise_keys
 
 
@@ -85,8 +84,7 @@ class TokenIndex:
         pair = canonical_pair(*bank_pair)
         return derive_token(payment_id, *pair, self._keys[version][pair], version)
 
-    def tokens(self, event):
-        e = validate(event, self.bank)
+    def tokens(self, e):
         if e["counterparty_bank"] == self.bank:
             return {}
         pair = canonical_pair(self.bank, e["counterparty_bank"])
