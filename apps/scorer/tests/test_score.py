@@ -106,6 +106,25 @@ def test_late_events_and_trim():
     assert set(scorer.state.window("bob")) == {("new", "in")}
 
 
+def test_late_event_finds_partner_kept_for_twice_the_window():
+    scorer = Scorer("B")
+    scorer.process(event())
+    scorer.process(event("later", event_time="2022-09-09T13:00:00Z"))  # 100 h on
+    late = out(event_time="2022-09-06T15:00:00Z")  # 30 h after the in leg, 70 h late
+    assert [x["incoming_payment_id"] for x in scorer.process(late)] == ["in"]
+
+
+def test_late_payment_keeps_the_newer_last_paid():
+    scorer = Scorer("B")
+    scorer.process(out("new", time="12:00:00"))
+    scorer.process(out("old", time="09:00:00"))
+    assert (
+        scorer.state.last_paid("bob", "C-carol")[0]
+        == scorer.state.window("bob")["new", "out"][0]
+    )
+    assert [h["rule"] for h in scorer.state.hits()] == ["new_payee"]
+
+
 @pytest.mark.parametrize(
     "second,repeat", [("15:00:00", True), ("2022-09-06T09:00:01Z", False)]
 )

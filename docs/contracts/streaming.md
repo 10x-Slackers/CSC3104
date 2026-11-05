@@ -6,7 +6,7 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
-> - **State in Valkey:** window state, token index, local links, payee sets and hits move out of memory, shared with the privacy node, which stops running the scorer in-process ([Search handoff](#search-handoff)).
+> - **State in Valkey:** window state, token index, local links, `last:` keys and hits move out of memory, shared with the privacy node, which stops running the scorer in-process ([Search handoff](#search-handoff)).
 > - **Commits:** `enable.auto.offset.store=false`, `store_offsets()` after the Valkey write, auto-commit on (still at-least-once; duplicates are harmless because `detection_id` is deterministic).
 > - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
 
@@ -21,7 +21,7 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Record value | JSON with nine fields: the eight in [data.md](data.md#bank-event-files-bank_abccsv) plus `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
 | Record headers | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, which latency is measured from ([evaluation.md](../evaluation.md#metric-definitions)) |
 | Intra-bank transfers | Two records, `out` then `in`, with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, then key `B-carol`, `ce_id` `p02-in` |
-| Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. One partition per bank preserves global replay order when the shared history cap matters. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order no longer matters |
+| Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order doesn't matter |
 | Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events more than 72 h (the chain window) behind the latest event seen for that account. Events are kept for twice that, so an accepted late event still finds its partner |
 
 The [ingestor](data.md#ingestor) (`apps/ingestor/`) validates every event and
@@ -34,9 +34,11 @@ because the broker advertises in-cluster addresses. The consumer may start befor
 the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
-Scorer state is in a `MemoryState` ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)), trimmed by event
-time per account; there is no count cap. An account's watermark is its latest
-kept event, so nothing else needs storing. Consumer offsets
+Scorer state is in a `MemoryState` ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)), whose window is
+trimmed by event time per account, with no count cap; an account's watermark is its
+latest kept event. The other entries (`pay`, links, hits, `last`) are kept for the
+life of the process until the Valkey TTL lands, about 536 MB for Bank B over all of
+`altman-small`. Consumer offsets
 commit synchronously after optional indexing, scoring and output flush succeed;
 processing and fatal Kafka errors stop the consumer without committing the failed record.
 
@@ -94,6 +96,12 @@ search. Ground-truth labels are never used. JSONL output contains local candidat
 links, not confirmed chains or analyst alerts: bank, account, incoming/outgoing
 payment IDs and times, ratio, delay in seconds, `detection_id` and `rules` (`fast`,
 `chain` or both). Rule hits (chain, new payee, quick repeat) go to the state, not the output.
+
+Quick repeat depends on arrival order. In file order it's exact. Live, an account's
+events share a partition and replay runs in time order, so an in leg normally arrives
+before its out leg. If it doesn't, the link and `chain` hit are still written, but that
+out leg doesn't count as flagged for a later quick repeat. A late, older payment never
+replaces a newer `last:` entry and is never a quick repeat.
 
 `detection_id` is SHA-256 of the UTF-8 compact JSON array
 `[bank, incoming_payment_id, outgoing_payment_id]`, with default JSON escaping.
@@ -154,7 +162,7 @@ are unchanged.
 | `pay:<payment_id>:<direction>` | hash | `account`, `amount`, `event_time`, `counterparty_bank`, and `token` (hex) for cross-bank events. Every event | Node: own legs, the token for a payment, which bank to ask next |
 | `tok:<pair>:<key_version>:<token>` | hash | `payment_id`, `direction`, `account`, `amount`. Cross-bank events only; `<token>` is hex | Node: peer lookups |
 | `link:in:<payment_id>` / `link:out:<payment_id>` | set | Outgoing payments a fast or chain rule linked to this incoming one, and the reverse | Node: onward and backward links |
-| `hit:<hit_id>` | hash | `rule` (`chain`, `new_payee`, `quick_repeat`; the fast rule writes no hit), `account`, `payments` (JSON list), `event_time` | Node |
+| `hit:<hit_id>` | hash | `rule` (`chain`, `new_payee`, `quick_repeat`; the fast rule writes no hit), `account`, `payments` (JSON list) | Node |
 | `hits` | stream | One entry `hit <hit_id>` per new hit | Node, with `XREADGROUP` |
 | `last:<account>:<counterparty_account>` | string | `<unix seconds>:<0 or 1>`: this customer's last payment to that payee, and whether it was flagged (a new payee hit or a chain's outgoing leg). None yet means a new payee | Scorer: new payee, quick repeat |
 
@@ -167,7 +175,7 @@ are unchanged.
 - **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `last:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
 - **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group.
 
-Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The card payment `p02` gets only `pay:` keys (**pending work:** `p02` becomes GIRO, since only GIRO and MEPS+ are ingested, so its keys here change; [data.md](data.md#ingestor)). Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
+Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The intra-bank GIRO payment `p02` (B-bob → B-carol) writes window, `pay:` and `last:` keys but no hit. Tokens are placeholders until the 16-byte test vector is frozen ([security.md](security.md)).
 
 Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
 `PENDING` until a fixed deadline from that search's first attempt. Retries use

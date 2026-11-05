@@ -594,8 +594,9 @@ def test_concurrent_state_reads_and_old_token_retention(tmp_path):
     assert len(local.detections) == 4
     ref = local.refs["p06", "in"]
     local.process(
-        rows[3] | {"payment_id": "later", "event_time": "2022-09-06T12:00:00Z"}
+        rows[3] | {"payment_id": "later", "event_time": "2022-09-12T12:00:00Z"}
     )
+    assert ("p06", "in") not in local.scorer.state.window("B-m1")
     assert local.lookup(ref.pair, "k1", ref.token, "in") == "p06"
 
 

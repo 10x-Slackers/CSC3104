@@ -39,7 +39,9 @@ class MemoryState:
         return self.paid.get((account, payee))
 
     def set_last_paid(self, account, payee, ts, flagged):
-        self.paid[account, payee] = (ts, flagged)
+        # a late, older payment must not replace a newer one
+        if ts >= self.paid.get((account, payee), (ts,))[0]:
+            self.paid[account, payee] = (ts, flagged)
 
     # read by the node and the offline evaluator
 

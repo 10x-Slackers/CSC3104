@@ -79,10 +79,8 @@ class Scorer:
                 or other["payment_id"] == e["payment_id"]
             ):
                 continue
-            (t_in, inc), (t_out, out) = sorted(
-                [(ts, other), (now, e)], key=lambda x: x[1]["direction"]
-            )
-            delay = t_out - t_in
+            inc, out = (other, e) if e["direction"] == "out" else (e, other)
+            delay = now - ts if e["direction"] == "out" else ts - now
             ratio = Decimal(str(out["amount"])) / Decimal(str(inc["amount"]))
             rules = []
             if (
@@ -133,7 +131,7 @@ class Scorer:
             if cross and last is None:
                 self.hit("new_payee", account, e["payment_id"])
                 flagged = True
-            elif cross and last[1] and now - last[0] <= REPEAT_WINDOW:
+            elif cross and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
                 self.hit("quick_repeat", account, e["payment_id"])
             self.state.set_last_paid(account, payee, now, flagged)
         self.state.add_event(account, key, now, e)
