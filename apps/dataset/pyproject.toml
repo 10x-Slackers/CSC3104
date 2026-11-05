@@ -3,7 +3,10 @@ name = "dataset"
 version = "0.1.0"
 description = "Role 1: IBM AML dataset preparation and replay for Banks A, B and C"
 requires-python = ">=3.12"
-dependencies = ["kagglehub>=1.0.2", "pandas>=3.0.6"]
+dependencies = ["ingestor", "kagglehub>=1.0.2", "pandas>=3.0.6"]
+
+[tool.uv.sources]
+ingestor = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
