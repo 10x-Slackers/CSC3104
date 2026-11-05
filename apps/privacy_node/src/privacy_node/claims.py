@@ -4,7 +4,6 @@ import hashlib
 import json
 from itertools import pairwise
 
-from google.protobuf import unknown_fields
 from google.protobuf.json_format import MessageToDict
 
 from security import check_peer_payload, verify
@@ -89,13 +88,8 @@ def check_payload(message):
 
 
 def has_unknown_fields(message):
-    """True if this message, or any message inside it, has fields our .proto doesn't define."""
-    if len(unknown_fields.UnknownFieldSet(message)):
-        return True
-    for field, value in message.ListFields():
-        if field.message_type is None:  # a scalar: nothing nested
-            continue
-        children = value if field.is_repeated else [value]
-        if any(has_unknown_fields(child) for child in children):
-            return True
-    return False
+    """True if the message, or any message nested in it, carries fields our .proto doesn't define."""
+    known = type(message)()
+    known.CopyFrom(message)
+    known.DiscardUnknownFields()  # recursive
+    return known.ByteSize() != message.ByteSize()
