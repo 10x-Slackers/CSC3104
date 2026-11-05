@@ -688,6 +688,37 @@ def test_reply_with_unknown_fields_is_not_relayed(banks, monkeypatch):
     assert all(n.store.chains() == [] for n in nodes.values())
 
 
+def test_reply_with_undefined_state_is_invalid(banks, monkeypatch):
+    nodes, _ = banks
+    real_follow = nodes["C"].follow
+
+    def undefined_state_follow(request):
+        reply = real_follow(request)
+        reply.state = 99  # proto3 keeps an unknown enum number as a plain int
+        return reply
+
+    monkeypatch.setattr(nodes["C"], "follow", undefined_state_follow)
+    assert nodes["B"].search("p06", "p07").state == pb.INVALID_CLAIM
+    assert all(n.store.chains() == [] for n in nodes.values())
+    nodes["B"].housekeeping()  # the background loop keeps running
+
+
+def test_delivery_with_unknown_fields_is_rejected(banks):
+    nodes, _ = banks
+    result = nodes["B"].search("p06", "p07")  # valid: C would store it
+    nodes["C"].store = Store()
+    raw = result.SerializeToString() + SMUGGLED
+    with grpc.insecure_channel(nodes["B"].peers["C"]) as channel:
+        send_raw = channel.unary_unary(
+            "/csc3104.privacy.v1.PrivacyNode/Deliver",
+            response_deserializer=pb.Ack.FromString,
+        )
+        with pytest.raises(grpc.RpcError) as error:
+            send_raw(raw, timeout=5)
+    assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert nodes["C"].store.chains() == []
+
+
 @pytest.mark.parametrize(
     ("code", "state"),
     [

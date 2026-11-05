@@ -41,7 +41,7 @@ Searches start from the scorer's detection, wherever it is, because a chain is o
 
 ## Messages
 
-Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending. Every received message, including nested claims, is checked for protobuf fields the `.proto` doesn't define (`has_unknown_fields`): a request carrying one is rejected with `INVALID_ARGUMENT`, and a reply carrying one makes the leg `INVALID_CLAIM`, so it is never relayed.
+Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending. Every received message, including nested claims, is checked for protobuf fields the `.proto` doesn't define (`has_unknown_fields`): a request carrying one is rejected with `INVALID_ARGUMENT`, and a reply carrying one, or a `state` outside the `State` enum, becomes `INVALID_CLAIM` in `Node.call()`, so it is never relayed or stored.
 
 | Message | Fields | Notes |
 | --- | --- | --- |
@@ -134,7 +134,7 @@ Own-leg details travel only inside the bank, never in a peer message. The case s
 ## Running and testing
 
 ```sh
-uv run pytest apps/privacy_node             # 38 protocol tests
+uv run pytest apps/privacy_node             # 40 protocol tests
 uv run python -m privacy_node.demo          # three banks on localhost, prints each trace
 uv run python -m privacy_node.keys .secrets # lab keys (git-ignored)
 ```

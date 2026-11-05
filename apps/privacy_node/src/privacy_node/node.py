@@ -63,6 +63,17 @@ def worst(*states):
     return max(states, key=SEVERITY.index)
 
 
+def unreadable(reply):
+    """A peer reply carrying a field or a state our .proto doesn't define.
+
+    proto3 keeps an unknown enum number as a plain int in a known field, so
+    has_unknown_fields can't see state=99; worst() would crash on it instead.
+    """
+    if has_unknown_fields(reply):
+        return True
+    return "state" in reply.DESCRIPTOR.fields_by_name and reply.state not in SEVERITY
+
+
 # The same request may succeed later (https://grpc.io/docs/guides/status-codes/).
 TRANSIENT = frozenset(
     {
@@ -110,7 +121,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
         with grpc.insecure_channel(self.peers[bank]) as channel:  # M3: mTLS
             stub = pb_grpc.PrivacyNodeStub(channel)
             timeout = (deadline - now()).total_seconds()
-            return getattr(stub, method)(request, timeout=timeout)
+            reply = getattr(stub, method)(request, timeout=timeout)
+        if not unreadable(reply):
+            return reply
+        # Never relay or use what we can't read. Deliver's Ack is only a receipt.
+        log.warning("unreadable %s reply from bank=%s", method, bank)
+        return pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
 
     def request(self, query_id, ref, direction, hops_remaining, deadline, visited):
         return pb.TraceRequest(
@@ -197,8 +213,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
             )
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
-        if has_unknown_fields(reply):  # never relay what we can't read
-            return pb.TraceReply(state=pb.INVALID_CLAIM, claims=[claim(next_ref)])
         return pb.TraceReply(
             state=worst(state, reply.state), claims=[claim(next_ref), *reply.claims]
         )
@@ -240,8 +254,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
             )
         except grpc.RpcError as error:
             return failure_state(error), []
-        if has_unknown_fields(reply):
-            return pb.INVALID_CLAIM, []
         claims = list(reply.claims)
         fresh = bound(claims, self.bank, query_id)
         return (reply.state if fresh else pb.INVALID_CLAIM), claims
