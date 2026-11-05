@@ -15,6 +15,7 @@ and use a fresh --group to rebuild state. --search starts live candidates.
 
 import argparse
 import hashlib
+import logging
 import signal
 import threading
 import traceback
@@ -32,6 +33,7 @@ from privacy_node.claims import (
     check_payload,
     claim_bytes,
     complete,
+    has_unknown_fields,
     key,
     refs,
     valid_chain,
@@ -40,6 +42,8 @@ from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
 from scorer.stream import consume
 from security import load_signing_key, load_verification_key, sign
+
+log = logging.getLogger(__name__)
 
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
 BRANCH_CAP = 1  # linear chains only; extra local links make the result PARTIAL
@@ -59,11 +63,32 @@ def worst(*states):
     return max(states, key=SEVERITY.index)
 
 
+def unreadable(reply):
+    """A peer reply carrying a field or a state our .proto doesn't define.
+
+    proto3 keeps an unknown enum number as a plain int in a known field, so
+    has_unknown_fields can't see state=99; worst() would crash on it instead.
+    """
+    if has_unknown_fields(reply):
+        return True
+    return "state" in reply.DESCRIPTOR.fields_by_name and reply.state not in SEVERITY
+
+
+# The same request may succeed later (https://grpc.io/docs/guides/status-codes/).
+TRANSIENT = frozenset(
+    {
+        grpc.StatusCode.UNAVAILABLE,
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        grpc.StatusCode.ABORTED,
+    }
+)
+
+
 def failure_state(error):
     if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
         return pb.TIMED_OUT
-    if error.code() == grpc.StatusCode.UNAVAILABLE:
-        return pb.PENDING  # unreachable bank: retried after recovery
+    if error.code() in TRANSIENT:
+        return pb.PENDING  # the bank may answer later: retried by housekeeping
     return pb.FAILED  # the peer rejected or failed the query: retrying won't help
 
 
@@ -96,7 +121,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
         with grpc.insecure_channel(self.peers[bank]) as channel:  # M3: mTLS
             stub = pb_grpc.PrivacyNodeStub(channel)
             timeout = (deadline - now()).total_seconds()
-            return getattr(stub, method)(request, timeout=timeout)
+            reply = getattr(stub, method)(request, timeout=timeout)
+        if not unreadable(reply):
+            return reply
+        # Never relay or use what we can't read. Deliver's Ack is only a receipt.
+        log.warning("unreadable %s reply from bank=%s", method, bank)
+        return pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
 
     def request(self, query_id, ref, direction, hops_remaining, deadline, visited):
         return pb.TraceRequest(
@@ -125,6 +155,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
     # ---- answering a peer -----------------------------------------------
 
     def Trace(self, request, context):
+        if has_unknown_fields(request):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unknown fields")
         slot = f"{request.sender}|{key(request.ref)}"
         stored = self.store.get_reply(request.query_id, slot)
         if stored:
@@ -187,6 +219,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     def Deliver(self, request, context):
         """Store a chain result pushed by the bank that assembled it."""
+        if has_unknown_fields(request):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unknown fields")
         claims, sender = list(request.claims), request.sender
         own = [i for i, c in enumerate(claims) if c.signer == c.recipient == sender]
         up, down = (claims[: own[0]][::-1], claims[own[0] + 1 :]) if own else ([], [])
@@ -300,8 +334,17 @@ class Node(pb_grpc.PrivacyNodeServicer):
             try:
                 self.call(bank, "Deliver", result, now() + timedelta(seconds=5))
                 self.store.ack(result.chain_digest, bank)
-            except grpc.RpcError:
-                pass  # stays in the outbox until the bank is back
+            except grpc.RpcError as error:
+                if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
+                    continue  # stays in the outbox until the bank is back
+                # The receiver read it and said no, so resending can't help.
+                self.store.dead_letter(result.chain_digest, bank)
+                log.warning(
+                    "dead-lettered chain_digest=%s bank=%s reason=%s",
+                    result.chain_digest,
+                    bank,
+                    error.details(),
+                )
 
     def housekeeping(self, stop=None):
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""

@@ -85,3 +85,11 @@ def check_payload(message):
     check_peer_payload(
         MessageToDict(message, preserving_proto_field_name=True), ALLOWED_FIELDS
     )
+
+
+def has_unknown_fields(message):
+    """True if the message, or any message nested in it, carries fields our .proto doesn't define."""
+    known = type(message)()
+    known.CopyFrom(message)
+    known.DiscardUnknownFields()  # recursive
+    return known.ByteSize() != message.ByteSize()
