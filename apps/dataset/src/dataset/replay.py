@@ -82,9 +82,7 @@ def send(bank, url, q, failed):
         done = txs[-1] is None  # the end of the workload
         if done:
             txs = txs[:-1]
-        else:
-            txs
-        if not txs:
+        if not txs or failed.is_set():
             return
         msg_id = f"replay-{bank}-{seq:06d}"
         hdr = {"MsgId": msg_id, "CreDtTm": txs[-1]["AccptncDtTm"]}
