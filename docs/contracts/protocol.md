@@ -6,8 +6,7 @@ Owner: Zane · Partners: Caleb (security), Jia Rui (result delivery, cases), Isa
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **Relative deadlines:** drop the absolute `deadline` field and pass `timeout=context.time_remaining()` on nested calls, so clock skew can't time out every search. `SEARCH_SECONDS` and the `Deliver` timeout come from measured p99.9.
 > - **Retries:** only at the initiator, with capped exponential backoff and full jitter (`random(0, min(300 s, 10 s × 2^attempts))`, stored as `attempts` and `next_at`), and expiry: after 24 h a search becomes **unresolved**. Fresh `query_id` per retry stays.
-> - **Status mapping:** `RESOURCE_EXHAUSTED` and `ABORTED` become pending, not failed. Rejected deliveries (`INVALID_ARGUMENT`) are dead-lettered instead of retried forever.
-> - **Messages:** reject unknown protobuf fields with `INVALID_ARGUMENT`; tokens become 16-byte `bytes` ([security.md](security.md)); a schema test replaces the per-message allowlist walk.
+> - **Messages:** tokens become 16-byte `bytes` ([security.md](security.md)); a schema test replaces the per-message allowlist walk.
 > - **State and replicas:** `store.py` moves to PostgreSQL; token index and local links are read from Valkey ([streaming.md](streaming.md#search-handoff)); 2 replicas, with housekeeping under a PostgreSQL advisory lock; a gRPC health service (not serving until state is ready).
 > - **Delivery to the case service** through the same outbox ([Result delivery to the case service](#result-delivery-to-the-case-service)); one shared `check_result` (Caleb) used by `Deliver` and the case service.
 > - **mTLS** with the authenticated bank matched to `sender`.
@@ -42,7 +41,7 @@ Searches start from the scorer's detection, wherever it is, because a chain is o
 
 ## Messages
 
-Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending.
+Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending. Every received message, including nested claims, is checked for protobuf fields the `.proto` doesn't define (`has_unknown_fields`): a request carrying one is rejected with `INVALID_ARGUMENT`, and a reply carrying one, or a `state` outside the `State` enum, becomes `INVALID_CLAIM` in `Node.call()`, so it is never relayed or stored.
 
 | Message | Fields | Notes |
 | --- | --- | --- |
@@ -77,7 +76,7 @@ A claim is valid only if the signature verifies with the signer's configured pub
 | Deadline | `SEARCH_SECONDS = 10`. One absolute UTC deadline, set by the initiator and passed on unchanged. Each gRPC call's timeout is the time left until it. **pending work:** relative; only the initiator keeps a local deadline, and each nested call gets the time remaining |
 | Visited-token handling (loop prevention) | The request carries every token already in the search, including those found by the other leg. A bank whose next token is already visited signs the closing link and stops |
 | Branching cap | `BRANCH_CAP = 1`: linear chains only. If a bank's rule finds more than one onward link, it follows the first (lowest payment ID) and the result becomes `PARTIAL` |
-| Retries | One attempt per peer call. `UNAVAILABLE` → pending and `DEADLINE_EXCEEDED` → timed-out, both re-run by housekeeping; any other peer error → failed, not retried. **pending work:** `RESOURCE_EXHAUSTED` and `ABORTED` → pending; backoff with jitter and 24 h expiry |
+| Retries | One attempt per peer call. `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `ABORTED` → pending and `DEADLINE_EXCEEDED` → timed-out, all re-run by housekeeping; any other peer error → failed, not retried. **pending work:** backoff with jitter and 24 h expiry |
 | Which bank assembles the result | The initiator of that search: up-leg claims reversed, then its own claim, then down-leg claims |
 | Delivery to all involved banks without a global coordinator | Each initiator delivers its own results. The result row and one outbox row per other signer are written in one transaction; `Deliver` is sent once after a batch of searches and retried until acknowledged (housekeeping). The receiver re-verifies every claim, the digest, and that each leg's claims were signed for one query and the bank that asked; it accepts only confirmed or partial results, and stores a chain whose end is a cut as partial whatever the sender says. Any bank can be an initiator, so no single bank is a dependency for the whole system |
 | Chain identity | `chain_digest` = SHA-256 of the sorted set of transfer tokens in the chain, including a transfer named at a cut. Searches started at different banks over the same transfers produce the same digest (tested on loop `o1`, started from B and C). Adopted as the case identity ([case.md](case.md)) |
@@ -91,7 +90,7 @@ When results combine, the worst state wins, in this order: confirmed < partial <
 | confirmed | Both legs reached a natural start/end or closed a loop, and every claim verified |
 | no-match | A queried bank does not hold the token for that pair and direction (or the sender is not in the pair) |
 | partial | Cut by the hop limit or the branching cap. **Final**: stored and delivered as partial evidence |
-| failed | A peer rejected or failed the query (any gRPC error other than unavailable or deadline). Final, not retried, not stored |
+| failed | A peer rejected or failed the query (any gRPC error other than `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `ABORTED` or `DEADLINE_EXCEEDED`). Final, not retried, not stored |
 | pending | A needed bank was unreachable. Claims from available banks are kept; the search is retried by housekeeping |
 | timed-out | The deadline passed. Retried by housekeeping |
 | invalid-claim | A signature, signer, token continuity, query ID or recipient check failed. Never stored as a chain or delivered; its search row keeps no digest |
@@ -114,6 +113,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 - A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps the claims other banks gave, and no chain row is created. Searches that don't need that bank keep going.
 - **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search, then redelivers every unacknowledged outbox row. An error in one pass is logged and the next pass runs as normal. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
 - **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, provided the store file survives (`--db`); M3 moves it to PostgreSQL.
+- **Dead letter:** a delivery the receiver rejects with `INVALID_ARGUMENT` is marked `dead` in the outbox and logged, instead of being resent every pass. Other errors stay in the outbox and are retried. A later upgrade of the same chain clears the mark, since it is a new message.
 - **Retained-state lifetimes (**pending work**):** stored replies expire after the search deadline plus a margin; pending searches expire after 24 h as unresolved; outbox rows are kept until acknowledged or dead-lettered.
 - **"Exactly one alert"** holds for eventual recovery with intact storage, not permanent data loss. The protocol side gives one `chains` row per digest at each bank, tested under repeated searches and redelivery.
 - Concurrent replicas will share query state in PostgreSQL (`INSERT ... ON CONFLICT DO NOTHING`). Until then, run one replica per bank. **pending work:** 2 replicas; each housekeeping pass takes a session-level `pg_try_advisory_lock`, so one replica works at a time and the lock is released if its session dies. Duplicates are harmless because receivers are idempotent.
@@ -134,7 +134,7 @@ Own-leg details travel only inside the bank, never in a peer message. The case s
 ## Running and testing
 
 ```sh
-uv run pytest apps/privacy_node             # 29 protocol tests
+uv run pytest apps/privacy_node             # 40 protocol tests
 uv run python -m privacy_node.demo          # three banks on localhost, prints each trace
 uv run python -m privacy_node.keys .secrets # lab keys (git-ignored)
 ```
