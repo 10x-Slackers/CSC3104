@@ -9,11 +9,18 @@ from datetime import UTC, datetime
 from case.case_store import neighbours
 from security import check_peer_payload
 
-LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token", "key_version")
+LINK_FIELDS = (
+    "signer",
+    "in_pair",
+    "in_token",
+    "out_pair",
+    "out_token",
+    "key_version",
+    "signing_key_version",
+    "truncated",
+)
 # Everything a report client may see. Signatures, accounts, amounts and payment IDs
 # are not listed, so they can never reach a report.
-# DEPENDS ON Role 4 (security and privacy): review of these report input fields
-# (security.md open item "Destination and inputs for the AI report"). Status: pending.
 ALLOWED = {
     "case_id", "state", "raised_at", "merged_into", "links", "results", "decisions",
     "chain_digest", "sender", "action", "decided_at", *LINK_FIELDS,
@@ -21,7 +28,7 @@ ALLOWED = {
 
 
 def report_input(case):
-    """Copy only allow-listed fields from a case, then re-check the result."""
+    """Select only approved evidence fields, with tokens as readable hex."""
     data = {k: case[k] for k in ("case_id", "state", "raised_at", "merged_into")}
     data["links"] = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
     data["results"] = [

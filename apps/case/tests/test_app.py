@@ -52,7 +52,7 @@ def intake(tmp_path):
 
 @pytest.fixture
 def client(db):
-    return TestClient(create_app(db, "B", DOWN, public_keys(), interval=None))
+    return TestClient(create_app(db, "B", DOWN, lambda: public_keys(), interval=None))
 
 
 def m1_id(db):
@@ -124,7 +124,7 @@ def test_undelivered_report_is_shown(client, db):
 
 
 def test_background_dispatcher_delivers_reports(db, intake):
-    with TestClient(create_app(db, "B", intake, public_keys(), 0.01)) as client:
+    with TestClient(create_app(db, "B", intake, lambda: public_keys(), 0.01)) as client:
         client.post(f"/cases/{m1_id(db)}/decision", data={"action": "report"})
         deadline = time.time() + 5
         while SqliteCaseStore(db).outbox(pending=True) and time.time() < deadline:
@@ -141,7 +141,9 @@ def test_json_api(client, db):
 
 def test_results_endpoint_verifies_before_storing(tmp_path):
     client = TestClient(
-        create_app(tmp_path / "cases.db", "B", DOWN, public_keys(), interval=None)
+        create_app(
+            tmp_path / "cases.db", "B", DOWN, lambda: public_keys(), interval=None
+        )
     )
     for result in (o1("B"), o1("C"), o1("B")):  # two starts, then a redelivery
         reply = client.post("/results", content=result.SerializeToString())
@@ -159,7 +161,9 @@ def test_results_endpoint_verifies_before_storing(tmp_path):
 
 def test_nothing_sensitive_in_api_responses_pages_or_logs(db, intake, caplog, capfd):
     caplog.set_level(logging.DEBUG)
-    client = TestClient(create_app(db, "B", intake, public_keys(), interval=None))
+    client = TestClient(
+        create_app(db, "B", intake, lambda: public_keys(), interval=None)
+    )
     texts = [client.post("/results", content=o1().SerializeToString()).text]
     store = SqliteCaseStore(db)
     for case in store.cases():

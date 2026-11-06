@@ -24,7 +24,7 @@ IBM AML synthetic dataset (Altman et al., NeurIPS 2023 Datasets and Benchmarks):
 | Account IDs | Unique only within a bank | Prefixed with the bank ID |
 | Ordinary activity | Ends on 10 Sep; 11–18 Sep has 715 transfers (self-transfers removed), 652 of them laundering, as the generator finishes its patterns | Never used for false-positive counts ([evaluation.md](../evaluation.md#rules)) |
 
-`--altman HI-Medium` reads `HI-Medium_Trans.csv` and `HI-Medium_Patterns.txt` instead (same Kaggle version; 31,898,238 transfers, about 3.0 GB; ordinary activity ends on 16 Sep). They are used once, for the out-of-sample check in [evaluation.md](../evaluation.md#experiments).
+`--altman HI-Medium` reads `HI-Medium_Trans.csv` and `HI-Medium_Patterns.txt` instead (same Kaggle version; 31,898,238 transfers, about 3.0 GB; ordinary activity ends on 16 Sep). They are used for the out-of-sample check in [evaluation.md](../evaluation.md#experiments), and their bank transfers can be replayed on EKS ([Workloads](#workloads)).
 
 ## Preparation rules (`prepare.py`)
 
@@ -93,9 +93,19 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 | `slice-48h` | `apps/dataset/out/slice-48h --start 2022-09-05 --hours 48` | 943,939 | Load tests |
 | `altman-small` | `apps/dataset/out/altman-small` (all of HI-Small) | 4,487,133 | Offline evaluation, dev and eval |
 | `altman-1-6sep` | `apps/dataset/out/altman-1-6sep --start 2022-09-01 --hours 144` | 2,696,535 | Offline = live (experiment 13) |
-| `altman-medium` | `apps/dataset/out/altman-medium --altman HI-Medium` | 29,336,378 | Out-of-sample check |
+| `altman-medium` | `apps/dataset/out/altman-medium --altman HI-Medium` | 29,336,378 | Out-of-sample check; its bank transfers for replay on EKS (below) |
 
-`altman-small` takes about 30 s and 3.9 GB of memory and writes 825 MB; `altman-medium` takes about 4 minutes and 11 GB and writes 5.5 GB. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
+`altman-small` takes about 30 s and writes 825 MB; `altman-medium` takes about 4 minutes and writes 5.5 GB. Peak memory on Linux (a Python 3.12 container) is 2.9 GB for `altman-small` and about 19 GB for `altman-medium` (estimated from 6.5 times the transfers; Docker's 8 GB VM is too small to measure it). macOS reports about 11 GB for altman-medium, because under memory pressure it compresses memory and doesn't count the compressed part. So `altman-medium` is built on a machine with that much memory, not in k3d (an 8 GB VM) or in a pod. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
+
+**Bank transfers only, for replay.**  Replay reads only the out rows of GIRO and MEPS+ payments (each payment once, from its sender's file, then sent to both banks), so the bank files a replay Job gets can leave out the rest. For altman-medium that takes them from 5.5 GB to 413 MB (A 139 MB, B 134 MB, C 140 MB), and replay reads the same 4,509,233 payments in the same order. `workload.json` is copied unchanged because replay needs its `t0`, so its counts are still the full workload's. The offline evaluator keeps reading the full `altman-medium` (rule 6).
+
+```sh
+mkdir -p apps/dataset/out/altman-medium-bt
+for b in A B C; do   # keep the header and outgoing rows ($4, direction) whose payment_format ($9) is GIRO or MEPS+
+  awk -F, 'NR==1 || ($4=="out" && ($9=="GIRO" || $9=="MEPS+"))' apps/dataset/out/altman-medium/bank_$b.csv > apps/dataset/out/altman-medium-bt/bank_$b.csv
+done
+cp apps/dataset/out/altman-medium/workload.json apps/dataset/out/altman-medium-bt/
+```
 
 **One workload for dev and eval.** The plan named two, `altman-dev` and `altman-eval`. Eval reads 1–5 Sep as history, and dev reads the days after 5 Sep so its attempts can finish, so both would hold every day of HI-Small. They share `altman-small`, and the evaluator applies the split ([Splits](#labels-labelscsv-evaluation-only)).
 
@@ -147,7 +157,7 @@ uv run python -m dataset.replay apps/dataset/out/slice-6h --url A=<url> --url B=
 - **Open loop:** the clock never waits for a reply, so a slow ingestor shows as a growing `queued` count in the log.
 - **Responses:** after a `200` the sender moves on. A `5xx`, `429` or network error resends the same batch, with full jitter from 1 s doubling to 30 s, until it succeeds. A `400` stops replay with exit status 1.
 - **Logs:** one JSON line per POST, e.g. `{"ts": 1793868103.47, "service": "replay", "bank": "B", "msg_id": "replay-B-000001", "status": 200, "attempt": 0, "ms": 2.5, "payments": 1, "queued": 0}`, plus the reply when it isn't a `200`, and a last line such as `{"service": "replay", "payments": 18, "seconds": 1.7}`.
-- **Measured:** all of `altman-small` at `--speed 0` (700,510 payments, 1,156,694 deliveries to banks) took about 26 s against ingestors that reply at once, using 31 MB of memory.
+- **Measured:** all of `altman-small` at `--speed 0` (700,510 payments, 1,156,694 deliveries to banks) took about 26 s against ingestors that reply at once, using 31 MB of memory. All of `altman-medium` (4,509,233 payments) took 173 s and 29 MB: replay reads the files line by line, so its memory doesn't grow with the workload. At the default `--speed 60`, `altman-medium` takes about 11 hours, since its events run from 1 to 28 Sep.
 - **pending work:** on k3d it runs as a Job in its own `replay` namespace, sending to each bank's `ingestor` Service ([#29](https://github.com/10x-Slackers/CSC3104/issues/29)); on EKS it sends HTTPS to the function URLs and signs each request with SigV4, service `lambda`. Today it speaks plain HTTP.
 
 ## Ingestor
@@ -228,7 +238,7 @@ Also part of: [Kafka transaction event](streaming.md#interfaces).
 
 ## Open
 
-- [ ] How the Kubernetes replay Job gets its workload: baked into the image or mounted (Macarius, with Isaac).
+- [ ] How the Kubernetes replay Job gets its workload: baked into the image or mounted (Macarius, with Isaac). Proposed on [#29](https://github.com/10x-Slackers/CSC3104/issues/29): mounted, because `altman-medium-bt` (817 MB) is too big to bake into an image.
 - [x] Rule parameters and hop limit: `HOP_LIMIT = 4` stays (in the privacy node); planted chains are hand-written in the fixture, and the detection rules are in [streaming.md](streaming.md#detection-rule).
 - [x] How replay output reaches the ingestor: HTTP POST of pacs.008 batches ([Ingestor](#ingestor)).
 - [x] How Altman-labelled transfers are scored: offline, per attempt and pattern type ([evaluation.md](../evaluation.md#offline-detection-evaluation)).

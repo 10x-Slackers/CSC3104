@@ -118,10 +118,15 @@ scoring, including unflagged and scorer-too-late events. It uses the original
 `derive_token` and `load_pairwise_keys`; same-bank events are skipped. See
 [security.md](security.md) for the token and secret-file contract.
 
-Enable with `--key-version k1` and repeated `--pairwise-key PEER PATH` options on
-`python -m scorer.stream`; omitting both keeps scorer-only operation. Missing/invalid
-configuration fails; an event whose pair lacks a key is not committed. A new
-key/version requires a new index and replay; there is no old-key fallback.
+Enable with `--key-version k1 --x25519-private PATH` and repeated
+`--peer-public-key PEER PATH` options on `uv run python -m scorer.stream BANK`.
+Omitting those key options keeps scorer-only operation. The private PEM belongs
+only to this bank; peer public PEMs are authenticated provisioning inputs.
+`AgreementFiles(private_key, peer_public_keys)` configures `TokenIndex`.
+During rotation, introduce fresh k2 material at both banks, backfill retained refs,
+index new events under both versions, gate the query switch on trusted readiness,
+and retire k1 after old work drains. Lookup never crosses token versions; see
+[security.md](security.md) for the API and mounted key layout.
 
 The in-memory index maps `(canonical bank pair, key version, token)` to unique
 local `(payment_id, direction, account)` references. `lookup(pair, version, token)`
@@ -136,7 +141,7 @@ acceptable at capacity. This is a fail-stop resource bound, not an expiry policy
 
 Integrated mode runs Role 2's consumer inside the privacy-node process. Use
 `uv run python -m privacy_node.node --bank B --bootstrap-servers <brokers>
---group <fresh-group> --search` with the existing pairwise, signing, public-key
+--group <fresh-group> --search` with `--key-directory ROOT` and the TLS
 and peer options from [protocol.md](protocol.md). `--workload` selects the existing
 standalone CSV mode instead; the two input modes are mutually exclusive.
 

@@ -6,7 +6,6 @@ from case.case_store import AlertRule, Claim, SqliteCaseStore, transfers
 from case.outbox import dispatch
 from case.report import TemplateClient, draft_report
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.claims import key
 from sample_chains import as_partial, bridged, leaks, m1, o1, v1
 
 # DEPENDS ON Role 3 (privacy node): every test here uses real ChainResults from its
@@ -17,10 +16,14 @@ def alerts(store):
     return store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
 
 
-def test_transfer_keys_match_role3():
+def test_transfer_keys_normalize_role3_bytes_to_hex():
     start, link, _ = m1().claims
-    assert transfers(Claim.from_pb(link)) == [key(link.in_ref), key(link.out_ref)]
-    assert transfers(Claim.from_pb(start)) == [key(start.out_ref)]  # chain starts at A
+    assert transfers(Claim.from_pb(link)) == [
+        (ref.pair, ref.token.hex()) for ref in (link.in_ref, link.out_ref)
+    ]
+    assert transfers(Claim.from_pb(start)) == [
+        (start.out_ref.pair, start.out_ref.token.hex())
+    ]  # chain starts at A
 
 
 def test_case_id_is_role3_chain_digest(store):

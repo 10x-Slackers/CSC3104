@@ -15,7 +15,7 @@ from pathlib import Path
 
 from case.case_store import transfers
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.claims import chain_digest, key
+from privacy_node.claims import chain_digest
 from privacy_node.demo import start_banks
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
@@ -39,9 +39,10 @@ def searches():
                 )
             }
             payments = {
-                key(token): ref[0]
+                (token.pair, token.token.hex()): ref[0]
                 for node in nodes.values()
-                for ref, token in node.local.refs.items()
+                for ref in node.local.counterparty
+                for token in [node.local.ref(*ref, node.key_version)]
             }
         finally:
             for server in servers.values():

@@ -24,29 +24,29 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fprivacy_node/privacy_node.proto\x12\x12\x63sc3104.privacy.v1\"\'\n\x08TokenRef\x12\x0c\n\x04pair\x18\x01 \x01(\t\x12\r\n\x05token\x18\x02 \x01(\t\"\xfb\x01\n\x0cTraceRequest\x12\x10\n\x08query_id\x18\x01 \x01(\t\x12\x0e\n\x06sender\x18\x02 \x01(\t\x12\x13\n\x0bkey_version\x18\x03 \x01(\t\x12)\n\x03ref\x18\x04 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12\x30\n\tdirection\x18\x05 \x01(\x0e\x32\x1d.csc3104.privacy.v1.Direction\x12\x16\n\x0ehops_remaining\x18\x06 \x01(\x05\x12\x10\n\x08\x64\x65\x61\x64line\x18\x07 \x01(\t\x12-\n\x07visited\x18\x08 \x03(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\"\xc5\x01\n\tLinkClaim\x12\x0e\n\x06signer\x18\x01 \x01(\t\x12\x11\n\trecipient\x18\x02 \x01(\t\x12\x10\n\x08query_id\x18\x03 \x01(\t\x12\x13\n\x0bkey_version\x18\x04 \x01(\t\x12,\n\x06in_ref\x18\x05 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12-\n\x07out_ref\x18\x06 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12\x11\n\tsignature\x18\x07 \x01(\x0c\"e\n\nTraceReply\x12(\n\x05state\x18\x01 \x01(\x0e\x32\x19.csc3104.privacy.v1.State\x12-\n\x06\x63laims\x18\x02 \x03(\x0b\x32\x1d.csc3104.privacy.v1.LinkClaim\"\x8c\x01\n\x0b\x43hainResult\x12\x14\n\x0c\x63hain_digest\x18\x01 \x01(\t\x12\x0e\n\x06sender\x18\x02 \x01(\t\x12(\n\x05state\x18\x03 \x01(\x0e\x32\x19.csc3104.privacy.v1.State\x12-\n\x06\x63laims\x18\x04 \x03(\x0b\x32\x1d.csc3104.privacy.v1.LinkClaim\"\x1b\n\x03\x41\x63k\x12\x14\n\x0c\x63hain_digest\x18\x01 \x01(\t*D\n\tDirection\x12\x19\n\x15\x44IRECTION_UNSPECIFIED\x10\x00\x12\x0e\n\nDOWNSTREAM\x10\x01\x12\x0c\n\x08UPSTREAM\x10\x02*\x83\x01\n\x05State\x12\x15\n\x11STATE_UNSPECIFIED\x10\x00\x12\r\n\tCONFIRMED\x10\x01\x12\x0c\n\x08NO_MATCH\x10\x02\x12\x0b\n\x07PARTIAL\x10\x03\x12\x0b\n\x07PENDING\x10\x04\x12\r\n\tTIMED_OUT\x10\x05\x12\x11\n\rINVALID_CLAIM\x10\x06\x12\n\n\x06\x46\x41ILED\x10\x07\x32\x9d\x01\n\x0bPrivacyNode\x12I\n\x05Trace\x12 .csc3104.privacy.v1.TraceRequest\x1a\x1e.csc3104.privacy.v1.TraceReply\x12\x43\n\x07\x44\x65liver\x12\x1f.csc3104.privacy.v1.ChainResult\x1a\x17.csc3104.privacy.v1.Ackb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fprivacy_node/privacy_node.proto\x12\x12\x63sc3104.privacy.v1\"\'\n\x08TokenRef\x12\x0c\n\x04pair\x18\x01 \x01(\t\x12\r\n\x05token\x18\x02 \x01(\x0c\"\xfb\x01\n\x0cTraceRequest\x12\x10\n\x08query_id\x18\x01 \x01(\t\x12\x0e\n\x06sender\x18\x02 \x01(\t\x12\x13\n\x0bkey_version\x18\x03 \x01(\t\x12)\n\x03ref\x18\x04 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12\x30\n\tdirection\x18\x05 \x01(\x0e\x32\x1d.csc3104.privacy.v1.Direction\x12\x16\n\x0ehops_remaining\x18\x06 \x01(\x05\x12\x10\n\x08\x64\x65\x61\x64line\x18\x07 \x01(\t\x12-\n\x07visited\x18\x08 \x03(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\"\xf5\x01\n\tLinkClaim\x12\x0e\n\x06signer\x18\x01 \x01(\t\x12\x11\n\trecipient\x18\x02 \x01(\t\x12\x10\n\x08query_id\x18\x03 \x01(\t\x12\x13\n\x0bkey_version\x18\x04 \x01(\t\x12,\n\x06in_ref\x18\x05 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12-\n\x07out_ref\x18\x06 \x01(\x0b\x32\x1c.csc3104.privacy.v1.TokenRef\x12\x11\n\tsignature\x18\x07 \x01(\x0c\x12\x1b\n\x13signing_key_version\x18\x08 \x01(\t\x12\x11\n\ttruncated\x18\t \x01(\x08\"e\n\nTraceReply\x12(\n\x05state\x18\x01 \x01(\x0e\x32\x19.csc3104.privacy.v1.State\x12-\n\x06\x63laims\x18\x02 \x03(\x0b\x32\x1d.csc3104.privacy.v1.LinkClaim\"\x8c\x01\n\x0b\x43hainResult\x12\x14\n\x0c\x63hain_digest\x18\x01 \x01(\t\x12\x0e\n\x06sender\x18\x02 \x01(\t\x12(\n\x05state\x18\x03 \x01(\x0e\x32\x19.csc3104.privacy.v1.State\x12-\n\x06\x63laims\x18\x04 \x03(\x0b\x32\x1d.csc3104.privacy.v1.LinkClaim\"\x1b\n\x03\x41\x63k\x12\x14\n\x0c\x63hain_digest\x18\x01 \x01(\t*D\n\tDirection\x12\x19\n\x15\x44IRECTION_UNSPECIFIED\x10\x00\x12\x0e\n\nDOWNSTREAM\x10\x01\x12\x0c\n\x08UPSTREAM\x10\x02*\x83\x01\n\x05State\x12\x15\n\x11STATE_UNSPECIFIED\x10\x00\x12\r\n\tCONFIRMED\x10\x01\x12\x0c\n\x08NO_MATCH\x10\x02\x12\x0b\n\x07PARTIAL\x10\x03\x12\x0b\n\x07PENDING\x10\x04\x12\r\n\tTIMED_OUT\x10\x05\x12\x11\n\rINVALID_CLAIM\x10\x06\x12\n\n\x06\x46\x41ILED\x10\x07\x32\x9d\x01\n\x0bPrivacyNode\x12I\n\x05Trace\x12 .csc3104.privacy.v1.TraceRequest\x1a\x1e.csc3104.privacy.v1.TraceReply\x12\x43\n\x07\x44\x65liver\x12\x1f.csc3104.privacy.v1.ChainResult\x1a\x17.csc3104.privacy.v1.Ackb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'privacy_node.privacy_node_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_DIRECTION']._serialized_start=825
-  _globals['_DIRECTION']._serialized_end=893
-  _globals['_STATE']._serialized_start=896
-  _globals['_STATE']._serialized_end=1027
+  _globals['_DIRECTION']._serialized_start=873
+  _globals['_DIRECTION']._serialized_end=941
+  _globals['_STATE']._serialized_start=944
+  _globals['_STATE']._serialized_end=1075
   _globals['_TOKENREF']._serialized_start=55
   _globals['_TOKENREF']._serialized_end=94
   _globals['_TRACEREQUEST']._serialized_start=97
   _globals['_TRACEREQUEST']._serialized_end=348
   _globals['_LINKCLAIM']._serialized_start=351
-  _globals['_LINKCLAIM']._serialized_end=548
-  _globals['_TRACEREPLY']._serialized_start=550
-  _globals['_TRACEREPLY']._serialized_end=651
-  _globals['_CHAINRESULT']._serialized_start=654
-  _globals['_CHAINRESULT']._serialized_end=794
-  _globals['_ACK']._serialized_start=796
-  _globals['_ACK']._serialized_end=823
-  _globals['_PRIVACYNODE']._serialized_start=1030
-  _globals['_PRIVACYNODE']._serialized_end=1187
+  _globals['_LINKCLAIM']._serialized_end=596
+  _globals['_TRACEREPLY']._serialized_start=598
+  _globals['_TRACEREPLY']._serialized_end=699
+  _globals['_CHAINRESULT']._serialized_start=702
+  _globals['_CHAINRESULT']._serialized_end=842
+  _globals['_ACK']._serialized_start=844
+  _globals['_ACK']._serialized_end=871
+  _globals['_PRIVACYNODE']._serialized_start=1078
+  _globals['_PRIVACYNODE']._serialized_end=1235
 # @@protoc_insertion_point(module_scope)
