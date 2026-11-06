@@ -939,6 +939,7 @@ version = "0.1.0"
 source = { editable = "apps/privacy_node" }
 dependencies = [
     { name = "grpcio" },
+    { name = "ingestor" },
     { name = "protobuf" },
     { name = "scorer" },
     { name = "security" },
@@ -947,6 +948,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "grpcio", specifier = ">=1.84.1" },
+    { name = "ingestor", editable = "apps/ingestor" },
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "scorer", editable = "apps/scorer" },
     { name = "security", editable = "apps/security" },
@@ -1247,12 +1249,14 @@ version = "0.1.0"
 source = { editable = "apps/scorer" }
 dependencies = [
     { name = "confluent-kafka" },
+    { name = "ingestor" },
     { name = "security" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "confluent-kafka", specifier = ">=2.6" },
+    { name = "ingestor", editable = "apps/ingestor" },
     { name = "security", editable = "apps/security" },
 ]
 

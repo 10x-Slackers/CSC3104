@@ -9,9 +9,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Self
 
+from ingestor import Direction, Event
 from privacy_node import privacy_node_pb2 as pb
 from scorer.score import Link, Scorer
-from scorer.state import Direction, Event, read_events
+from scorer.state import read_events
 from scorer.token_index import TokenIndex
 from security import AgreementFiles, canonical_pair
 
@@ -89,9 +90,7 @@ class LocalBank:
     ) -> str | None:
         """Return this bank's payment_id for a peer token, or None."""
         with self.lock:
-            for ref in self.index.lookup(
-                canonical_pair(*pair.split("-")), key_version, token
-            ):
+            for ref in self.index.lookup(pair.split("-"), key_version, token):
                 if ref["direction"] == direction:
                     return ref["payment_id"]
         return None

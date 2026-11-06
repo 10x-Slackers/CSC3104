@@ -5,7 +5,7 @@ Every report is stored as a draft labelled with its source ("template").
 """
 
 from datetime import UTC, datetime
-from typing import TypedDict
+from typing import Protocol, TypedDict
 
 from case.case_store import Case, CaseState, SqliteCaseStore, neighbours
 from security import check_peer_payload
@@ -60,6 +60,12 @@ def when(timestamp: float | None, none: str = "-") -> str:
     if timestamp is None:
         return none
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+class ReportClient(Protocol):
+    source: str  # stored with the report
+
+    def draft(self, data: ReportInput) -> str: ...
 
 
 class TemplateClient:
@@ -122,11 +128,8 @@ class TemplateClient:
 
 
 def draft_report(
-    store: SqliteCaseStore, case: Case, client: TemplateClient
+    store: SqliteCaseStore, case: Case, client: ReportClient
 ) -> int | None:
-    """Filter, draft and store as a draft; return the new report ID.
-
-    A client has a `source` label (stored with the report) and `draft(data) -> str`.
-    """
+    """Filter, draft and store as a draft; return the new report ID."""
     data = report_input(case)
     return store.save_report(case["case_id"], client.source, client.draft(data))

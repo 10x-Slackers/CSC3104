@@ -13,11 +13,11 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
 
 from security import (
     AgreementFiles,
+    PublicKeys,
     generate_agreement_key,
     generate_signing_key,
     load_signing_key,
@@ -73,7 +73,7 @@ def pair_paths(root: str | Path, bank: str, key_version: str = "k1") -> Agreemen
     )
 
 
-def public_keys(root: str | Path, bank: str) -> dict[tuple[str, str], Ed25519PublicKey]:
+def public_keys(root: str | Path, bank: str) -> PublicKeys:
     """Re-read trusted verification files, including overlapping versions."""
     trusted = Path(root) / bank / "trusted" / "signing"
     paths = {(p.parent.name, p.stem): p for p in trusted.glob("*/*.pem")}

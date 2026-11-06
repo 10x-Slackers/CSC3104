@@ -9,7 +9,7 @@ go straight to this UI's inbox; reports go to the mock intake (intake.py).
 
 import os
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from html import escape
@@ -29,8 +29,9 @@ from case.case_store import (
 )
 from case.evidence import check_result, load_public_keys
 from case.outbox import run, webhook
-from case.report import TemplateClient, draft_report, when
+from case.report import ReportClient, TemplateClient, draft_report, when
 from privacy_node import privacy_node_pb2 as pb
+from security import PublicKeys
 
 ACTIONS: dict[Decision, str] = {  # keys are case_store.DECISIONS
     "monitor": "Continue monitoring",
@@ -60,12 +61,12 @@ def page(bank: str, title: str, body: str) -> HTMLResponse:
 
 
 def create_app(
-    db: str,
+    db: str | os.PathLike[str],
     bank: str,
     intake_url: str,
-    public_keys: Callable[[], Mapping],
+    public_keys: Callable[[], PublicKeys],
     interval: float | None = 1.0,
-    client: TemplateClient | None = None,
+    client: ReportClient | None = None,
 ) -> FastAPI:
     """interval=None skips the background dispatcher (tests call dispatch directly)."""
     client = client or TemplateClient()
@@ -92,10 +93,9 @@ def create_app(
 
     app = FastAPI(title=f"Bank {bank} cases", lifespan=lifespan)
 
+    # The store rejects results in undeliverable states.
     @app.exception_handler(ValueError)
-    async def invalid(
-        request: Request, exc: ValueError
-    ) -> JSONResponse:  # the store rejects unknown actions and states
+    async def invalid(request: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, 422)
 
     def load(case_id: str) -> Case:

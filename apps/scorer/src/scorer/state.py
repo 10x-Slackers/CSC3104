@@ -4,23 +4,9 @@ import csv
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import TypedDict, cast
 
-Direction = Literal["in", "out"]
-
-
-class Event(TypedDict):
-    """A Kafka record value (amount a float) or a bank-file CSV row (all str)."""
-
-    payment_id: str
-    event_time: str
-    bank: str
-    direction: Direction
-    account: str
-    counterparty_account: str
-    counterparty_bank: str
-    amount: str | float
-    payment_format: str
+from ingestor import Direction, Event
 
 
 class Hit(TypedDict):
@@ -31,9 +17,10 @@ class Hit(TypedDict):
 
 
 def read_events(path: str | Path) -> Iterator[Event]:
+    """A bank file's rows as Kafka events: the amount becomes a number."""
     with Path(path).open() as source:
         for row in csv.DictReader(source):
-            yield cast(Event, row)
+            yield cast(Event, row | {"amount": float(row["amount"])})
 
 
 class MemoryState:

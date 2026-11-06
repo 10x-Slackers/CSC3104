@@ -371,7 +371,7 @@ class SqliteCaseStore:
 
     def review_report(self, case_id: str, report_id: int, status: ReviewStatus) -> bool:
         """Approve or reject a case's draft once; False if it isn't a pending draft."""
-        if status not in ("approved", "rejected"):
+        if status not in get_args(ReviewStatus):
             raise ValueError(f"Unknown review: {status}")
         return bool(
             self.db.execute(

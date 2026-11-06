@@ -11,11 +11,11 @@ import threading
 from collections.abc import Callable, Iterable
 from typing import TextIO
 
-from confluent_kafka import Consumer, KafkaException
+from confluent_kafka import Consumer, KafkaException, TopicPartition
 
+from ingestor import Event
 from scorer.baseline import make_scorer, thresholds
 from scorer.score import Link, Scorer
-from scorer.state import Event
 from scorer.token_index import TokenIndex
 from security import AgreementFiles
 
@@ -24,7 +24,7 @@ def topic(bank: str) -> str:
     return f"bank-{bank}-transactions"
 
 
-def require_full_replay(consumer: Consumer, partitions: list) -> None:
+def require_full_replay(consumer: Consumer, partitions: list[TopicPartition]) -> None:
     """Reject offsets or assignments that cannot rebuild this in-memory bank."""
     if len(partitions) != 1 or partitions[0].partition != 0:
         raise RuntimeError(

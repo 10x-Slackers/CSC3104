@@ -1,14 +1,13 @@
 """Canonical claim bytes and shared verification for both result receivers."""
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from itertools import pairwise
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from google.protobuf.message import Message
 
 from privacy_node import privacy_node_pb2 as pb
-from security import verify
+from security import PublicKeys, verify
 
 # Per-message approved field names; descriptor tests require explicit approval of additions.
 APPROVED_FIELDS: dict[str, set[str]] = {
@@ -78,9 +77,7 @@ def _valid_ref(ref: pb.TokenRef) -> bool:
     return len(ref.token) == 16 and ref.pair in PAIRS if ref.token else not ref.pair
 
 
-def valid_claim(
-    c: pb.LinkClaim, public_keys: Mapping[tuple[str, str], Ed25519PublicKey]
-) -> bool:
+def valid_claim(c: pb.LinkClaim, public_keys: PublicKeys) -> bool:
     """Verify with a trusted versioned signing key and check token ownership."""
     public_key = public_keys.get((c.signer, c.signing_key_version))
     vouched = refs([c])
@@ -103,7 +100,7 @@ def valid_claim(
 
 def valid_chain(
     claims: Sequence[pb.LinkClaim],
-    public_keys: Mapping[tuple[str, str], Ed25519PublicKey],
+    public_keys: PublicKeys,
 ) -> bool:
     """Each shared transfer is vouched for by its two distinct endpoint banks."""
     witnesses = {}
@@ -166,7 +163,7 @@ def has_unknown_fields(message: Message) -> bool:
 
 def check_result(
     result: pb.ChainResult,
-    public_keys: Mapping[tuple[str, str], Ed25519PublicKey],
+    public_keys: PublicKeys,
     bank: str,
 ) -> pb.ChainResult:
     """Return a verified copy (cuts become PARTIAL), or raise ValueError.

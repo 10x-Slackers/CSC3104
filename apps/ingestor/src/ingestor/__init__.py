@@ -7,14 +7,38 @@ and docs/contracts/streaming.md (Kafka events).
 
 import math
 from datetime import datetime
+from typing import Literal, TypedDict
 
 # Fictional BICs. Replay imports this table from here, not the ingestor from dataset,
 # so the ingestor's Lambda image doesn't pull in pandas and kagglehub.
 BICS = {"A": "TSTASGSG", "B": "TSTBSGSG", "C": "TSTCSGSG"}
 BANKS = {bic: bank for bank, bic in BICS.items()}
 
+Direction = Literal["in", "out"]
 
-def records(batch: dict, bank: str) -> list[dict]:
+
+class Event(TypedDict):
+    """A Kafka record value (docs/contracts/streaming.md)."""
+
+    payment_id: str
+    event_time: str
+    bank: str
+    direction: Direction
+    account: str
+    counterparty_account: str
+    counterparty_bank: str
+    amount: float
+    payment_format: str
+
+
+class Record(TypedDict):
+    topic: str
+    key: str
+    headers: dict[str, str]
+    value: Event
+
+
+def records(batch: dict, bank: str) -> list[Record]:
     """This bank's Kafka records for one batch, as {topic, key, headers, value}.
 
     Any KeyError, TypeError or ValueError rejects the whole batch (HTTP 400). These
@@ -27,7 +51,7 @@ def records(batch: dict, bank: str) -> list[dict]:
     txs = msg["CdtTrfTxInf"]
     if int(msg["GrpHdr"]["NbOfTxs"]) != len(txs):
         raise ValueError("NbOfTxs doesn't match the transaction count")
-    out = []
+    out: list[Record] = []
     for tx in txs:
         amount = float(tx["IntrBkSttlmAmt"]["Amt"])
         if tx["IntrBkSttlmAmt"]["Ccy"] != "SGD" or not 0 < amount < math.inf:
@@ -42,24 +66,24 @@ def records(batch: dict, bank: str) -> list[dict]:
             tx["DbtrAcct"]["Id"]["Othr"]["Id"],
             tx["CdtrAcct"]["Id"]["Othr"]["Id"],
         )
-        sides = {
+        sides: dict[Direction, tuple[str, str, str, str]] = {
             "out": (debtor, dbtr, creditor, cdtr),
             "in": (creditor, cdtr, debtor, dbtr),
         }
         for direction, (me, account, other, other_account) in sides.items():
             if me != bank:
                 continue
-            event = {
-                "payment_id": tx["PmtId"]["EndToEndId"],
-                "event_time": tx["AccptncDtTm"],
-                "bank": bank,
-                "direction": direction,
-                "account": account,
-                "counterparty_account": other_account,
-                "counterparty_bank": other,
-                "amount": amount,
-                "payment_format": tx["PmtTpInf"]["LclInstrm"]["Prtry"],
-            }
+            event = Event(
+                payment_id=tx["PmtId"]["EndToEndId"],
+                event_time=tx["AccptncDtTm"],
+                bank=bank,
+                direction=direction,
+                account=account,
+                counterparty_account=other_account,
+                counterparty_bank=other,
+                amount=amount,
+                payment_format=tx["PmtTpInf"]["LclInstrm"]["Prtry"],
+            )
             if not all(
                 isinstance(v, str) and v for k, v in event.items() if k != "amount"
             ):

@@ -1,10 +1,11 @@
 """Bank-local raw-byte token references with overlapping key versions."""
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 
-from scorer.state import Event
+from ingestor import Event
 from security import (
     AgreementFiles,
+    PairKeys,
     canonical_pair,
     derive_token,
     load_pairwise_keys,
@@ -27,7 +28,7 @@ class TokenIndex:
         self.max_references = max_references
         self._reference_count = 0
         self.key_version = key_version
-        self._keys: dict[str, dict[tuple[str, str], bytes]] = {}
+        self._keys: dict[str, PairKeys] = {}
         self._entries: dict[
             tuple[tuple[str, str], str, bytes], set[tuple[str, str, str]]
         ] = {}
@@ -37,9 +38,7 @@ class TokenIndex:
     def active_versions(self) -> tuple[str, ...]:
         return tuple(self._keys)
 
-    def matches_versions(
-        self, keys: dict[str, dict[tuple[str, str], bytes]], query_version: str
-    ) -> bool:
+    def matches_versions(self, keys: dict[str, PairKeys], query_version: str) -> bool:
         """Whether prepared configuration leaves the current token index unchanged."""
         return self._keys == keys and self.key_version == query_version
 
@@ -50,7 +49,7 @@ class TokenIndex:
         )
         self.apply_version(version, keys)
 
-    def apply_version(self, version: str, keys: dict[tuple[str, str], bytes]) -> None:
+    def apply_version(self, version: str, keys: PairKeys) -> None:
         """Apply prepared pair keys without filesystem access."""
         self.check_version(version, keys)
         additions = {}
@@ -65,7 +64,7 @@ class TokenIndex:
         self._entries.update(additions)
         self._reference_count += count
 
-    def check_version(self, version: str, keys: dict[tuple[str, str], bytes]) -> None:
+    def check_version(self, version: str, keys: PairKeys) -> None:
         """Cheap validation before copying or backfilling an index."""
         if not keys:
             raise ValueError("Token indexing requires trusted peer public keys")
@@ -89,7 +88,7 @@ class TokenIndex:
         self,
         version: str,
         peer_versions: Mapping[str, Collection[str]],
-        versions: Mapping[str, dict[tuple[str, str], bytes]] | None = None,
+        versions: Mapping[str, PairKeys] | None = None,
     ) -> None:
         versions = self._keys if versions is None else versions
         if version not in versions:
@@ -148,7 +147,7 @@ class TokenIndex:
         return tokens.get(self.key_version)
 
     def lookup(
-        self, bank_pair: tuple[str, str], key_version: str, token: bytes
+        self, bank_pair: Sequence[str], key_version: str, token: bytes
     ) -> list[dict]:
         pair = canonical_pair(*bank_pair)
         if self.bank not in pair:

@@ -1,4 +1,3 @@
-import csv
 import io
 import json
 import signal
@@ -13,6 +12,7 @@ import grpc
 import pytest
 
 from case.case_store import SqliteCaseStore
+from ingestor import Event
 from privacy_node import node as node_module
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import (
@@ -29,6 +29,7 @@ from privacy_node.local_state import LocalBank
 from privacy_node.node import HOP_LIMIT, Node, failure_state, now, serve
 from privacy_node.store import Store
 from scorer.score import Scorer
+from scorer.state import read_events
 from scorer.stream import consume
 from security import (
     check_peer_payload,
@@ -140,7 +141,9 @@ def test_tampered_or_wrongly_signed_claims_rejected(banks):
 
     tampered.chain_digest = chain_digest(tampered.claims)
     with pytest.raises(grpc.RpcError) as error:
-        nodes["A"].call("C", "Deliver", tampered, now() + timedelta(seconds=5))
+        nodes["A"].call(
+            "C", "Deliver", tampered, now() + timedelta(seconds=5), pb.Ack()
+        )
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert [c.chain_digest for c in nodes["C"].store.chains()] == [result.chain_digest]
 
@@ -191,12 +194,12 @@ def test_delivered_state_is_checked(banks):
     nodes["C"].store = Store()
     deadline = now() + timedelta(seconds=5)
     result.state = pb.CONFIRMED  # sender lies about a cut chain
-    nodes["B"].call("C", "Deliver", result, deadline)
+    nodes["B"].call("C", "Deliver", result, deadline, pb.Ack())
     assert [c.state for c in nodes["C"].store.chains()] == [pb.PARTIAL]
 
     result.state = pb.PENDING  # only final states are stored
     with pytest.raises(grpc.RpcError):
-        nodes["B"].call("C", "Deliver", result, deadline)
+        nodes["B"].call("C", "Deliver", result, deadline, pb.Ack())
 
 
 def test_peer_error_fails_search_without_retry(banks, monkeypatch):
@@ -293,8 +296,7 @@ def feed(local, events):
 def test_kafka_state_drives_real_peer_search(tmp_path, monkeypatch, reverse):
     events = {}
     for bank in "ABC":
-        with (TINY / f"bank_{bank}.csv").open() as source:
-            events[bank] = list(csv.DictReader(source))
+        events[bank] = list(read_events(TINY / f"bank_{bank}.csv"))
     monkeypatch.setattr(
         LocalBank,
         "from_workload",
@@ -371,10 +373,9 @@ def test_live_processing_failure_boundaries(tmp_path, failure):
 
         paths = AgreementFiles(paths.private_key, {"C": paths.peer_public_keys["C"]})
     local = LocalBank("B", "k1", paths)
-    with (TINY / "bank_B.csv").open() as source:
-        events = [
-            e for e in csv.DictReader(source) if e["payment_id"] in ("p06", "p07")
-        ]
+    events = [
+        e for e in read_events(TINY / "bank_B.csv") if e["payment_id"] in ("p06", "p07")
+    ]
     consumer = Mock()
     consumer.poll.side_effect = [
         *[kafka_message(e) for e in events],
@@ -411,8 +412,7 @@ def test_kafka_cli_does_not_load_workload(tmp_path, monkeypatch):
         "from_workload",
         Mock(side_effect=AssertionError("CSV reconstruction")),
     )
-    with (TINY / "bank_B.csv").open() as source:
-        events = list(csv.DictReader(source))
+    events = list(read_events(TINY / "bank_B.csv"))
     consumer = Mock()
     consumer.commit.return_value = []
     finished = threading.Event()
@@ -477,9 +477,8 @@ def test_kafka_cli_does_not_load_workload(tmp_path, monkeypatch):
     server.stop.assert_called_once_with(0)
 
 
-def fixture_rows(bank):
-    with (TINY / f"bank_{bank}.csv").open() as source:
-        return list(csv.DictReader(source))
+def fixture_rows(bank: str) -> list[Event]:
+    return list(read_events(TINY / f"bank_{bank}.csv"))
 
 
 def delay_c(nodes, key_dir):
@@ -709,7 +708,7 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
     request = nodes["A"].request(
         "old-flight", ref, pb.DOWNSTREAM, 3, deadline.isoformat(), [ref], "k1"
     )
-    reply = nodes["A"].call("B", "Trace", request, deadline)
+    reply = nodes["A"].call("B", "Trace", request, deadline, pb.TraceReply())
     assert reply.state == pb.CONFIRMED
     assert {c.key_version for c in reply.claims} == {"k1"}
     assert valid_chain(reply.claims, nodes["B"].public_keys)

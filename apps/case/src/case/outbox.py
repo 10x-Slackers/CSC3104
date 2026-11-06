@@ -11,7 +11,6 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
-from typing import Final
 
 from case.case_store import SqliteCaseStore
 from case.report import report_input
@@ -20,7 +19,7 @@ from case.report import report_input
 MAX_ATTEMPTS = int(os.environ.get("CASE_NOTIFY_MAX_ATTEMPTS", "10"))
 BACKOFF = 1.0  # seconds before the first retry, doubling each attempt
 MAX_BACKOFF = 60.0
-MESSAGE_FIELDS: Final = ("case_id", "state", "merged_into", "raised_at", "links")
+MESSAGE_FIELDS = ("case_id", "state", "merged_into", "raised_at", "links")
 
 
 def message(store: SqliteCaseStore, event: dict, bank: str) -> dict:

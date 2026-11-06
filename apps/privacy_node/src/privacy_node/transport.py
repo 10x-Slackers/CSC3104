@@ -34,10 +34,11 @@ class TlsFiles:
     private_key: str | Path
     ca: str | Path
 
-    def read(self) -> tuple[bytes, ...]:
-        return tuple(
-            Path(path).read_bytes()
-            for path in (self.certificate, self.private_key, self.ca)
+    def read(self) -> tuple[bytes, bytes, bytes]:
+        return (
+            Path(self.certificate).read_bytes(),
+            Path(self.private_key).read_bytes(),
+            Path(self.ca).read_bytes(),
         )
 
     def channel(self, target: str) -> grpc.Channel:

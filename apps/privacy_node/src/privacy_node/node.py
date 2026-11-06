@@ -28,7 +28,6 @@ from pathlib import Path
 import grpc
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
 from google.protobuf.message import Message
 
@@ -52,7 +51,7 @@ from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
 from privacy_node.transport import TlsFiles, authenticated_bank
 from scorer.stream import consume
-from security import load_pairwise_keys, sign
+from security import PublicKeys, load_pairwise_keys, sign
 
 log = logging.getLogger(__name__)
 
@@ -70,19 +69,23 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+UNREADABLE_TRACE = pb.TraceReply(state=pb.INVALID_CLAIM)
+
+
 def worst(*states: pb.State) -> pb.State:
     return max(states, key=SEVERITY.index)
 
 
-def unreadable(reply) -> bool:
+def unreadable(reply: Message) -> bool:
     """A peer reply carrying a field or a state our .proto doesn't define.
 
     proto3 keeps an unknown enum number as a plain int in a known field, so
     has_unknown_fields can't see state=99; worst() would crash on it instead.
     """
-    if has_unknown_fields(reply):
-        return True
-    return "state" in reply.DESCRIPTOR.fields_by_name and reply.state not in SEVERITY
+    return (
+        has_unknown_fields(reply)
+        or getattr(reply, "state", pb.NO_MATCH) not in SEVERITY
+    )
 
 
 # The same request may succeed later (https://grpc.io/docs/guides/status-codes/).
@@ -109,7 +112,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         local: LocalBank,
         store: Store,
         signing_key: Ed25519PrivateKey,
-        public_keys: Mapping[tuple[str, str], Ed25519PublicKey],
+        public_keys: PublicKeys,
         peers: Mapping[str, str],
         ingestion_grace_seconds: float = 0,
         signing_key_version: str = "k1",
@@ -134,8 +137,13 @@ class Node(pb_grpc.PrivacyNodeServicer):
     def key_version(self) -> str:
         return self.local.index.key_version
 
-    def call(self, bank: str, method: str, request: Message, deadline: datetime):
-        """Open one channel per call so Service balancing can select a replica."""
+    def call[R: Message](
+        self, bank: str, method: str, request: Message, deadline: datetime, fallback: R
+    ) -> R:
+        """Open one channel per call so Service balancing can select a replica.
+
+        An unreadable reply is logged and replaced by fallback.
+        """
         target = self.peers[bank]
         with (
             self.tls.channel(target) if self.tls else grpc.insecure_channel(target)
@@ -146,7 +154,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if not unreadable(reply):
             return reply
         log.warning("unreadable %s reply from bank=%s", method, bank)
-        return pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
+        return fallback
 
     def request(
         self,
@@ -306,9 +314,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         peer = self.local.counterparty[nexts[0], there]
         try:
-            reply = self.call(
-                peer, "Trace", forward, datetime.fromisoformat(request.deadline)
-            )
+            deadline = datetime.fromisoformat(request.deadline)
+            reply = self.call(peer, "Trace", forward, deadline, UNREADABLE_TRACE)
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
         return pb.TraceReply(
@@ -350,6 +357,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 "Trace",
                 request,
                 deadline,
+                UNREADABLE_TRACE,
             )
         except grpc.RpcError as error:
             return failure_state(error), []
@@ -441,7 +449,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
             if stop is not None and stop.is_set():
                 break
             try:
-                self.call(bank, "Deliver", result, now() + timedelta(seconds=5))
+                self.call(
+                    bank, "Deliver", result, now() + timedelta(seconds=5), pb.Ack()
+                )
                 self.store.ack(result.chain_digest, bank)
             except grpc.RpcError as error:
                 if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
@@ -457,13 +467,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     def housekeeping(self, stop: threading.Event | None = None) -> None:
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
-        if self.reload_keys and (
+        reload_keys = self.reload_keys
+        if reload_keys and (
             self._key_reload is None or not self._key_reload.is_alive()
         ):
 
             def reload():
                 try:
-                    self.reload_keys()
+                    reload_keys()
                 except Exception:  # noqa: BLE001 - retain working keys and retry later
                     traceback.print_exc()
 

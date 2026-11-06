@@ -11,7 +11,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
 
-from scorer.state import Event, MemoryState, read_events
+from ingestor import Event
+from scorer.state import MemoryState, read_events
 
 BANK_TRANSFERS = ("GIRO", "MEPS+")
 CHAIN_RATIO = (Decimal("0.90"), Decimal("1.10"))
@@ -149,7 +150,7 @@ class Scorer:
             if cross and last is None:
                 self.hit("new_payee", account, e["payment_id"])
                 flagged = True
-            elif cross and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
+            elif cross and last and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
                 self.hit("quick_repeat", account, e["payment_id"])
             self.state.set_last_paid(account, payee, now, flagged)
         self.state.add_event(account, key, now, e)
