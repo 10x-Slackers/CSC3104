@@ -152,7 +152,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if not unreadable(reply):
             return reply
         log.warning("unreadable %s reply from bank=%s", method, bank)
-        return fallback
+        return copy(fallback)  # callers may change their reply
 
     def request(
         self,

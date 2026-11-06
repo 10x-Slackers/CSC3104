@@ -2,7 +2,8 @@
 
 `records()` is the whole mapping and every check; `ingestor.app` produces the
 records and serves HTTP and Lambda. Contract: docs/contracts/data.md (Ingestor)
-and docs/contracts/streaming.md (Kafka events).
+and docs/contracts/streaming.md (Kafka events). `Event` and `read_events()` are
+shared with the scorer, node and replay, which read bank files as Kafka events.
 """
 
 import csv
