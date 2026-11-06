@@ -10,7 +10,7 @@ from evaluation.run import run
 from evaluation.score import SPLITS, load, score
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workload", help="a prepare.py workload with labels.csv")
     parser.add_argument("--split", choices=SPLITS, default="dev")

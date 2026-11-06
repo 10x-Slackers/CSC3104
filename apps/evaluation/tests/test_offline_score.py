@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from evaluation.run import Case, run
-from evaluation.score import Transfer, load, score
+from evaluation.run import run
+from evaluation.score import Case, Transfer, load, score
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
 

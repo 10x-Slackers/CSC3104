@@ -1,16 +1,32 @@
 """Score cases against Altman's labels for the dev or eval split."""
 
 import csv
-from collections import Counter, defaultdict, namedtuple
+from collections import Counter, defaultdict
+from collections.abc import Sized
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from scorer.score import BANK_TRANSFERS
 
 SPLITS = {"dev": ("2022-09-01", "2022-09-05"), "eval": ("2022-09-06", "2022-09-10")}
-Transfer = namedtuple("Transfer", "day bank counterparty_bank payment_format")
 
 
-def load(workload):
+@dataclass(eq=False)
+class Case:
+    bank: str
+    tier: int
+    ids: set[str]
+
+
+class Transfer(NamedTuple):
+    day: str
+    bank: str
+    counterparty_bank: str
+    payment_format: str
+
+
+def load(workload: str | Path) -> tuple[dict[str, Transfer], dict[str, dict]]:
     """Return ({payment_id: Transfer}, {payment_id: label row})."""
     transfers = {}
     for path in sorted(Path(workload).glob("bank_*.csv")):
@@ -28,18 +44,23 @@ def load(workload):
     return transfers, labels
 
 
-def fraction(part, whole):
+def fraction(part: Sized, whole: Sized) -> float | None:
     return len(part) / len(whole) if whole else None
 
 
-def score(cases, transfers, labels, split):
+def score(
+    cases: list[Case],
+    transfers: dict[str, Transfer],
+    labels: dict[str, dict],
+    split: str,
+) -> dict:
     """Detection quality for one split; laundering counts by its attempt's start day."""
     first, last = SPLITS[split]
 
-    def day(p):
+    def day(p: str) -> str:
         return transfers[p].day
 
-    def in_split(d):
+    def in_split(d: str) -> bool:
         return first <= d <= last
 
     attempts = defaultdict(list)
@@ -54,7 +75,7 @@ def score(cases, transfers, labels, split):
     counted = [p for p in laundering if in_split(start.get(p, day(p)))]
     ordinary_end = max(day(p) for p in transfers if p not in laundering)
 
-    def scope(p):
+    def scope(p: str) -> str:
         t = transfers[p]
         if t.bank == t.counterparty_bank:
             return "same_bank"

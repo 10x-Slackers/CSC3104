@@ -3,9 +3,13 @@
 import csv
 import tempfile
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
+from google.protobuf.message import Message
+
+from evaluation.score import Case
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import check_payload, key, refs
 from privacy_node.keys import BANKS, make_keys, pair_paths
@@ -18,27 +22,22 @@ from security import load_signing_key, load_verification_key
 KEY_VERSION = "k1"
 
 
-@dataclass(eq=False)
-class Case:
-    bank: str
-    tier: int
-    ids: set
-
-
 class InProcessNode(Node):
     """A privacy node that calls its peers directly instead of over gRPC."""
 
-    def call(self, bank, method, request, deadline):
+    def call(
+        self, bank: str, method: str, request: Message, deadline: datetime
+    ) -> Message:
         check_payload(request)
         return getattr(self.peers[bank], method)(request, OfflineContext())
 
 
 class OfflineContext:
-    def abort(self, code, details):
+    def abort(self, code: object, details: str):
         raise RuntimeError(f"peer rejected a call: {code} {details}")
 
 
-def bank_transfers(workload, bank):
+def bank_transfers(workload: str | Path, bank: str) -> Iterator[dict]:
     """A bank file as replay sends it: bank transfers only."""
     with (Path(workload) / f"bank_{bank}.csv").open() as source:
         for event in csv.DictReader(source):
@@ -46,7 +45,7 @@ def bank_transfers(workload, bank):
                 yield event
 
 
-def start_nodes(workload, key_dir):
+def start_nodes(workload: str | Path, key_dir: str) -> dict[str, InProcessNode]:
     make_keys(key_dir)
     public_keys = {b: load_verification_key(f"{key_dir}/public/{b}.pem") for b in BANKS}
     nodes, peers = {}, {}
@@ -61,25 +60,25 @@ def start_nodes(workload, key_dir):
     return nodes
 
 
-def run(workload):
+def run(workload: str | Path) -> tuple[list[Case], dict[str, int]]:
     """Run every bank's rules and searches; return (cases, search state counts)."""
     with tempfile.TemporaryDirectory() as key_dir:
         nodes = start_nodes(workload, key_dir)
-    searches = Counter()
+    searches: Counter[str] = Counter()
     for node in nodes.values():
         for result in node.search_detections():
             searches[pb.State.Name(result.state)] += 1
-    payment_of = {}
+    payment_of: dict[str, str] = {}
     for node in nodes.values():
         for (payment_id, _), ref in node.local.refs.items():
             payment_of[key(ref)] = payment_id
-    cases = []
+    cases: list[Case] = []
     for node in nodes.values():
         cases += bank_cases(node, payment_of)
     return cases, dict(sorted(searches.items()))
 
 
-def bank_cases(node, payment_of):
+def bank_cases(node: InProcessNode, payment_of: dict[str, str]) -> list[Case]:
     found = [(1, hit["payments"]) for hit in node.local.scorer.state.hits()]
     for chain in node.store.chains():
         tier = chain_tier(chain, node.bank)
@@ -88,7 +87,7 @@ def bank_cases(node, payment_of):
     return merge(node.bank, found)
 
 
-def chain_tier(chain, bank):
+def chain_tier(chain: pb.ChainResult, bank: str) -> int | None:
     """Tier 2 if two banks' rules link the chain, else Tier 1 where one did."""
     rule_backed = {c.signer for c in chain.claims if c.in_ref.token and c.out_ref.token}
     if len(rule_backed) >= 2:
@@ -96,9 +95,9 @@ def chain_tier(chain, bank):
     return 1 if bank in rule_backed else None
 
 
-def merge(bank, found):
+def merge(bank: str, found: list[tuple[int, list[str]]]) -> list[Case]:
     """Join results sharing a payment into one case at the highest tier (case.md)."""
-    case_of = {}
+    case_of: dict[str, Case] = {}
     for tier, ids in found:
         case = Case(bank, tier, set(ids))
         for other in {case_of[p] for p in ids if p in case_of}:
