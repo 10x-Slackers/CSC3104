@@ -10,10 +10,9 @@ from unittest.mock import Mock
 import pytest
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
-from ingestor import Event
+from ingestor import Event, read_events
 from scorer import score_file
 from scorer.score import Scorer
-from scorer.state import read_events
 from scorer.stream import consume, require_full_replay
 from scorer.token_index import TokenIndex
 from security import (

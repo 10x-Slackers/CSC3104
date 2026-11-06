@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from ingestor import read_events
 from scorer.score import Scorer
-from scorer.state import read_events
 
 
 def thresholds(parser: argparse.ArgumentParser) -> None:

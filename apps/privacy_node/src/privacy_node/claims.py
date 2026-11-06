@@ -98,10 +98,7 @@ def valid_claim(c: pb.LinkClaim, public_keys: PublicKeys) -> bool:
     )
 
 
-def valid_chain(
-    claims: Sequence[pb.LinkClaim],
-    public_keys: PublicKeys,
-) -> bool:
+def valid_chain(claims: Sequence[pb.LinkClaim], public_keys: PublicKeys) -> bool:
     """Each shared transfer is vouched for by its two distinct endpoint banks."""
     witnesses = {}
     for claim in claims:
@@ -162,9 +159,7 @@ def has_unknown_fields(message: Message) -> bool:
 
 
 def check_result(
-    result: pb.ChainResult,
-    public_keys: PublicKeys,
-    bank: str,
+    result: pb.ChainResult, public_keys: PublicKeys, bank: str
 ) -> pb.ChainResult:
     """Return a verified copy (cuts become PARTIAL), or raise ValueError.
 

@@ -20,20 +20,14 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.protobuf.message import DecodeError
 
-from case.case_store import (
-    Case,
-    Decision,
-    ReviewStatus,
-    SqliteCaseStore,
-    neighbours,
-)
+from case.case_store import Case, Decision, ReviewStatus, SqliteCaseStore, neighbours
 from case.evidence import check_result, load_public_keys
 from case.outbox import run, webhook
 from case.report import ReportClient, TemplateClient, draft_report, when
 from privacy_node import privacy_node_pb2 as pb
 from security import PublicKeys
 
-ACTIONS: dict[Decision, str] = {  # keys are case_store.DECISIONS
+ACTIONS: dict[Decision, str] = {
     "monitor": "Continue monitoring",
     "suspend": "Suspend outgoing transactions",
     "freeze": "Freeze accounts",

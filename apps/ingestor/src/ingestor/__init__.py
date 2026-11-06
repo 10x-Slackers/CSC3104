@@ -5,9 +5,12 @@ records and serves HTTP and Lambda. Contract: docs/contracts/data.md (Ingestor)
 and docs/contracts/streaming.md (Kafka events).
 """
 
+import csv
 import math
+from collections.abc import Iterator
 from datetime import datetime
-from typing import Literal, TypedDict
+from pathlib import Path
+from typing import Literal, TypedDict, cast
 
 # Fictional BICs. Replay imports this table from here, not the ingestor from dataset,
 # so the ingestor's Lambda image doesn't pull in pandas and kagglehub.
@@ -29,6 +32,13 @@ class Event(TypedDict):
     counterparty_bank: str
     amount: float
     payment_format: str
+
+
+def read_events(path: str | Path) -> Iterator[Event]:
+    """A bank file's rows as Kafka events: the amount becomes a number."""
+    with Path(path).open() as source:
+        for row in csv.DictReader(source):
+            yield cast(Event, row | {"amount": float(row["amount"])})
 
 
 class Record(TypedDict):

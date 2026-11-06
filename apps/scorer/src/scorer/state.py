@@ -1,10 +1,7 @@
 """In-memory stand-in for a bank's Valkey, with the entries of streaming.md's Valkey layout."""
 
-import csv
 from collections import defaultdict
-from collections.abc import Iterator
-from pathlib import Path
-from typing import TypedDict, cast
+from typing import TypedDict
 
 from ingestor import Direction, Event
 
@@ -14,13 +11,6 @@ class Hit(TypedDict):
     account: str
     payments: list[str]
     hit_id: str
-
-
-def read_events(path: str | Path) -> Iterator[Event]:
-    """A bank file's rows as Kafka events: the amount becomes a number."""
-    with Path(path).open() as source:
-        for row in csv.DictReader(source):
-            yield cast(Event, row | {"amount": float(row["amount"])})
 
 
 class MemoryState:

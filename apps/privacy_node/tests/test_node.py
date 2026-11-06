@@ -12,7 +12,7 @@ import grpc
 import pytest
 
 from case.case_store import SqliteCaseStore
-from ingestor import Event
+from ingestor import Event, read_events
 from privacy_node import node as node_module
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import (
@@ -29,7 +29,6 @@ from privacy_node.local_state import LocalBank
 from privacy_node.node import HOP_LIMIT, Node, failure_state, now, serve
 from privacy_node.store import Store
 from scorer.score import Scorer
-from scorer.state import read_events
 from scorer.stream import consume
 from security import (
     check_peer_payload,

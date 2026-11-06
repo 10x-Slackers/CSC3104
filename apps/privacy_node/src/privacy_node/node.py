@@ -26,9 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import grpc
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.message import Message
 
 from privacy_node import privacy_node_pb2 as pb

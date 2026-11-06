@@ -9,10 +9,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Self
 
-from ingestor import Direction, Event
+from ingestor import Direction, Event, read_events
 from privacy_node import privacy_node_pb2 as pb
 from scorer.score import Link, Scorer
-from scorer.state import read_events
 from scorer.token_index import TokenIndex
 from security import AgreementFiles, canonical_pair
 

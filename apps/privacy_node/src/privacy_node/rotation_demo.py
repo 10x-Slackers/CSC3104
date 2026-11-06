@@ -10,10 +10,10 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from ingestor import read_events
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.demo import TINY, prepare_demo_keys, start_banks
 from privacy_node.keys import pair_paths, public_keys
-from scorer.state import read_events
 
 
 def main():

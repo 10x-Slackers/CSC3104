@@ -11,8 +11,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
 
-from ingestor import Event
-from scorer.state import MemoryState, read_events
+from ingestor import Event, read_events
+from scorer.state import MemoryState
 
 BANK_TRANSFERS = ("GIRO", "MEPS+")
 CHAIN_RATIO = (Decimal("0.90"), Decimal("1.10"))

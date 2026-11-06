@@ -1,4 +1,3 @@
-import csv
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -7,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from dataset import replay
-from ingestor import records
+from ingestor import read_events, records
 
 TINY = Path(__file__).parents[1] / "fixtures/tiny"
 
@@ -49,12 +48,11 @@ def test_every_bank_gets_its_bank_transfers_once(monkeypatch):
     for b, (_, got) in banks.items():
         # the ingestor's events are this bank's file without cheque and card (p01, p04)
         produced = [r["value"] for _, _, events in got for r in events]
-        with open(TINY / f"bank_{b}.csv") as f:
-            expected = [
-                e | {"amount": float(e["amount"])}
-                for e in csv.DictReader(f)
-                if e["payment_format"] in ("GIRO", "MEPS+")
-            ]
+        expected = [
+            e
+            for e in read_events(TINY / f"bank_{b}.csv")
+            if e["payment_format"] in ("GIRO", "MEPS+")
+        ]
         assert sorted(produced, key=str) == sorted(expected, key=str)
     # B's first batch got a 503 and was resent unchanged, with the same MsgId
     (first, sent), (again, resent) = [(s, batch) for s, batch, _ in banks["B"][1][:2]]

@@ -16,12 +16,12 @@ from privacy_node import privacy_node_pb2 as pb
 
 # Only confirmed and partial results become chains and are delivered (protocol.md).
 # A case is confirmed once any of its results is; nothing downgrades it.
-STATES = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
+CaseState = Literal["partial", "confirmed"]
+STATES: dict[int, CaseState] = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
 # Simulated analyst actions; none touches a real account. "report" queues the case
 # evidence for the mock intake.
 Decision = Literal["monitor", "suspend", "freeze", "report"]
 DECISIONS = get_args(Decision)
-CaseState = Literal["partial", "confirmed"]
 ReviewStatus = Literal["approved", "rejected"]
 
 
@@ -362,12 +362,13 @@ class SqliteCaseStore:
                     (f"report:{case_id}:{decision}", case_id, now, now),
                 )
 
-    def save_report(self, case_id: str, source: str, body: str) -> int | None:
+    def save_report(self, case_id: str, source: str, body: str) -> int:
         """Store a generated report as a draft pending analyst review; return its ID."""
         return self.db.execute(
-            "INSERT INTO reports (case_id, source, body, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO reports (case_id, source, body, created_at) VALUES (?, ?, ?, ?)"
+            " RETURNING report_id",
             (case_id, source, body, time.time()),
-        ).lastrowid
+        ).fetchone()[0]
 
     def review_report(self, case_id: str, report_id: int, status: ReviewStatus) -> bool:
         """Approve or reject a case's draft once; False if it isn't a pending draft."""

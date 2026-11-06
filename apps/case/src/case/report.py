@@ -127,9 +127,7 @@ class TemplateClient:
         return "\n".join(lines)
 
 
-def draft_report(
-    store: SqliteCaseStore, case: Case, client: ReportClient
-) -> int | None:
+def draft_report(store: SqliteCaseStore, case: Case, client: ReportClient) -> int:
     """Filter, draft and store as a draft; return the new report ID."""
     data = report_input(case)
     return store.save_report(case["case_id"], client.source, client.draft(data))
