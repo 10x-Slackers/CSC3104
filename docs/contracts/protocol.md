@@ -41,13 +41,13 @@ Searches start from the scorer's detection, wherever it is, because a chain is o
 
 ## Messages
 
-Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). Every serialized message passes `check_peer_payload` against `ALLOWED_FIELDS` in `claims.py` before sending. Every received message, including nested claims, is checked for protobuf fields the `.proto` doesn't define (`has_unknown_fields`): a request carrying one is rejected with `INVALID_ARGUMENT`, and a reply carrying one, or a `state` outside the `State` enum, becomes `INVALID_CLAIM` in `Node.call()`, so it is never relayed or stored.
+Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto). The recursive schema security test checks every RPC message against `APPROVED_FIELDS` and `FORBIDDEN_FIELDS`. The protobuf runtime field-name walk has been replaced by that test; `ALLOWED_FIELDS` remains test-only. Every received message, including nested claims, is checked for protobuf fields the `.proto` doesn't define (`has_unknown_fields`): a request carrying one is rejected with `INVALID_ARGUMENT`, and a reply carrying one, or a `state` outside the `State` enum, becomes `INVALID_CLAIM` in `Node.call()`, so it is never relayed or stored.
 
 | Message | Fields | Notes |
 | --- | --- | --- |
-| `TokenRef` | `pair`, `token` | A pair-scoped token, e.g. pair `A-B`. Lookups use `(pair, key_version, token)` ([security.md](security.md)) |
+| `TokenRef` | `pair`, `token` | A pair-scoped token of exactly 16 raw bytes, e.g. pair `A-B`. Lookups use `(pair, key_version, token)` ([security.md](security.md)) |
 | `TraceRequest` | `query_id`, `sender`, `key_version`, `ref`, `direction`, `hops_remaining`, `deadline`, `visited` | `hops_remaining`, not `hop`: `hop` is a forbidden evaluation label. **pending work:** `deadline` removed |
-| `LinkClaim` | `signer`, `recipient`, `query_id`, `key_version`, `in_ref`, `out_ref`, `signature` | "I hold `in_ref` and `out_ref` and my local rule links them." An empty ref means the chain starts or ends here. At the hop limit the bank still names its onward transfer, so a cut is visible in the signed claims |
+| `LinkClaim` | `signer`, `recipient`, `query_id`, `key_version`, `in_ref`, `out_ref`, `signature`, `signing_key_version`, `truncated` | "I hold `in_ref` and `out_ref` and my local rule links them." An empty ref means the chain starts or ends here. At the hop limit the bank still names its onward transfer, so a cut is visible in the signed claims |
 | `TraceReply` | `state`, `claims` | Claims in path order, nearest bank first |
 | `ChainResult` (result delivery) | `chain_digest`, `sender`, `state`, `claims` | `chain_digest`, not `chain_id`: `chain_id` is a forbidden evaluation label |
 | `Ack` | `chain_digest` | Returned by `Deliver` once the receiver has stored the result |
@@ -56,15 +56,25 @@ Nothing else leaves a bank: no payment IDs, accounts, amounts, timestamps or rul
 
 ### Signed claim bytes
 
-The signature covers exactly this compact ASCII JSON (`claims.claim_bytes`):
+`claims.claim_bytes` concatenates these fixed-order fields, each preceded by its
+four-byte unsigned big-endian byte length. Text uses UTF-8; tokens remain raw bytes:
 
 ```text
-["csc3104.link-claim","v1",signer,recipient,query_id,key_version,in_pair,in_token,out_pair,out_token]
+"csc3104.link-claim", "v1", signer, recipient, query_id, key_version,
+signing_key_version, in_ref.pair, in_ref.token, out_ref.pair, out_ref.token,
+ASCII("1" if truncated else "0")
 ```
 
-A missing ref is written as two empty strings. The domain string stops the signature being reused for another message type. `recipient` and `query_id` bind the claim to one query, so it can't be replayed into a different search.
+Missing refs have an empty pair and zero token bytes. Recipient, query ID, both key
+versions and truncation are signed. Verification uses trusted
+`(signer, signing_key_version)` keys. The signer must belong to each canonical pair;
+adjacent claims must share a nonempty transfer and token version with different
+signers, and every repeated transfer must have both endpoint banks as witnesses.
 
-A claim is valid only if the signature verifies with the signer's configured public key **and** the signer is a bank in the pair of every ref it vouches for. A chain is valid only if every claim is valid and each claim's `out_ref` equals the next claim's `in_ref`.
+Both `Deliver` and case `/results` use `check_result(result, public_keys, bank)` and
+store its returned copy. It also checks delivered state, receiver participation,
+digest, exactly one sender anchor and query/recipient binding. Open endpoints or
+signed truncation force PARTIAL. Full security interfaces: [security.md](security.md).
 
 ## Search algorithm
 
@@ -79,7 +89,7 @@ A claim is valid only if the signature verifies with the signer's configured pub
 | Retries | One attempt per peer call. `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `ABORTED` → pending and `DEADLINE_EXCEEDED` → timed-out, all re-run by housekeeping; any other peer error → failed, not retried. **pending work:** backoff with jitter and 24 h expiry |
 | Which bank assembles the result | The initiator of that search: up-leg claims reversed, then its own claim, then down-leg claims |
 | Delivery to all involved banks without a global coordinator | Each initiator delivers its own results. The result row and one outbox row per other signer are written in one transaction; `Deliver` is sent once after a batch of searches and retried until acknowledged (housekeeping). The receiver re-verifies every claim, the digest, and that each leg's claims were signed for one query and the bank that asked; it accepts only confirmed or partial results, and stores a chain whose end is a cut as partial whatever the sender says. Any bank can be an initiator, so no single bank is a dependency for the whole system |
-| Chain identity | `chain_digest` = SHA-256 of the sorted set of transfer tokens in the chain, including a transfer named at a cut. Searches started at different banks over the same transfers produce the same digest (tested on loop `o1`, started from B and C). Adopted as the case identity ([case.md](case.md)) |
+| Chain identity | `chain_digest` = SHA-256 of sorted distinct `(pair, raw token)` identities, framing each UTF-8 pair and token with its four-byte big-endian length, including a transfer named at a cut. Searches started at different banks over the same transfers produce the same digest (tested on loop `o1`, started from B and C). Adopted as the case identity ([case.md](case.md)) |
 
 ## Result states
 
@@ -133,10 +143,18 @@ Own-leg details travel only inside the bank, never in a peer message. The case s
 
 ## Running and testing
 
+The node CLI uses only `--key-directory ROOT`, containing `<bank>/active.json` and
+the private/public/trusted layout in [security.md](security.md). The manifest selects
+active/query/signing versions and trusted peer readiness. It is reread on reload;
+explicit key-path options and `--key-config` have been removed. Each peer call opens
+and closes its own channel, rereading renewed TLS credentials. This preserves
+connection-level Service balancing across replicas; extra handshakes are accepted.
+
+
 ```sh
 uv run pytest apps/privacy_node             # 40 protocol tests
 uv run python -m privacy_node.demo          # three banks on localhost, prints each trace
-uv run python -m privacy_node.keys .secrets # lab keys (git-ignored)
+uv run python -m privacy_node.keys .secrets A --key-version k1 # one bank; exchange public files only
 ```
 
 Regenerate the stubs after editing the `.proto` (from the repo root):

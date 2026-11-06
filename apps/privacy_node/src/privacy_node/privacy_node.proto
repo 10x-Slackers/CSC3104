@@ -32,7 +32,7 @@ enum State {
 // A pair-scoped transfer token, e.g. pair "A-B".
 message TokenRef {
   string pair = 1;
-  string token = 2;
+  bytes token = 2;  // exactly 16 raw HMAC bytes
 }
 
 message TraceRequest {
@@ -57,6 +57,8 @@ message LinkClaim {
   TokenRef in_ref = 5;
   TokenRef out_ref = 6;
   bytes signature = 7;
+  string signing_key_version = 8;  // independent of token key_version
+  bool truncated = 9;  // local hop/branch cap cut; signed, never CONFIRMED
 }
 
 message TraceReply {

@@ -1,184 +1,246 @@
 # Security and privacy contract
 
-Owner: Caleb · Partners: Zane (messages, signed claims), Cindy (tokens), Jia Rui (report inputs), Isaac (Secrets, certificates, NetworkPolicy) · Code: `apps/security/` · Status: **draft**, needs review by Zane and Cindy
+Owner: Caleb (Role 4). This contract covers tokens, key agreement, signatures,
+shared result validation, mTLS and the cross-bank privacy boundary. Deployment,
+protocol scheduling and case enrichment remain with their respective owners.
 
-> [!NOTE]
-> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **16-byte tokens:** `derive_token` returns the HMAC-SHA256 truncated to 128 bits as `bytes`, with no `ppmc:v1:k1:` prefix (the version is in `key_version`). About 4.7× smaller; NIST SP 800-107 Rev 1 §5.3.3 allows truncation. A new frozen test vector.
-> - **Key agreement, not a dealer:** each bank generates its own X25519 key pair and publishes the public key; `pair_key(A,B,k) = HKDF(X25519(a_priv, B_pub), info="csc3104 pair-key A-B k")`. This replaces `privacy_node/keys.py`, which generates every bank's keys on one machine. No secret travels (MAS TRM §10.2.5); X25519 stays separate from Ed25519 (TRM §10.2.6).
-> - **Rotation with overlapping versions:** introduce `k2` at both banks and index new payments under both keys; switch queries once both have it; retire `k1` after its index entries expire. A new key pair, not a relabel (TRM §10.2.9). Keys are re-read on a timer, and public keys are looked up by (bank, key version). Demonstrated during a live replay.
-> - **Schema test instead of the runtime walk:** one CI test reads the protobuf descriptor and asserts every field is allowed and none is in `FORBIDDEN_FIELDS`; the node rejects unknown fields. `check_peer_payload` stays for untyped JSON.
-> - **`check_result`** in `claims.py`: all six chain conditions, shared by the node's `Deliver` and the case service's `/results`.
-> - **Own-bank data in cases:** an analyst sees their own bank's legs (payment ID, account, amount); other banks' legs stay tokens ([Disclosure boundary](#disclosure-boundary)).
-> - **mTLS** with a SPIFFE-style URI SAN naming the bank, and certificates reloaded on renewal; NetworkPolicy paths for Valkey, replay and the summary service.
-
-Scope: pairwise HMAC tokens, Ed25519 claim signing, the disclosure allowlist, certificate identity and mTLS, NetworkPolicy intent, and security test evidence.
-Query rate limiting and a signed audit log are extensions, added only once the core works.
-
-## Threat model
-
-This is a laboratory model; see also [overview.md](../overview.md#trust-and-failure-model).
-
-- Banks keep raw records locally and are assumed to apply the agreed rule honestly.
-- Key provisioning, the certificate authority and each bank's runtime are trusted. If one bank is compromised, its records, its signing key and its two pair keys are exposed.
-- **Protected against:** unauthenticated peers (mTLS), altered or wrongly signed claims (Ed25519), and forbidden fields leaving a bank (allowlist).
-- **Not protected against:** a participating bank lying about its own records, or abusing lookups it is authorised to make. Namespace separation doesn't protect data from the cluster administrator.
-
-## Disclosure boundary
-
-**Never leaves a bank:** customer identifiers, account numbers, raw amounts, raw `payment_id`, full payment records and histories, the local token index, and secrets. The evaluation labels (`chain_id`, `hop`, `scenario`, `altman_laundering`) are never used in scoring or messages ([data.md](data.md)).
-
-| Surface | May contain (exact fields need agreement) | Agree with |
-| --- | --- | --- |
-| Peer query | Pair-scoped token, authenticated bank identity, query ID, versions, protocol hop count and deadline | Zane |
-| Peer claim / assembled result | Token references, signer identity, signature, minimal local-rule assertion | Zane, Jia Rui |
-| Application logs | Request IDs, bank identity, status, timing, error category. No payload dumps; tokens only if needed | All owners |
-| Case service store and UI (**pending work**) | The bank's **own** legs (payment ID, account, amount), snapshotted at case creation; other banks' legs as tokens only. The boundary is between banks, not inside one | Jia Rui, Zane |
-| Summary service input (**pending work**) | The same bank-local case evidence, sent inside the bank to a function URL with `AWS_IAM`; template only, no model | Jia Rui |
-
-The protocol's hop count isn't the same field as the evaluation `hop` label. The protocol field needs a different name.
-
-`check_peer_payload(payload, allowed_fields)` walks dicts and lists recursively and raises `ValueError` for any key that is in `FORBIDDEN_FIELDS` or missing from `allowed_fields`, and `TypeError` for any value that isn't a dict, list, tuple or JSON scalar (convert protobuf messages with `MessageToDict(message, preserving_proto_field_name=True)` first). It checks **field names only**: it can't catch an account number hidden inside an allowed value. Zane's serialiser must also enforce the protobuf schema.
-
-## Pairwise HMAC tokens
-
-Every bank pair shares one independent random 32-byte key. Arbitrary per-bank keys would never produce matching tokens.
-
-| Pair key | Held by | Not given to |
-| --- | --- | --- |
-| A–B | A, B | C |
-| A–C | A, C | B |
-| B–C | B, C | A |
-
-`derive_token(payment_id, bank_a, bank_b, shared_key, key_version) -> str`:
-
-1. Bank IDs are distinct, exact, case-sensitive strings, sorted so that `(A, B)` and `(B, A)` give the same pair. Intra-bank transfers have no peer token and are rejected.
-2. `payment_id` is a string, used exactly as given by [data.md](data.md), with no trimming or case folding.
-3. `key_version` must match `[A-Za-z0-9_-]+`, e.g. `k1`.
-4. The HMAC input is the ASCII JSON from `canonical_token_input`, written with no spaces:
-
-   ```text
-   ["csc3104.payment-token","v1",["A","B"],"k1","p01"]
-   ```
-
-5. Output: `ppmc:v1:<key_version>:<hex of HMAC-SHA256(shared_key, input)>`.
-
-Frozen test vector (the key is test-only):
-
-```text
-key   = b"A" * 32
-input = ["csc3104.payment-token","v1",["A","B"],"k1","p01"]
-token = ppmc:v1:k1:86ef4e3f811c077dcde10d9cef4d807c1b039afda3d794d72174c5d4a92cb444
-```
-
-The pair is bound into the HMAC input but isn't shown in the token. Lookups must therefore be scoped by `(pair, key_version, token)`. Tokens from different pairs or versions are never compared.
-
-**Key rotation** isn't automated (**pending work**: overlapping versions, above). A new key gets a new version label at both endpoints, and then the affected services restart and rebuild their index (Cindy). Changing the encoding requires a new protocol version (`v2`).
-
-## Ed25519 claim signing
-
-- Each bank has its own signing key and is the only holder of its private key.
-- Verifiers look up the public key from trusted configuration keyed by `(bank, signing key version)`. They never trust a key carried inside the claim.
-- `sign(message_bytes, private_key)` signs exactly the bytes given. `verify(message_bytes, signature, public_key)` returns `False` for any bad or non-bytes signature, and the caller must then reject the claim without creating confirmed evidence.
-- Zane defines the canonical claim bytes. They must cover every security-relevant field: domain, signer, recipient/context, query ID, tokens, and key versions.
-- A valid signature proves which bank sent the claim and that it wasn't altered. It does **not** prove the records are true, that the claim is fresh, or that the chain is complete. Replay protection and deadlines belong to the protocol.
-
-Key helpers: `generate_signing_key`, `private_key_pem` (unencrypted PKCS8), `public_key_pem` (SubjectPublicKeyInfo), and `load_signing_key` / `load_verification_key`, which reject keys that aren't Ed25519.
-
-## Secrets
-
-- Keys are generated outside git and loaded as read-only Kubernetes Secret volume files. Bank A mounts the A–B and A–C pair keys and its own signing key; Banks B and C follow the same pattern.
-- Public keys are distributed to every verifier as configuration.
-- Never put keys in manifests, Helm values or git. The local `.secrets/` folder is git-ignored.
-- `load_pairwise_keys(bank_id, {pair: path})` reads the raw bytes without stripping or base64 decoding. It rejects pairs that don't include this bank, pairs supplied twice, keys shorter than 32 bytes, and the same key reused across pairs.
-- Keys are read once at startup, so rotation needs a restart. **pending work:** mounted Secrets update in place, so services re-read keys on a timer.
-
-From another app that lists `security` as a workspace dependency (as `scorer` does):
+## Token and key API
 
 ```python
-from security import derive_token, load_pairwise_keys
-
-keys = load_pairwise_keys("A", {("A", "B"): "/run/secrets/pairs/ab-k1.key"})
-token = derive_token(payment_id, "A", "B", keys["A", "B"], "k1")
+derive_token(payment_id: str, bank_a: str, bank_b: str,
+             shared_key: bytes, key_version: str) -> bytes
+load_pairwise_keys(bank_id: str, key_version: str, local_private_key,
+                   peer_public_keys) -> dict[tuple[str, str], bytes]
 ```
 
-The mount paths above are examples. Secret names and paths: TODO, with Isaac.
+Tokens are the **leftmost 16 raw bytes of HMAC-SHA256**, without a textual prefix.
+The input is compact ASCII JSON, with exact payment IDs and sorted, distinct bank IDs:
 
-## mTLS and NetworkPolicy
+```text
+["csc3104.payment-token","v1",["A","B"],"k1","p01"]
+```
 
-**mTLS** between privacy nodes, with a laboratory CA (e.g. cert-manager):
+`key_version` uses ASCII letters, digits, `_` or `-`. Payment IDs are neither trimmed
+nor case folded. Public test vector: `derive_token("p01", "A", "B", b"A" * 32, "k1")`
+is `bytes.fromhex("86ef4e3f811c077dcde10d9cef4d807c")`; reversing A/B is identical.
+Changing the payment, pair, version or key separates tokens.
 
-- Both sides verify the certificate chain. The client checks the server's SAN.
-- The server maps the client certificate's SAN to a bank using an explicit SAN-to-bank map. Any certificate signed by the CA isn't enough, and a bank ID written in the message never replaces the certificate.
-- The authenticated sender must match the sender in the message envelope. TLS keys are separate from signing keys.
-- **pending work** with Zane and Isaac: the DNS SAN plus a SPIFFE-style URI SAN naming the bank, the trust bundle and Secret mounts; the node re-reads certificates when cert-manager renews them. One shared lab CA is a trusted third party, which is a stated limitation.
+Each bank holds its own X25519 private key and authenticated peer public keys.
+For A-B/k1, both endpoints derive the same 32-byte HMAC key:
 
-**NetworkPolicy** intent: every bank namespace denies all ingress and egress by default, then allows only the following:
+```text
+HKDF(SHA256, length=32, salt=None,
+     info=b"csc3104 pair-key A-B k1").derive(X25519(local_private, peer_public))
+```
 
-| From | To | Allowed |
-| --- | --- | --- |
-| Privacy node | Other banks' privacy nodes | The protocol port only (namespace **and** pod selector) |
-| Ingestor, scorer | Own bank's Kafka | Broker ports |
-| Scorer, privacy node | Own bank's Valkey | Valkey port (**pending work**); the case service never connects |
-| Privacy node, case service | Own bank's PostgreSQL | Database port |
-| Replay Job (`replay` namespace, k3d) | Each bank's ingestor | Its HTTP port (**pending work**) |
-| Case service | Summary service | Its HTTP port in the namespace; on EKS, AWS on 443 with `AWS_IAM` (**pending work**) |
-| Bank workloads | Cluster DNS | DNS |
-| Operator-managed pods (e.g. CloudNativePG) | Kubernetes API server | TCP 443/6443 to the API server addresses only |
-| KEDA operator | Own bank's Kafka | Broker ports, to read consumer lag |
+Pair order and version are part of the HKDF context. Derived pair secrets stay local;
+only public artifacts are exchanged. `AgreementFiles(private_key, peer_public_keys)`
+passes those paths to `TokenIndex(bank, version, files)`. Ed25519, X25519 and TLS
+use separate key pairs and purposes; PEM loaders enforce the expected key type.
 
-Isaac owns the final policies in [deployment.md](deployment.md). The cluster's CNI must actually enforce them.
-
-## Residual disclosure
-
-Tokens are pseudonymous, not anonymous:
-
-- Within one pair and key version, a token is stable, so repeated references to the same payment can be linked.
-- A pair-key holder can test guessed payment IDs. This matters for predictable IDs such as the fixture's `p01`.
-- Bank identities, timing, query frequency and claim outcomes are visible metadata.
-- Intermediate banks link their own incoming and outgoing transfers.
-- An assembled chain reveals the participating banks and their order.
-
-Report these limits alongside the evaluation results. Never claim zero disclosure.
-
-## Tests
+Generate one bank locally, then authenticate/distribute its public files:
 
 ```sh
-uv run pytest apps/security
+uv run python -m privacy_node.keys .secrets A --key-version k1
 ```
 
-Implemented:
+Paths relative to the key root, shown for A:
 
-- the A–B fixture tokens match at both banks
-- the frozen vector
-- changing the ID, key, pair or version changes the token
-- invalid pairs, versions and short keys are rejected
-- key mounts are scoped to their bank; reused keys and duplicate pairs are rejected
-- PEM round trip; non-Ed25519 keys rejected
-- tampered message, wrong signer and malformed signature all fail verification
-- nested allowlist checks; forbidden fields rejected even when the caller allows them
+```text
+A/private/{x25519,signing}/k1.pem
+A/public/{x25519,signing}/k1.pem
+A/trusted/{x25519,signing}/{B,C}/k1.pem
+A/active.json
+```
 
-Integration evidence still needed, owned with Isaac and evaluated in [evaluation.md](../evaluation.md):
+Private PEMs use PKCS8; public PEMs use SubjectPublicKeyInfo. Generation refuses to
+overwrite existing versions. The first run also writes a single-version
+`active.json` (that version active, queried and signing, with both peers ready); later
+versions leave it unchanged. Never commit private material; `.secrets/` is ignored.
 
-- [ ] Put sentinel accounts, IDs and amounts in each bank's data. Capture real queries, claims, logs and report inputs for confirmed, partial, timed-out and invalid searches, and check that none of the sentinels appear in any of them, including as numeric values.
-- [ ] Unauthenticated, expired or wrongly named certificates are rejected.
-- [ ] Tampered or wrongly signed claims never become confirmed evidence.
-- [ ] Cross-bank access to Kafka and PostgreSQL is denied on k3d and EKS.
+## Versions, rotation and reload
 
-## Interfaces
+`TokenRef.token` is protobuf `bytes`. Token identity is `(canonical_pair, key_version,
+raw_token)` in peer messages and the index. At the case persistence/model boundary,
+`Claim.from_pb` converts tokens and signatures once to stable hex text. Case transfer
+identity is `(canonical_pair, key_version, token_hex)`; display/report paths use that text. Recreate existing coursework
+case databases when adopting the new schema.
 
-Agreed contract first ([conventions](../README.md#conventions)): the producer adds one sample message here, and both sides' tests load it.
+1. Introduce k2 at both endpoints using `introduce_version(version, files)`.
+   Retained references are backfilled and new events index under both k1 and k2.
+   Overlapping versions must cover the same configured pairs. Capacity failures
+   leave the previous index intact.
+2. Switch with `set_query_version(version, peer_versions)` only when trusted
+   configuration confirms every required peer supports that version. In-flight
+   searches keep the version they started with.
+3. Retire k1 only after old requests and retained work drain. Lookup never falls
+   back to another version. Old signing verification keys remain for stored evidence.
 
-| Interface | From → to | Pins down | Status | Agree by |
-| --- | --- | --- | --- | --- |
-| Token and key API ([security.md](security.md)) | Caleb → Cindy, Zane | `derive_token` signature, 16 bytes out, key file layout and `key_version`, one test vector | **draft**, sample TODO | Mon 2 Nov |
-| `check_result` ([security.md](security.md)) | Caleb → Zane, Jia Rui | Signature, the six conditions, how a failure is reported | **draft** | Wed 4 Nov |
+A new X25519 key pair at each bank is required for each rotated version; merely
+relabeling old material is not a key rotation. The index does not compare
+public material across versions: HKDF and HMAC already bind the version. Changing
+derived keys within an existing version is rejected because it would invalidate
+retained token references. Index retention/TTL integration remains Cindy's work.
 
-Also part of: [`.proto` v1](protocol.md#interfaces).
+`--key-directory ROOT` is the only node key mode and reads `ROOT/<bank>/active.json`. Example for B:
 
-## Open
+```json
+{"active_versions":["k1","k2"],"query_version":"k1","signing_key_version":"k2",
+ "peer_versions":{"A":["k1","k2"],"C":["k1","k2"]}}
+```
 
-- [ ] Review Zane's protobuf field allowlist: `ALLOWED_FIELDS` in `apps/privacy_node/src/privacy_node/claims.py`, per message in [protocol.md](protocol.md#messages). `chain_id` was renamed `chain_digest` and `hop` is `hops_remaining`, so neither collides with `FORBIDDEN_FIELDS` (Caleb).
-- [ ] Review Zane's canonical claim bytes: [protocol.md](protocol.md#signed-claim-bytes), `claims.claim_bytes` (Caleb).
-- [ ] Secret names, mount paths and the SAN-to-bank map (Caleb, with Isaac).
-- [x] Destination and inputs for the report: the summary service, template only, bank-local case evidence.
+Publish key files before updating this trusted readiness manifest. Mount read-only
+Secret directories without `subPath` so renewals are visible. Directory mode discovers
+new versions; the manifest is the single configuration source. Housekeeping starts
+at most one background reload. Filesystem reads, key parsing and pair-key derivation
+happen outside the local state lock; only validated state is applied under that lock.
+Cheap material/readiness checks run before copying. Changed configuration uses a
+shallow index copy with fresh key/entry dictionaries; unchanged configuration reuses
+the index. Failed reloads retain the previous
+working key set, and pending searches/deliveries continue while a read is slow.
+
+The security rotation demonstration uses temporary keys and localhost demo transport:
+
+```sh
+uv run python -m privacy_node.rotation_demo
+```
+
+## Signing and shared result validation
+
+`LinkClaim.key_version` scopes tokens; `signing_key_version` selects the trusted
+Ed25519 public key at `(signer, signing_key_version)`. Old/new verification keys
+coexist; claims never supply their own trusted key. The case app uses `CASE_KEY_DIRECTORY` plus `CASE_BANK` and the same
+`keys.public_keys(root, bank)` loader as the node. It combines this bank's
+`public/signing/<version>.pem` with `trusted/signing/<peer>/<version>.pem`, reread
+per `/results` request. `create_app` always receives a loader, including in tests.
+
+`claim_bytes` concatenates these fields, each preceded by a four-byte unsigned
+big-endian byte length. Text uses UTF-8 and tokens use raw bytes:
+
+```text
+"csc3104.link-claim", "v1", signer, recipient, query_id, key_version,
+signing_key_version, in_ref.pair, in_ref.token, out_ref.pair, out_ref.token,
+ASCII("1" if truncated else "0")
+```
+
+Missing references have an empty pair and token. The signature covers versions,
+query/recipient binding and truncation. Chain digests hash sorted distinct transfer
+identities, framing each UTF-8 pair and raw token in the same length-prefixed form.
+The matching peer schema and framing are documented in [protocol.md](protocol.md).
+
+`claims.check_result(result, public_keys, bank)` is the single validator used by
+PrivacyNode `Deliver` and case `/results`. It raises `ValueError` or returns a
+verified copy; receivers store that returned copy. It guarantees:
+
+- Only CONFIRMED/PARTIAL results involving the receiving bank are delivered.
+- Digest, trusted versioned signatures, canonical pairs and 16-byte refs verify.
+- Each signer owns its refs; a non-self recipient shares a claimed pair.
+- Adjacent claims share a nonempty transfer and token version, with **different
+  signers**. Since each pair has two endpoints, both banks must independently sign
+  that shared transfer. One bank cannot satisfy both sides of an A-B relationship;
+  one claim also cannot repeat its incoming token as its outgoing token. Every repeated
+  transfer, including a closing loop reference, must have both endpoint banks as signers.
+- Exactly one sender-authored self-recipient anchor exists. Each outward leg has
+  consistent query IDs and successive requester/recipient bindings.
+- Cut/open endpoints and signed `truncated` flags force PARTIAL without mutating input.
+
+Legitimate A-B -> B-C chains and loops with independent adjacent banks remain valid.
+Signatures prove authorship/integrity, not truthful records or laundering.
+
+## Privacy boundary and schema review
+
+Raw payment IDs, accounts, amounts, customer identifiers, full histories and private
+keys must never enter cross-bank peer messages. Evaluation labels `chain_id`, `hop`,
+`scenario` and `altman_laundering` are forbidden too. Approved protocol metadata
+`chain_digest` and `hops_remaining` are distinct from those labels. Avoid payload dumps
+in logs. Tokens are pseudonymous and linkable within their pair/version.
+
+**Own-bank enrichment may occur internally, but raw own-bank details must never enter
+cross-bank peer messages.** Another bank's raw details must never be requested or
+forwarded peer-to-peer. Enrichment implementation and its internal API belong to
+Zane/Jia Rui; this PR supplies only the security rule.
+
+The schema security test recursively checks every RPC input/output and nested message
+against exact per-message `APPROVED_FIELDS` and unchanged `FORBIDDEN_FIELDS`.
+Caleb must review schema field additions before updating that approval list.
+Zane's #17 supplies the integrated `has_unknown_fields` helper: Trace rejects unknown
+fields before cache access, and shared `check_result` rejects them for both result
+receivers. Outgoing calls reject unreadable replies, including undefined states.
+The existing absolute deadline and Zane's transient/dead-letter behaviour are retained;
+future deadline changes remain his protocol work.
+
+## mTLS and deployment requirements
+
+The normal CLI requires `--tls-cert PATH --tls-key PATH --tls-ca PATH`.
+`--insecure-demo` is only for explicit local demonstrations. Clients verify the trusted
+CA and target DNS hostname; servers require a trusted client certificate. Both Trace
+and Deliver bind `sender` to exactly one authenticated bank URI SAN **before** reading
+cached replies or writing state:
+
+```text
+spiffe://csc3104/bank/A/privacy-node
+```
+
+Use A, B or C for the bank named by the certificate. A trusted certificate without
+that bank identity is insufficient. Certificate provisioning must include the peer
+service DNS names and both server/client authentication usages.
+
+Mount certificate, private key and CA as a read-only directory (for example
+`/tls/tls.crt`, `/tls/tls.key`, `/tls/ca.crt`), without `subPath`. `TlsFiles.read()`
+rereads cert/key/CA bytes for every new client channel. The node opens and closes a
+channel per peer call so connection-level Service balancing can select another
+replica; the extra handshake cost is an accepted design trade-off. Server dynamic
+credentials reread the mounted files for each handshake. Existing in-flight calls
+finish using their established session; new calls use renewed material. Verification
+and bank identity checks remain enabled. See the [Kubernetes gRPC balancing explanation](https://kubernetes.io/blog/2018/11/07/grpc-load-balancing-on-kubernetes-without-tears/).
+
+Isaac owns chart changes and k3d/CNI verification. Required paths:
+
+| Path | Requirement |
+| --- | --- |
+| Privacy node -> other bank's privacy node, TCP 50051 | OPEN, restricted to privacy-node workloads |
+| Required bank-local Kafka, PostgreSQL, Valkey, case/intake and DNS paths | OPEN for the appropriate local clients |
+| Any cross-bank PostgreSQL or Kafka path | BLOCKED |
+| Unauthorized namespace/workload -> bank services or privacy peers | BLOCKED |
+
+Isaac must collect live enforcing-CNI evidence for each allowed/blocked path, with
+positive controls proving blocked destinations are otherwise reachable. Also inspect
+issued bank URI/DNS SANs, usages and mounts; demonstrate valid peer handshakes,
+wrong-bank/sender rejection and certificate renewal without restart. Local TLS tests
+are application evidence; they do not establish chart correctness or CNI enforcement.
+
+For any future summary Function URL, Isaac/Jia Rui must use AWS_IAM, scoped Pod Identity
+permissions and SigV4 requests, without public grants or static AWS credentials.
+No Lambda deployment/client or cloud acceptance evidence is supplied here.
+
+## Interfaces and verification
+
+Cindy integrates the raw-byte pair/version API and overlap lifecycle into Valkey/TTLs.
+The consume-only scorer CLI uses `--key-version k1 --x25519-private PATH` and repeated
+`--peer-public-key PEER PATH` options. Ingestor events pass through unchanged.
+Zane owns durable case delivery; his #17 checks use the shared result validator. Jia Rui keeps
+`/results` on `check_result`, owns enrichment, and consumes the updated case fields
+`signing_key_version` and `truncated`. Cross-version case reconciliation is not
+implemented. Isaac owns deployment/mounts and the live evidence above.
+
+Banks, trusted public-key provisioning and the lab CA/operator are trusted. A compromised
+bank exposes its own keys/records; the shared CA can impersonate any bank. Timing,
+bank identities and token reuse remain visible. These are coursework limitations.
+
+Run from the repository root:
+
+```sh
+uv sync --all-packages --locked
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+Security tests cover the frozen HMAC vector, X25519/HKDF, overlapping versions,
+versioned signing, shared result attacks, independent bank participation, schema privacy,
+reload progress/rollback and real mTLS handshakes/per-call renewal. Test keys and
+certificates are generated in temporary directories; no runtime secrets are committed.
+
+API references: [X25519](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/x25519/),
+[HKDF](https://cryptography.io/en/latest/hazmat/primitives/key-derivation-functions/#hkdf),
+[gRPC credentials/channels](https://grpc.github.io/grpc/python/grpc.html).

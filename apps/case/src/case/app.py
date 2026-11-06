@@ -1,8 +1,8 @@
 """Analyst UI and JSON API for one bank's cases, with the report dispatcher running inside.
 
-    CASE_BANK=A CASE_DB=cases-a.db CASE_PUBLIC_KEYS=.secrets/public uv run python -m case.app
+    CASE_BANK=A CASE_DB=cases-a.db CASE_KEY_DIRECTORY=.secrets uv run python -m case.app
 
-Settings (environment): CASE_BANK, CASE_DB, CASE_PUBLIC_KEYS, CASE_INTAKE_URL, PORT.
+Settings (environment): CASE_BANK, CASE_DB, CASE_KEY_DIRECTORY, CASE_INTAKE_URL, PORT.
 Chain results arrive from the bank's privacy node on POST /results. Alerts and merges
 go straight to this UI's inbox; reports go to the mock intake (intake.py).
 """
@@ -17,9 +17,10 @@ from typing import Annotated
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from google.protobuf.message import DecodeError
 
 from case.case_store import SqliteCaseStore, neighbours
-from case.evidence import load_public_keys, verify_result
+from case.evidence import check_result, load_public_keys
 from case.outbox import run, webhook
 from case.report import TemplateClient, draft_report, when
 from privacy_node import privacy_node_pb2 as pb
@@ -38,7 +39,7 @@ padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color
 
 
 def short(token):
-    """Show a token's version prefix and the start of its digest; "-" for none."""
+    """Show the stored token hex; peer messages still use raw bytes."""
     if not token:
         return "-"
     return f"<code title='{escape(token)}'>{escape(token[:24])}…</code>"
@@ -191,16 +192,14 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
 
     @app.post("/results")
     async def results(request: Request):
-        """Take one serialized ChainResult from this bank's privacy node; returns its Ack.
-
-        DEPENDS ON Role 3 (privacy node): posting every ChainResult it saves
-        (store.save_chain, for its own searches and for Deliver) to this endpoint.
-        Status: pending.
-        """
-        result = pb.ChainResult.FromString(await request.body())
-        if not verify_result(result, public_keys, bank):
-            raise HTTPException(422, "Invalid chain result")
-        store().record(result)  # raises ValueError (422) unless confirmed or partial
+        """Verify one bank-internal protobuf result before storing its normalized copy."""
+        try:
+            result = pb.ChainResult.FromString(await request.body())
+            keys = public_keys()
+            result = check_result(result, keys, bank)
+        except (DecodeError, ValueError) as exc:
+            raise HTTPException(422, "Invalid chain result") from exc
+        store().record(result)
         return {"chain_digest": result.chain_digest}
 
     @app.get("/api/cases")
@@ -216,12 +215,15 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
 
 
 if __name__ == "__main__":
+    bank = os.environ.get("CASE_BANK", "A")
     uvicorn.run(
         create_app(
             os.environ.get("CASE_DB", "cases.db"),
-            os.environ.get("CASE_BANK", "A"),
+            bank,
             os.environ.get("CASE_INTAKE_URL", "http://127.0.0.1:8001/reports"),
-            load_public_keys(os.environ.get("CASE_PUBLIC_KEYS", "/public")),
+            lambda: load_public_keys(
+                os.environ.get("CASE_KEY_DIRECTORY", ".secrets"), bank
+            ),
         ),
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),

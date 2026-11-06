@@ -12,6 +12,7 @@ from confluent_kafka import Consumer, KafkaException
 
 from scorer.baseline import make_scorer, thresholds
 from scorer.token_index import TokenIndex
+from security import AgreementFiles
 
 
 def topic(bank):
@@ -104,30 +105,37 @@ def main():
         help="stop when the index is full; never evict",
     )
     parser.add_argument(
-        "--pairwise-key",
+        "--peer-public-key",
         nargs=2,
         action="append",
         default=[],
         metavar=("PEER", "PATH"),
-        help="raw pairwise key file; repeat for each peer",
+        help="trusted X25519 peer public PEM; repeat for each peer",
     )
+    parser.add_argument("--x25519-private", help="this bank's X25519 private PEM")
     args = parser.parse_args()
     token_index = None
     if (
         args.key_version is not None
-        or args.pairwise_key
+        or args.peer_public_key
+        or args.x25519_private
         or args.max_token_references is not None
     ):
-        if not args.key_version or not args.pairwise_key:
-            parser.error("Indexing requires --key-version and --pairwise-key")
+        if not args.key_version or not args.peer_public_key or not args.x25519_private:
+            parser.error(
+                "Indexing requires --key-version, --x25519-private "
+                "and --peer-public-key"
+            )
         paths = {}
-        for peer, path in args.pairwise_key:
-            pair = (args.bank, peer)
-            if pair in paths:
+        for peer, path in args.peer_public_key:
+            if peer in paths:
                 parser.error("Duplicate peer key configuration")
-            paths[pair] = path
+            paths[peer] = path
         token_index = TokenIndex(
-            args.bank, args.key_version, paths, args.max_token_references
+            args.bank,
+            args.key_version,
+            AgreementFiles(args.x25519_private, paths),
+            args.max_token_references,
         )
     scorer = make_scorer(args)
     consumer = Consumer(
