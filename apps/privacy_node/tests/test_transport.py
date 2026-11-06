@@ -188,9 +188,7 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
     client_tls = material(tmp_path / "client", ca, "A")
     store = Mock()
     store.get_reply.return_value = pb.TraceReply(state=pb.NO_MATCH)
-    receiver = Node(
-        SimpleNamespace(bank="B"), store, None, {}, {}, "k1", tls=server_tls
-    )
+    receiver = Node(SimpleNamespace(bank="B"), store, None, {}, {}, tls=server_tls)
     server, port = serve(receiver)
     sender = Node(
         SimpleNamespace(bank="A"),
@@ -198,7 +196,6 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
         None,
         {},
         {"B": f"localhost:{port}"},
-        "k1",
         tls=client_tls,
     )
     request = pb.TraceRequest(sender="A", query_id="cached-query")
@@ -220,12 +217,11 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
         store.get_reply.assert_not_called()
         store.save_chain.assert_not_called()
     finally:
-        sender.close()
         server.stop(0).wait()
 
 
 @pytest.mark.parametrize("renew_ca", [False, True])
-def test_node_reuses_channel_until_mounted_tls_material_changes(
+def test_node_opens_channel_per_call_and_reads_renewed_material(
     tmp_path, monkeypatch, renew_ca
 ):
     ca = authority()
@@ -233,9 +229,7 @@ def test_node_reuses_channel_until_mounted_tls_material_changes(
     client_tls = material(tmp_path / "client", ca, "A")
     store = Mock()
     store.get_reply.return_value = pb.TraceReply(state=pb.NO_MATCH)
-    receiver = Node(
-        SimpleNamespace(bank="B"), store, None, {}, {}, "k1", tls=server_tls
-    )
+    receiver = Node(SimpleNamespace(bank="B"), store, None, {}, {}, tls=server_tls)
     server, port = serve(receiver)
     sender = Node(
         SimpleNamespace(bank="A"),
@@ -243,7 +237,6 @@ def test_node_reuses_channel_until_mounted_tls_material_changes(
         None,
         {},
         {"B": f"localhost:{port}"},
-        "k1",
         tls=client_tls,
     )
     create_channel = Mock(wraps=grpc.secure_channel)
@@ -255,20 +248,17 @@ def test_node_reuses_channel_until_mounted_tls_material_changes(
 
     try:
         assert trace().state == trace().state == pb.NO_MATCH
-        assert create_channel.call_count == 1
-        original = sender._channels[f"localhost:{port}"][1]
+        assert create_channel.call_count == 2
         # The same caller gets renewed files without restarting the node.
         renewed = authority() if renew_ca else ca
         if renew_ca:
             material(server_tls.certificate.parent, renewed, "B")
         material(client_tls.certificate.parent, renewed, "A")
         assert trace().state == pb.NO_MATCH
-        assert create_channel.call_count == 2
-        assert sender._channels[f"localhost:{port}"][1] is not original
+        assert create_channel.call_count == 3
         assert trace().state == pb.NO_MATCH
-        assert create_channel.call_count == 2
+        assert create_channel.call_count == 4
     finally:
-        sender.close()
         server.stop(0).wait()
 
 
@@ -286,9 +276,7 @@ def test_tls_renewal_preserves_inflight_call(tmp_path):
         return pb.TraceReply(state=pb.NO_MATCH)
 
     store.get_reply.side_effect = stored
-    receiver = Node(
-        SimpleNamespace(bank="B"), store, None, {}, {}, "k1", tls=server_tls
-    )
+    receiver = Node(SimpleNamespace(bank="B"), store, None, {}, {}, tls=server_tls)
     server, port = serve(receiver)
     sender = Node(
         SimpleNamespace(bank="A"),
@@ -296,7 +284,6 @@ def test_tls_renewal_preserves_inflight_call(tmp_path):
         None,
         {},
         {"B": f"localhost:{port}"},
-        "k1",
         tls=client_tls,
     )
 
@@ -319,5 +306,4 @@ def test_tls_renewal_preserves_inflight_call(tmp_path):
                 release.set()
             assert inflight.result(timeout=3).state == pb.NO_MATCH
     finally:
-        sender.close()
         server.stop(0).wait()

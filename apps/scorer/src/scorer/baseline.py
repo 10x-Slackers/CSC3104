@@ -16,7 +16,6 @@ def thresholds(parser):
         "--min-delay", type=float, default=60, help="seconds, inclusive"
     )
     parser.add_argument("--window", type=float, default=1800, help="seconds, inclusive")
-    parser.add_argument("--max-events", type=int, default=10000)
 
 
 def make_scorer(args):
@@ -26,7 +25,6 @@ def make_scorer(args):
         args.max_ratio,
         args.min_delay,
         args.window,
-        args.max_events,
     )
 
 

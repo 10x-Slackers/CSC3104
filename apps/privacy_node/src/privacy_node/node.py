@@ -2,14 +2,7 @@
 
 Run one per bank, e.g.:
   uv run python -m privacy_node.node --bank B --port 50052 \
-    --workload apps/dataset/fixtures/tiny --key-version k1 \
-    --x25519-private-key .secrets/B/private/x25519/k1.pem \
-    --peer-x25519-public-key A .secrets/B/trusted/x25519/A/k1.pem \
-    --peer-x25519-public-key C .secrets/B/trusted/x25519/C/k1.pem \
-    --signing-key .secrets/B/private/signing/k1.pem --signing-key-version k1 \
-    --public-key A k1 .secrets/B/trusted/signing/A/k1.pem \
-    --public-key B k1 .secrets/B/trusted/signing/B/k1.pem \
-    --public-key C k1 .secrets/B/trusted/signing/C/k1.pem \
+    --workload apps/dataset/fixtures/tiny --key-directory .secrets \
     --tls-cert /run/tls/tls.crt --tls-key /run/tls/tls.key --tls-ca /run/tls/ca.crt \
     --peer A privacy-node.bank-a.svc.cluster.local:50051 \
     --peer C privacy-node.bank-c.svc.cluster.local:50051 --search
@@ -27,7 +20,7 @@ import threading
 import traceback
 import uuid
 from concurrent import futures
-from copy import deepcopy
+from copy import copy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -52,13 +45,7 @@ from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
 from privacy_node.transport import TlsFiles, authenticated_bank
 from scorer.stream import consume
-from security import (
-    AgreementFiles,
-    load_pairwise_keys,
-    load_signing_key,
-    load_verification_key,
-    sign,
-)
+from security import load_pairwise_keys, sign
 
 log = logging.getLogger(__name__)
 
@@ -117,23 +104,17 @@ class Node(pb_grpc.PrivacyNodeServicer):
         signing_key,
         public_keys,
         peers,
-        key_version,
         ingestion_grace_seconds=0,
         signing_key_version="k1",
         tls=None,
-        reload_keys=None,
     ):
         self.bank = local.bank
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
-        self.peers, self.key_version = peers, key_version
+        self.peers = peers
         self.signing_key_version, self.tls = signing_key_version, tls
-        self.reload_keys = reload_keys
+        self.reload_keys = None
         self._key_reload = None
-        self._channels = {}
-        self._retired_channels = set()
-        self._active_calls = {}
-        self._channel_lock = threading.Lock()
         self._started_detections = set()
         if ingestion_grace_seconds < 0:
             raise ValueError("Ingestion grace must be nonnegative")
@@ -142,63 +123,23 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     # ---- outgoing calls -------------------------------------------------
 
+    @property
+    def key_version(self):
+        return self.local.index.key_version
+
     def call(self, bank, method, request, deadline):
-        """Reuse each peer channel until its mounted TLS credentials change."""
+        """Open one channel per call so Service balancing can select a replica."""
         target = self.peers[bank]
-        material = self.tls.read() if self.tls else None
-        with self._channel_lock:
-            previous, channel = self._channels.get(target, (None, None))
-            if channel is None or previous != material:
-                if channel is not None:
-                    self._retire_channel(channel)
-                channel = (
-                    self.tls.channel(target, material)
-                    if self.tls
-                    else grpc.insecure_channel(target)
-                )
-                self._channels[target] = material, channel
-            self._active_calls[channel] = self._active_calls.get(channel, 0) + 1
-        try:
+        with (
+            self.tls.channel(target) if self.tls else grpc.insecure_channel(target)
+        ) as channel:
             stub = pb_grpc.PrivacyNodeStub(channel)
             timeout = (deadline - now()).total_seconds()
             reply = getattr(stub, method)(request, timeout=timeout)
-            if not unreadable(reply):
-                return reply
-            # Never relay or use what we cannot read. An Ack is only a receipt.
-            log.warning("unreadable %s reply from bank=%s", method, bank)
-            return (
-                pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
-            )
-        except grpc.RpcError as error:
-            if error.code() == grpc.StatusCode.UNAVAILABLE:
-                with self._channel_lock:
-                    if self._channels.get(target, (None, None))[1] is channel:
-                        del self._channels[target]
-                        self._retire_channel(channel)
-            raise
-        finally:
-            with self._channel_lock:
-                self._active_calls[channel] -= 1
-                if not self._active_calls[channel]:
-                    del self._active_calls[channel]
-                    if channel in self._retired_channels:
-                        self._retire_channel(channel)
-
-    def _retire_channel(self, channel):
-        """Caller holds the channel lock; let any existing RPCs finish first."""
-        if self._active_calls.get(channel):
-            self._retired_channels.add(channel)
-        else:
-            self._retired_channels.discard(channel)
-            channel.close()
-
-    def close(self):
-        """Release current and retired channels after the node has stopped."""
-        channels = [channel for _, channel in self._channels.values()]
-        for channel in channels + list(self._retired_channels):
-            channel.close()
-        self._channels.clear()
-        self._retired_channels.clear()
+        if not unreadable(reply):
+            return reply
+        log.warning("unreadable %s reply from bank=%s", method, bank)
+        return pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
 
     def request(
         self,
@@ -208,12 +149,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
         hops_remaining,
         deadline,
         visited,
-        key_version=None,
+        key_version,
     ):
         return pb.TraceRequest(
             query_id=query_id,
             sender=self.bank,
-            key_version=key_version or self.key_version,
+            key_version=key_version,
             ref=ref,
             direction=direction,
             hops_remaining=hops_remaining,
@@ -221,16 +162,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
             visited=visited,
         )
 
-    def claim(
-        self, recipient, query_id, in_ref, out_ref, key_version=None, truncated=False
-    ):
+    def claim(self, recipient, query_id, in_ref, out_ref, key_version, truncated=False):
         with self.local.lock:
             signing_key, signing_version = self.signing_key, self.signing_key_version
         c = pb.LinkClaim(
             signer=self.bank,
             recipient=recipient,
             query_id=query_id,
-            key_version=key_version or self.key_version,
+            key_version=key_version,
             signing_key_version=signing_version,
             in_ref=in_ref,
             out_ref=out_ref,
@@ -238,11 +177,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         c.signature = sign(claim_bytes(c), signing_key)
         return c
-
-    def set_query_version(self, version, peer_versions):
-        with self.local.lock:
-            self.local.index.set_query_version(version, peer_versions)
-            self.key_version = version
 
     def reload_key_directory(self, root, config):
         """Apply a trusted mounted active-version manifest without restarting."""
@@ -257,18 +191,25 @@ class Node(pb_grpc.PrivacyNodeServicer):
         signing_key = own_key(root, self.bank, signing_version)
         public_keys = trusted_public_keys(root, self.bank)
         with self.local.lock:
-            candidate = self.local.index
-            if not candidate.matches_versions(keys, config["query_version"]):
-                candidate = deepcopy(candidate)
+            index = self.local.index
+            for version, material in keys.items():
+                index.check_version(version, material)
+            index.check_query_version(
+                config["query_version"], config["peer_versions"], keys
+            )
+            candidate = index
+            if not index.matches_versions(keys, config["query_version"]):
+                candidate = copy(index)
+                candidate._keys = index._keys.copy()
+                candidate._entries = index._entries.copy()
                 for version, material in keys.items():
                     candidate.apply_version(version, material)
-            candidate.set_query_version(
-                config["query_version"], config["peer_versions"]
-            )
-            for version in set(candidate.active_versions) - set(active):
-                candidate.retire_version(version)
+                candidate.set_query_version(
+                    config["query_version"], config["peer_versions"]
+                )
+                for version in set(candidate.active_versions) - set(active):
+                    candidate.retire_version(version)
             self.local.index = candidate
-            self.key_version = config["query_version"]
             self.signing_key = signing_key
             self.signing_key_version = signing_version
             self.public_keys = public_keys
@@ -531,25 +472,9 @@ def main():
     parser.add_argument("--max-ratio", default="0.98")
     parser.add_argument("--min-delay", type=float, default=60)
     parser.add_argument("--window", type=float, default=1800)
-    parser.add_argument("--max-events", type=int, default=10000)
     parser.add_argument("--max-token-references", type=int)
-    parser.add_argument("--key-version", default="k1")
     parser.add_argument(
-        "--key-directory", help="per-bank key tree for reloadable active versions"
-    )
-    parser.add_argument("--key-config", help="mounted JSON active-version manifest")
-    parser.add_argument("--x25519-private-key")
-    parser.add_argument(
-        "--peer-x25519-public-key", nargs=2, action="append", default=[]
-    )
-    parser.add_argument("--signing-key")
-    parser.add_argument("--signing-key-version", default="k1")
-    parser.add_argument(
-        "--public-key",
-        nargs=3,
-        action="append",
-        default=[],
-        metavar=("BANK", "VERSION", "PATH"),
+        "--key-directory", required=True, help="this bank's mounted key tree"
     )
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
@@ -574,81 +499,48 @@ def main():
         parser.error(
             "mTLS requires --tls-cert, --tls-key and --tls-ca (local tests: --insecure-demo)"
         )
-    if args.key_directory:
-        config_path = Path(
-            args.key_config or Path(args.key_directory) / args.bank / "active.json"
-        )
-        config = json.loads(config_path.read_text())
-        args.key_version = config["query_version"]
-        args.signing_key_version = config["signing_key_version"]
-        keys = pair_paths(args.key_directory, args.bank, args.key_version)
-        signing_key = own_key(args.key_directory, args.bank, args.signing_key_version)
-        public_keys = trusted_public_keys(args.key_directory, args.bank)
-    else:
-        if not args.x25519_private_key or not args.signing_key:
-            parser.error("provide --key-directory or explicit X25519/signing key files")
-        keys = AgreementFiles(
-            Path(args.x25519_private_key), dict(args.peer_x25519_public_key)
-        )
-        signing_key = load_signing_key(args.signing_key)
-        public_keys = {
-            (bank, version): load_verification_key(path)
-            for bank, version, path in args.public_key
-        }
+    config_path = Path(args.key_directory) / args.bank / "active.json"
+
+    def read_config():
+        return json.loads(config_path.read_text())
+
+    config = read_config()
+    query_version = config["query_version"]
+    if query_version not in config["active_versions"]:
+        parser.error("Query version must be active")
+    keys = pair_paths(args.key_directory, args.bank, query_version)
     rule = {
         name: getattr(args, name)
-        for name in ("min_ratio", "max_ratio", "min_delay", "window", "max_events")
+        for name in ("min_ratio", "max_ratio", "min_delay", "window")
     }
     rule["max_token_references"] = args.max_token_references
     if args.bootstrap_servers:
-        local = LocalBank(args.bank, args.key_version, keys, **rule)
+        local = LocalBank(args.bank, query_version, keys, **rule)
     else:
         local = LocalBank.from_workload(
-            args.workload, args.bank, args.key_version, keys, **rule
+            args.workload, args.bank, query_version, keys, **rule
         )
+    for version in config["active_versions"]:
+        if version != query_version:
+            local.index.introduce_version(
+                version, pair_paths(args.key_directory, args.bank, version)
+            )
+    local.index.set_query_version(query_version, config["peer_versions"])
     node = Node(
         local,
         Store(args.db),
-        signing_key,
-        public_keys,
+        own_key(args.key_directory, args.bank, config["signing_key_version"]),
+        trusted_public_keys(args.key_directory, args.bank),
         dict(args.peer),
-        args.key_version,
         ingestion_grace_seconds=args.ingestion_grace_seconds,
-        signing_key_version=args.signing_key_version,
+        signing_key_version=config["signing_key_version"],
         tls=None
         if args.insecure_demo
         else TlsFiles(args.tls_cert, args.tls_key, args.tls_ca),
     )
-
-    def reload_keys():
-        if args.key_directory:
-            config_path = Path(
-                args.key_config or Path(args.key_directory) / args.bank / "active.json"
-            )
-            node.reload_key_directory(
-                args.key_directory, json.loads(config_path.read_text())
-            )
-            return
-        pair_keys = load_pairwise_keys(
-            args.bank, args.key_version, keys.private_key, keys.peer_public_keys
-        )
-        signing_key = load_signing_key(args.signing_key)
-        public_keys = {
-            (bank, version): load_verification_key(path)
-            for bank, version, path in args.public_key
-        }
-        with local.lock:
-            if not local.index.matches_versions(
-                {args.key_version: pair_keys}, args.key_version
-            ):
-                candidate = deepcopy(local.index)
-                candidate.apply_version(args.key_version, pair_keys)
-                local.index = candidate
-            node.signing_key, node.public_keys = signing_key, public_keys
-
-    node.reload_keys = reload_keys
-    if args.key_directory:
-        reload_keys()
+    node.reload_keys = lambda: node.reload_key_directory(
+        args.key_directory, read_config()
+    )
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
     if args.search and args.workload:
@@ -699,7 +591,6 @@ def main():
         stop.set()
         server.stop(0)
         worker.join(timeout=SEARCH_SECONDS + 5)
-        node.close()
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 

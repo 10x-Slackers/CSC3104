@@ -100,7 +100,7 @@ def test_review_happens_once(store):
 
 def test_ui_generates_and_reviews_drafts(store, tmp_path):
     client = TestClient(
-        create_app(tmp_path / "cases.db", "B", "http://x", public_keys(), None)
+        create_app(tmp_path / "cases.db", "B", "http://x", lambda: public_keys(), None)
     )
     cid = case_id(store)
     assert client.post(f"/cases/{cid}/report").status_code == 200  # after redirect

@@ -31,9 +31,6 @@ def report_input(case):
     """Select only approved evidence fields, with tokens as readable hex."""
     data = {k: case[k] for k in ("case_id", "state", "raised_at", "merged_into")}
     data["links"] = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
-    for link in data["links"]:
-        for field in ("in_token", "out_token"):
-            link[field] = link[field].hex()
     data["results"] = [
         {"chain_digest": d, "sender": s, "state": st} for d, s, st in case["results"]
     ]

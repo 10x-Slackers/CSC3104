@@ -45,8 +45,6 @@ def banks(tmp_path):
     yield nodes, servers
     for server in servers.values():
         server.stop(0)
-    for node in nodes.values():
-        node.close()
 
 
 def run_all(nodes):
@@ -64,7 +62,7 @@ def transfers(result):
 def trace(node, payment, direction, sender, **changes):
     side = "in" if direction == pb.DOWNSTREAM else "out"
     if "ref" not in changes:
-        changes["ref"] = node.local.refs[payment, side]
+        changes["ref"] = node.local.ref(payment, side, "k1")
     fields = {
         "query_id": "q1",
         "sender": sender,
@@ -159,7 +157,7 @@ def test_unknown_token_wrong_sender_and_deadline(banks):
     nodes, _ = banks
     c = nodes["C"]
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
-    inbound = c.local.refs["p07", "in"]
+    inbound = c.local.ref("p07", "in", "k1")
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
     late = (now() - timedelta(seconds=1)).isoformat()
     assert (
@@ -171,7 +169,7 @@ def test_unknown_token_wrong_sender_and_deadline(banks):
 def test_visited_token_closes_loop_without_forwarding(banks):
     nodes, _ = banks
     b = nodes["B"]
-    seen = b.local.refs["p11", "out"]
+    seen = b.local.ref("p11", "out", "k1")
     reply = trace(b, "p10", pb.DOWNSTREAM, "A", visited=[seen])
     assert reply.state == pb.CONFIRMED
     assert [c.signer for c in reply.claims] == ["B"]
@@ -183,7 +181,7 @@ def test_hop_budget_exhausted_is_partial(banks):
     b = nodes["B"]
     reply = trace(b, "p15", pb.DOWNSTREAM, "A", hops_remaining=0)
     assert reply.state == pb.PARTIAL
-    assert reply.claims[0].out_ref == b.local.refs["p16", "out"]  # cut, not an end
+    assert reply.claims[0].out_ref == b.local.ref("p16", "out", "k1")  # cut, not an end
     assert not complete(reply.claims)
 
 
@@ -210,13 +208,15 @@ def test_peer_error_fails_search_without_retry(banks, monkeypatch):
 
 def test_intra_bank_detection_is_not_searched(tmp_path):
     prepare_demo_keys(tmp_path)
-    event = {"bank": "B", "account": "B-x", "payment_format": "Wire"}
+    event = {"bank": "B", "account": "B-x", "payment_format": "MEPS+"}
     events = [
         event
         | {"payment_id": "q1", "direction": "in", "counterparty_bank": "B"}
+        | {"counterparty_account": "B-y"}
         | {"event_time": "2022-09-05T09:00:00Z", "amount": "100"},
         event
         | {"payment_id": "q2", "direction": "out", "counterparty_bank": "C"}
+        | {"counterparty_account": "C-z"}
         | {"event_time": "2022-09-05T09:05:00Z", "amount": "95"},
     ]
     scorer = Scorer("B")
@@ -312,7 +312,6 @@ def test_kafka_state_drives_real_peer_search(tmp_path, monkeypatch, reverse):
                 load_signing_key(tmp_path / bank / "private/signing/k1.pem"),
                 public,
                 {},
-                "k1",
             )
             servers[bank], ports[bank] = serve(nodes[bank])
         for bank, node in nodes.items():
@@ -326,7 +325,7 @@ def test_kafka_state_drives_real_peer_search(tmp_path, monkeypatch, reverse):
             assert actual == expected == node.local.detections
             for e in ordered:
                 if e["counterparty_bank"] != bank:
-                    ref = node.local.refs[e["payment_id"], e["direction"]]
+                    ref = node.local.ref(e["payment_id"], e["direction"], "k1")
                     assert (
                         node.local.lookup(ref.pair, "k1", ref.token, e["direction"])
                         == e["payment_id"]
@@ -457,18 +456,15 @@ def test_kafka_cli_does_not_load_workload(tmp_path, monkeypatch):
         "--search",
         "--housekeeping-seconds",
         "0.01",
-        "--signing-key",
-        str(tmp_path / "B/private/signing/k1.pem"),
+        "--key-directory",
+        str(tmp_path),
     ]
-    paths = pair_paths(tmp_path, "B")
-    args += ["--x25519-private-key", str(paths.private_key), "--insecure-demo"]
-    for peer, path in paths.peer_public_keys.items():
-        args += ["--peer-x25519-public-key", peer, str(path)]
+    args += ["--insecure-demo"]
     monkeypatch.setattr(sys, "argv", args)
     with pytest.raises(RuntimeError, match="end of test"):
         node_module.main()
     assert len(nodes[0].local.detections) == 4
-    assert len(nodes[0].local.refs) == 13
+    assert len(nodes[0].local.counterparty) == 13
     assert consumer.commit.call_count == 15
     assert set(searches) == {
         ("p06", "p07"),
@@ -544,14 +540,13 @@ def test_replay_rebuilds_state_and_repeated_result_alerts_once(banks, tmp_path):
     path = tmp_path / "protocol.db"
     old.store = Store(path)
     first = old.search("p06", "p07")
-    old_ref = old.local.refs["p06", "in"]
+    old_ref = old.local.ref("p06", "in", "k1")
     restarted = Node(
         LocalBank("B", "k1", pair_paths(tmp_path, "B")),
         Store(path),
         old.signing_key,
         old.public_keys,
         old.peers,
-        "k1",
     )
     assert restarted.local.detections == []
     assert restarted.local.lookup(old_ref.pair, "k1", old_ref.token, "in") is None
@@ -583,7 +578,7 @@ def test_concurrent_state_reads_and_old_token_retention(tmp_path):
     def read():
         for _ in range(200):
             for d in local.detections:
-                ref = local.refs[d["incoming_payment_id"], "in"]
+                ref = local.ref(d["incoming_payment_id"], "in", "k1")
                 assert (
                     local.lookup(ref.pair, "k1", ref.token, "in")
                     == d["incoming_payment_id"]
@@ -594,10 +589,11 @@ def test_concurrent_state_reads_and_old_token_retention(tmp_path):
         for future in futures:
             future.result()
     assert len(local.detections) == 4
-    ref = local.refs["p06", "in"]
+    ref = local.ref("p06", "in", "k1")
     local.process(
-        rows[3] | {"payment_id": "later", "event_time": "2022-09-06T12:00:00Z"}
+        rows[3] | {"payment_id": "later", "event_time": "2022-09-12T12:00:00Z"}
     )
+    assert ("p06", "in") not in local.scorer.state.window("B-m1")
     assert local.lookup(ref.pair, "k1", ref.token, "in") == "p06"
 
 
@@ -614,13 +610,10 @@ def test_kafka_cli_sigterm_closes_consumer(tmp_path, monkeypatch):
         "B",
         "--bootstrap-servers",
         "broker:9092",
-        "--signing-key",
-        str(tmp_path / "B/private/signing/k1.pem"),
+        "--key-directory",
+        str(tmp_path),
     ]
-    paths = pair_paths(tmp_path, "B")
-    args += ["--x25519-private-key", str(paths.private_key), "--insecure-demo"]
-    for peer, path in paths.peer_public_keys.items():
-        args += ["--peer-x25519-public-key", peer, str(path)]
+    args += ["--insecure-demo"]
     monkeypatch.setattr(sys, "argv", args)
     previous = signal.getsignal(signal.SIGTERM)
     node_module.main()
@@ -692,7 +685,7 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
     assert {c.signing_key_version for c in overlap.claims} == {"k2"}
 
     with pytest.raises(ValueError, match="not ready"):
-        nodes["B"].set_query_version("k2", {"A": ["k1"], "C": ["k1", "k2"]})
+        nodes["B"].local.index.set_query_version("k2", {"A": ["k1"], "C": ["k1", "k2"]})
     for node in nodes.values():
         node.reload_key_directory(tmp_path, config(["k1", "k2"], "k2"))
     # Pending work seeded before rotation can retry with the new version too.
@@ -757,16 +750,18 @@ def test_signing_reload_cannot_mix_key_and_version_within_a_claim(banks, monkeyp
     first = node.claim(
         "B",
         "concurrent-rotation",
-        node.local.refs["p06", "in"],
-        node.local.refs["p07", "out"],
+        node.local.ref("p06", "in", "k1"),
+        node.local.ref("p07", "out", "k1"),
+        node.key_version,
     )
     assert first.signing_key_version == "k1"
     assert valid_claim(first, node.public_keys)
     second = node.claim(
         "B",
         "after-rotation",
-        node.local.refs["p06", "in"],
-        node.local.refs["p07", "out"],
+        node.local.ref("p06", "in", "k1"),
+        node.local.ref("p07", "out", "k1"),
+        node.key_version,
     )
     assert second.signing_key_version == "k2"
     assert valid_claim(second, node.public_keys)
@@ -815,7 +810,7 @@ def test_slow_key_reload_does_not_block_housekeeping_or_state(
     assert node.key_version == node.signing_key_version == "k2"
 
 
-@pytest.mark.parametrize("failure", ["signing_file", "readiness"])
+@pytest.mark.parametrize("failure", ["signing_file", "readiness", "pair_material"])
 def test_failed_key_reload_preserves_previous_working_set(
     banks, tmp_path, monkeypatch, failure
 ):
@@ -833,8 +828,16 @@ def test_failed_key_reload_preserves_previous_working_set(
         monkeypatch.setattr(
             node_module, "own_key", Mock(side_effect=ValueError("bad PEM"))
         )
-    else:
+    elif failure == "readiness":
         config["peer_versions"]["C"] = ["k1"]
+    else:
+        (tmp_path / "B/private/x25519/k1.pem").write_bytes(
+            (tmp_path / "B/private/x25519/k2.pem").read_bytes()
+        )
+    # Rejected manifests/material must fail the cheap checks before any index copy.
+    monkeypatch.setattr(
+        node_module, "copy", Mock(side_effect=AssertionError("copied invalid config"))
+    )
     with pytest.raises(ValueError):
         node.reload_key_directory(tmp_path, config)
     assert (node.local.index, node.signing_key, node.public_keys) == original
@@ -879,7 +882,9 @@ def test_query_version_switch_during_search_keeps_one_token_scope(
 
     def rotate_before_leg(*args):
         for node in nodes.values():
-            node.set_query_version("k2", {bank: ["k1", "k2"] for bank in "ABC"})
+            node.local.index.set_query_version(
+                "k2", {bank: ["k1", "k2"] for bank in "ABC"}
+            )
         return leg(*args)
 
     monkeypatch.setattr(initiator, "leg", rotate_before_leg)
@@ -900,7 +905,7 @@ def test_request_with_unknown_fields_is_rejected(banks):
         query_id="q1",
         sender="B",
         key_version="k1",
-        ref=nodes["C"].local.refs["p07", "in"],
+        ref=nodes["C"].local.ref("p07", "in", "k1"),
         direction=pb.DOWNSTREAM,
         hops_remaining=3,
         deadline=(now() + timedelta(seconds=5)).isoformat(),

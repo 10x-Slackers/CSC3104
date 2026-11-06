@@ -3,7 +3,6 @@ import pytest
 from case.case_store import SqliteCaseStore, transfers
 from case.evidence import check_result
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.claims import key
 from privacy_node.demo import start_banks
 from privacy_node.node import serve
 from sample_chains import TINY, delivered_to, payment_ids, public_keys
@@ -64,5 +63,8 @@ def test_missing_bank_case_waits_then_confirms(banks, tmp_path):
     case = store.get(store.record(confirmed))
     assert case["state"] == "confirmed" and case["raised_at"] is not None
     b = nodes["B"].local  # this run's own keys, so look its tokens up here
-    expected = {key(b.refs["p06", "in"]), key(b.refs["p07", "out"])}
+    expected = {
+        (r.pair, r.token.hex())
+        for r in (b.ref("p06", "in", "k1"), b.ref("p07", "out", "k1"))
+    }
     assert {k for c in case["claims"] for k in transfers(c)} == expected

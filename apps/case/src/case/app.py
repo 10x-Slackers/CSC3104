@@ -1,8 +1,8 @@
 """Analyst UI and JSON API for one bank's cases, with the report dispatcher running inside.
 
-    CASE_BANK=A CASE_DB=cases-a.db CASE_PUBLIC_KEYS=.secrets/public uv run python -m case.app
+    CASE_BANK=A CASE_DB=cases-a.db CASE_KEY_DIRECTORY=.secrets uv run python -m case.app
 
-Settings (environment): CASE_BANK, CASE_DB, CASE_PUBLIC_KEYS, CASE_INTAKE_URL, PORT.
+Settings (environment): CASE_BANK, CASE_DB, CASE_KEY_DIRECTORY, CASE_INTAKE_URL, PORT.
 Chain results arrive from the bank's privacy node on POST /results. Alerts and merges
 go straight to this UI's inbox; reports go to the mock intake (intake.py).
 """
@@ -39,20 +39,10 @@ padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color
 
 
 def short(token):
-    """Hex is only a display format; storage and peer messages retain raw bytes."""
+    """Show the stored token hex; peer messages still use raw bytes."""
     if not token:
         return "-"
-    token = token.hex()
     return f"<code title='{escape(token)}'>{escape(token[:24])}…</code>"
-
-
-def display_case(case):
-    """Convert binary tokens only at the human-facing JSON boundary."""
-    claims = [asdict(c) for c in case["claims"]]
-    for claim in claims:
-        for field in ("in_token", "out_token"):
-            claim[field] = claim[field].hex()
-    return case | {"claims": claims}
 
 
 def page(bank, title, body):
@@ -205,7 +195,7 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
         """Verify one bank-internal protobuf result before storing its normalized copy."""
         try:
             result = pb.ChainResult.FromString(await request.body())
-            keys = public_keys() if callable(public_keys) else public_keys
+            keys = public_keys()
             result = check_result(result, keys, bank)
         except (DecodeError, ValueError) as exc:
             raise HTTPException(422, "Invalid chain result") from exc
@@ -219,18 +209,21 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
     @app.get("/api/cases/{case_id}")
     def api_case(case_id: str):
         case = load(case_id)
-        return display_case(case)
+        return case | {"claims": [asdict(c) for c in case["claims"]]}
 
     return app
 
 
 if __name__ == "__main__":
+    bank = os.environ.get("CASE_BANK", "A")
     uvicorn.run(
         create_app(
             os.environ.get("CASE_DB", "cases.db"),
-            os.environ.get("CASE_BANK", "A"),
+            bank,
             os.environ.get("CASE_INTAKE_URL", "http://127.0.0.1:8001/reports"),
-            lambda: load_public_keys(os.environ.get("CASE_PUBLIC_KEYS", "/public")),
+            lambda: load_public_keys(
+                os.environ.get("CASE_KEY_DIRECTORY", ".secrets"), bank
+            ),
         ),
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),

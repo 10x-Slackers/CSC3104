@@ -35,9 +35,9 @@ class Claim:
     signing_key_version: str
     truncated: bool
     in_pair: str
-    in_token: bytes
+    in_token: str
     out_pair: str
-    out_token: bytes
+    out_token: str
     signature: str  # hex
 
     def __post_init__(self):
@@ -47,7 +47,7 @@ class Claim:
     def from_pb(cls, c):
         return cls(
             c.signer, c.recipient, c.query_id, c.key_version, c.signing_key_version, c.truncated, c.in_ref.pair,
-            c.in_ref.token, c.out_ref.pair, c.out_ref.token, c.signature.hex(),
+            c.in_ref.token.hex(), c.out_ref.pair, c.out_ref.token.hex(), c.signature.hex(),
         )  # fmt: skip
 
 
@@ -64,7 +64,7 @@ class AlertRule:
 
 
 def transfers(claim):
-    """Transfer references as claims.key writes them: (pair, raw bytes)."""
+    """Case transfer references: (pair, stable token hex)."""
     refs = ((claim.in_pair, claim.in_token), (claim.out_pair, claim.out_token))
     return [(pair, token) for pair, token in refs if token]
 
@@ -94,12 +94,12 @@ CREATE TABLE IF NOT EXISTS cases (
 CREATE TABLE IF NOT EXISTS transfers (
     key_version TEXT NOT NULL,
     pair TEXT NOT NULL,
-    token BLOB NOT NULL,
+    token TEXT NOT NULL,
     case_id TEXT NOT NULL,
     PRIMARY KEY (key_version, pair, token)
 );
 CREATE TABLE IF NOT EXISTS claims (
-    {", ".join(f.name + (" BLOB" if f.name.endswith("_token") else " INTEGER" if f.name == "truncated" else " TEXT") + " NOT NULL" for f in fields(Claim))},
+    {", ".join(f.name + (" INTEGER" if f.name == "truncated" else " TEXT") + " NOT NULL" for f in fields(Claim))},
     case_id TEXT NOT NULL,
     PRIMARY KEY (signer, key_version, in_pair, in_token, out_pair, out_token)
 );

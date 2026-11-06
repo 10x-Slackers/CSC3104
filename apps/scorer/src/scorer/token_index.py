@@ -34,14 +34,7 @@ class TokenIndex:
 
     def apply_version(self, version, keys):
         """Apply prepared pair keys without filesystem access."""
-        if not keys:
-            raise ValueError("Token indexing requires trusted peer public keys")
-        if self._keys and set(keys) != set(next(iter(self._keys.values()))):
-            raise ValueError("Active versions must cover the same bank pairs")
-        if any(peer not in ("A", "B", "C") for pair in keys for peer in pair):
-            raise ValueError("Unknown bank in key configuration")
-        if version in self._keys and self._keys[version] != keys:
-            raise ValueError("Use a new version for changed X25519 material")
+        self.check_version(version, keys)
         additions = {}
         if version not in self._keys:
             for (pair, _, _), references in self._entries.items():
@@ -54,6 +47,17 @@ class TokenIndex:
         self._entries.update(additions)
         self._reference_count += count
 
+    def check_version(self, version, keys):
+        """Cheap validation before copying or backfilling an index."""
+        if not keys:
+            raise ValueError("Token indexing requires trusted peer public keys")
+        if self._keys and set(keys) != set(next(iter(self._keys.values()))):
+            raise ValueError("Active versions must cover the same bank pairs")
+        if any(peer not in ("A", "B", "C") for pair in keys for peer in pair):
+            raise ValueError("Unknown bank in key configuration")
+        if version in self._keys and self._keys[version] != keys:
+            raise ValueError("Use a new version for changed X25519 material")
+
     def _check_capacity(self, count):
         if (
             self.max_references is not None
@@ -63,13 +67,17 @@ class TokenIndex:
                 "Token index reference limit reached; no records were evicted"
             )
 
-    def set_query_version(self, version, peer_versions):
-        """Switch only after trusted configuration confirms both endpoints ready."""
-        if version not in self._keys:
+    def check_query_version(self, version, peer_versions, versions=None):
+        versions = self._keys if versions is None else versions
+        if version not in versions:
             raise ValueError("Query version is not active locally")
-        peers = {peer for pair in self._keys[version] for peer in pair} - {self.bank}
+        peers = {peer for pair in versions[version] for peer in pair} - {self.bank}
         if any(version not in peer_versions.get(peer, ()) for peer in peers):
             raise ValueError("Query version is not ready at every peer")
+
+    def set_query_version(self, version, peer_versions):
+        """Switch only after trusted configuration confirms both endpoints ready."""
+        self.check_query_version(version, peer_versions)
         self.key_version = version
 
     def retire_version(self, version):

@@ -1,5 +1,7 @@
 import pytest
+from fastapi.testclient import TestClient
 
+from case.app import create_app
 from case.evidence import check_result, load_public_keys
 from privacy_node.claims import chain_digest
 from sample_chains import m1, o1, public_keys
@@ -41,9 +43,29 @@ def test_unknown_signer_and_uninvolved_bank_rejected():
         check_result(m1(), public_keys(), "D")
 
 
-def test_public_keys_load_from_versioned_configmap_layout(tmp_path):
+def test_public_keys_load_own_and_peer_versions_from_bank_key_directory(tmp_path):
     for (bank, version), key in public_keys().items():
-        folder = tmp_path / bank
-        folder.mkdir(exist_ok=True)
+        folder = (
+            tmp_path / "B/public/signing"
+            if bank == "B"
+            else tmp_path / "B/trusted/signing" / bank
+        )
+        folder.mkdir(parents=True, exist_ok=True)
         (folder / f"{version}.pem").write_bytes(public_key_pem(key))
-    assert check_result(m1(), load_public_keys(tmp_path), "B")
+    keys = load_public_keys(tmp_path, "B")
+    assert set(keys) == set(public_keys())
+    assert check_result(m1(), keys, "B")
+    client = TestClient(
+        create_app(
+            tmp_path / "cases.db",
+            "B",
+            "http://127.0.0.1:9",
+            lambda: load_public_keys(tmp_path, "B"),
+            interval=None,
+        )
+    )
+    result = m1().SerializeToString()
+    assert client.post("/results", content=result).status_code == 200
+    # The loader re-reads own public material; missing own keys cannot verify evidence.
+    (tmp_path / "B/public/signing/k1.pem").unlink()
+    assert client.post("/results", content=result).status_code == 422

@@ -39,7 +39,11 @@ def evidence():
 def client_for(tmp_path, keys):
     return TestClient(
         create_app(
-            tmp_path / "cases.db", "B", "http://127.0.0.1:9", keys, interval=None
+            tmp_path / "cases.db",
+            "B",
+            "http://127.0.0.1:9",
+            lambda: keys,
+            interval=None,
         )
     )
 
@@ -110,7 +114,7 @@ def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_pa
     assert case["state"] == "partial" and case["raised_at"] is None
 
 
-def test_tokens_remain_raw_bytes_in_case_storage(evidence, tmp_path):
+def test_tokens_normalize_to_hex_at_case_storage_boundary(evidence, tmp_path):
     result, keys, _ = evidence
     client = client_for(tmp_path, keys)
     assert (
@@ -118,12 +122,12 @@ def test_tokens_remain_raw_bytes_in_case_storage(evidence, tmp_path):
     )
     store = SqliteCaseStore(tmp_path / "cases.db")
     case = store.get(result.chain_digest)
-    assert case["claims"][1].in_token == b"a" * 16
+    assert case["claims"][1].in_token == (b"a" * 16).hex()
     assert (
         store.db.execute(
             "SELECT typeof(in_token) FROM claims WHERE signer='B'"
         ).fetchone()[0]
-        == "blob"
+        == "text"
     )
 
 

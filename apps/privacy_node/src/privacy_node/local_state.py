@@ -22,7 +22,6 @@ class LocalBank:
         self.index = TokenIndex(bank, key_version, key_paths, max_token_references)
         self.scorer = Scorer(bank, **rule)
         self.lock = threading.RLock()
-        self.refs = {}  # (payment_id, direction) -> TokenRef
         self.counterparty = {}  # (payment_id, direction) -> peer bank
         self.onward = {}  # incoming payment_id -> [outgoing payment_id]
         self.backward = {}  # outgoing payment_id -> [incoming payment_id]
@@ -41,16 +40,14 @@ class LocalBank:
             token = self.index.add(event)
             key = (event["payment_id"], event["direction"])
             if token:
-                pair = "-".join(canonical_pair(self.bank, event["counterparty_bank"]))
-                self.refs[key] = pb.TokenRef(pair=pair, token=token)
                 self.counterparty[key] = event["counterparty_bank"]
             detections = self.scorer.process(event)
             for d in detections:
                 i, o = d["incoming_payment_id"], d["outgoing_payment_id"]
                 # Intra-bank legs have no token, so there is nothing to trace.
                 if (
-                    (i, "in") in self.refs
-                    and (o, "out") in self.refs
+                    (i, "in") in self.counterparty
+                    and (o, "out") in self.counterparty
                     and d["detection_id"] not in self._detections
                 ):
                     self.onward.setdefault(i, []).append(o)
@@ -65,7 +62,9 @@ class LocalBank:
 
     def ref(self, payment_id, direction, key_version):
         """Read a reference in the search's version, including during overlap."""
-        pair = self.refs[payment_id, direction].pair
+        pair = "-".join(
+            canonical_pair(self.bank, self.counterparty[payment_id, direction])
+        )
         token = self.index.token_for(payment_id, tuple(pair.split("-")), key_version)
         return pb.TokenRef(pair=pair, token=token)
 

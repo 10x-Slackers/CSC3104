@@ -80,7 +80,10 @@ def test_one_bank_cannot_sign_both_sides_of_a_shared_transfer(banks):
     first = result.claims[0]
     first.in_ref.CopyFrom(unconfirmed)
     result.claims.insert(
-        0, banks["A"].claim("A", first.query_id, pb.TokenRef(), unconfirmed)
+        0,
+        banks["A"].claim(
+            "A", first.query_id, pb.TokenRef(), unconfirmed, banks["A"].key_version
+        ),
     )
     resign(result, banks)
     keys = banks["B"].public_keys
@@ -96,7 +99,7 @@ def test_one_bank_cannot_sign_both_sides_of_a_shared_transfer(banks):
 
 def test_one_claim_cannot_count_the_same_transfer_as_both_sides(banks):
     ref = pb.TokenRef(pair="A-B", token=b"x" * 16)
-    claim = banks["A"].claim("A", "self", ref, ref)
+    claim = banks["A"].claim("A", "self", ref, ref, banks["A"].key_version)
     result = pb.ChainResult(
         sender="A",
         state=pb.CONFIRMED,
@@ -113,9 +116,9 @@ def test_one_bank_cannot_close_a_loop_with_its_own_unconfirmed_endpoints(banks):
     ac_in = pb.TokenRef(pair="A-C", token=b"y" * 16)
     ac_out = pb.TokenRef(pair="A-C", token=b"z" * 16)
     claims = [
-        banks["A"].claim("C", "up", ab, ac_in),
-        banks["C"].claim("C", "anchor", ac_in, ac_out),
-        banks["A"].claim("C", "down", ac_out, ab),
+        banks["A"].claim("C", "up", ab, ac_in, banks["A"].key_version),
+        banks["C"].claim("C", "anchor", ac_in, ac_out, banks["C"].key_version),
+        banks["A"].claim("C", "down", ac_out, ab, banks["A"].key_version),
     ]
     result = pb.ChainResult(
         sender="C", state=pb.CONFIRMED, claims=claims, chain_digest=chain_digest(claims)
@@ -247,7 +250,11 @@ def test_disconnected_signed_fragments_are_rejected_by_validator_and_deliver(ban
     tail = result.claims[2]
     tail.ClearField("in_ref")
     tail.out_ref.CopyFrom(split_ref)
-    result.claims.append(banks["B"].claim("C", tail.query_id, split_ref, pb.TokenRef()))
+    result.claims.append(
+        banks["B"].claim(
+            "C", tail.query_id, split_ref, pb.TokenRef(), banks["B"].key_version
+        )
+    )
     resign(result, banks)
     # Every signature is genuine; there is no transfer connecting the two fragments.
     with pytest.raises(ValueError, match="invalid chain result"):

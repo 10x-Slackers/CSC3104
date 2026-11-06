@@ -51,7 +51,7 @@ def main():
             assert overlap.state == pb.CONFIRMED
             ready = {bank: ("k1", "k2") for bank in nodes}
             for node in nodes.values():
-                node.set_query_version("k2", ready)
+                node.local.index.set_query_version("k2", ready)
             assert nodes["B"].search("p06", "p07").state == pb.CONFIRMED
             print("k2 backfill: pre-rotation p06 -> p07 also CONFIRMED")
             rotated = nodes["B"].search("p06-overlap", "p07-overlap")
@@ -67,8 +67,6 @@ def main():
                 "k1 retired after demo work drained: k2 still CONFIRMED; no missed link"
             )
         finally:
-            for node in nodes.values():
-                node.close()
             for server in servers.values():
                 server.stop(0)
 

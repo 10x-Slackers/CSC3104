@@ -59,8 +59,9 @@ overwrite existing versions. Never commit private material; `.secrets/` is ignor
 ## Versions, rotation and reload
 
 `TokenRef.token` is protobuf `bytes`. Token identity is `(canonical_pair, key_version,
-raw_token)`, both in the index and case transfer storage. SQLite tokens remain BLOBs;
-hex is only for human-facing JSON/HTML/report output. Recreate existing coursework
+raw_token)` in peer messages and the index. At the case persistence/model boundary,
+`Claim.from_pb` converts tokens and signatures once to stable hex text. Case transfer
+identity is `(canonical_pair, key_version, token_hex)`; display/report paths use that text. Recreate existing coursework
 case databases when adopting the new schema.
 
 1. Introduce k2 at both endpoints using `introduce_version(version, files)`.
@@ -73,13 +74,13 @@ case databases when adopting the new schema.
 3. Retire k1 only after old requests and retained work drain. Lookup never falls
    back to another version. Old signing verification keys remain for stored evidence.
 
-Fresh X25519 material is recommended when rotating. The index does not compare
+A new X25519 key pair at each bank is required for each rotated version; merely
+relabeling old material is not a key rotation. The index does not compare
 public material across versions: HKDF and HMAC already bind the version. Changing
 derived keys within an existing version is rejected because it would invalidate
 retained token references. Index retention/TTL integration remains Cindy's work.
 
-`--key-directory ROOT` reads `ROOT/<bank>/active.json`; `--key-config PATH` overrides
-that path. Example for B:
+`--key-directory ROOT` is the only node key mode and reads `ROOT/<bank>/active.json`. Example for B:
 
 ```json
 {"active_versions":["k1","k2"],"query_version":"k1","signing_key_version":"k2",
@@ -88,10 +89,12 @@ that path. Example for B:
 
 Publish key files before updating this trusted readiness manifest. Mount read-only
 Secret directories without `subPath` so renewals are visible. Directory mode discovers
-new versions; explicit-path mode rereads its configured files. Housekeeping starts
+new versions; the manifest is the single configuration source. Housekeeping starts
 at most one background reload. Filesystem reads, key parsing and pair-key derivation
 happen outside the local state lock; only validated state is applied under that lock.
-Unchanged token configuration reuses its index. Failed reloads retain the previous
+Cheap material/readiness checks run before copying. Changed configuration uses a
+shallow index copy with fresh key/entry dictionaries; unchanged configuration reuses
+the index. Failed reloads retain the previous
 working key set, and pending searches/deliveries continue while a read is slow.
 
 The security rotation demonstration uses temporary keys and localhost demo transport:
@@ -104,8 +107,10 @@ uv run python -m privacy_node.rotation_demo
 
 `LinkClaim.key_version` scopes tokens; `signing_key_version` selects the trusted
 Ed25519 public key at `(signer, signing_key_version)`. Old/new verification keys
-coexist; claims never supply their own trusted key. Case verification mounts use
-`<CASE_PUBLIC_KEYS>/<bank>/<signing_version>.pem` and are reread per `/results` request.
+coexist; claims never supply their own trusted key. The case app uses `CASE_KEY_DIRECTORY` plus `CASE_BANK` and the same
+`keys.public_keys(root, bank)` loader as the node. It combines this bank's
+`public/signing/<version>.pem` with `trusted/signing/<peer>/<version>.pem`, reread
+per `/results` request. `create_app` always receives a loader, including in tests.
 
 `claim_bytes` concatenates these fields, each preceded by a four-byte unsigned
 big-endian byte length. Text uses UTF-8 and tokens use raw bytes:
@@ -119,8 +124,7 @@ ASCII("1" if truncated else "0")
 Missing references have an empty pair and token. The signature covers versions,
 query/recipient binding and truncation. Chain digests hash sorted distinct transfer
 identities, framing each UTF-8 pair and raw token in the same length-prefixed form.
-These byte/signing interfaces supersede the older encoding description in protocol.md;
-Zane owns synchronizing that document with his protocol changes.
+The matching peer schema and framing are documented in [protocol.md](protocol.md).
 
 `claims.check_result(result, public_keys, bank)` is the single validator used by
 PrivacyNode `Deliver` and case `/results`. It raises `ValueError` or returns a
@@ -181,12 +185,12 @@ service DNS names and both server/client authentication usages.
 
 Mount certificate, private key and CA as a read-only directory (for example
 `/tls/tls.crt`, `/tls/tls.key`, `/tls/ca.crt`), without `subPath`. `TlsFiles.read()`
-rereads bytes before outgoing calls. Node caches a channel per target: unchanged
-cert/key/CA bytes reuse it; changed material replaces the cached channel with newly
-verified credentials. Already-running calls finish on retired channels, which close once those calls
-finish; idle replaced channels close immediately. An unavailable channel is evicted
-so the next housekeeping attempt reconnects. Dynamic server credentials reread files for new connections.
-No restart or disabled identity/hostname verification is required for renewal.
+rereads cert/key/CA bytes for every new client channel. The node opens and closes a
+channel per peer call so connection-level Service balancing can select another
+replica; the extra handshake cost is an accepted design trade-off. Server dynamic
+credentials reread the mounted files for each handshake. Existing in-flight calls
+finish using their established session; new calls use renewed material. Verification
+and bank identity checks remain enabled. See the [Kubernetes gRPC balancing explanation](https://kubernetes.io/blog/2018/11/07/grpc-load-balancing-on-kubernetes-without-tears/).
 
 Isaac owns chart changes and k3d/CNI verification. Required paths:
 
@@ -213,8 +217,8 @@ Cindy integrates the raw-byte pair/version API and overlap lifecycle into Valkey
 The consume-only scorer CLI uses `--key-version k1 --x25519-private PATH` and repeated
 `--peer-public-key PEER PATH` options. Ingestor events pass through unchanged.
 Zane owns durable case delivery; his #17 checks use the shared result validator. Jia Rui keeps
-`/results` on `check_result`, owns enrichment, and updates case.md's report field list
-for `signing_key_version` and `truncated`. Cross-version case reconciliation is not
+`/results` on `check_result`, owns enrichment, and consumes the updated case fields
+`signing_key_version` and `truncated`. Cross-version case reconciliation is not
 implemented. Isaac owns deployment/mounts and the live evidence above.
 
 Banks, trusted public-key provisioning and the lab CA/operator are trusted. A compromised
@@ -232,7 +236,7 @@ uv run pytest
 
 Security tests cover the frozen HMAC vector, X25519/HKDF, overlapping versions,
 versioned signing, shared result attacks, independent bank participation, schema privacy,
-reload progress/rollback and real mTLS handshakes/channel renewal. Test keys and
+reload progress/rollback and real mTLS handshakes/per-call renewal. Test keys and
 certificates are generated in temporary directories; no runtime secrets are committed.
 
 API references: [X25519](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/x25519/),
