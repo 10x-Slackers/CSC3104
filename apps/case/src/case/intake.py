@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS reports (
 """
 
 
-def create_app(db):
+def create_app(db: str) -> FastAPI:
     with sqlite3.connect(db) as conn:
         conn.executescript(SCHEMA)
     app = FastAPI(title="Mock intake")

@@ -1,10 +1,24 @@
 """Bank-local raw-byte token references with overlapping key versions."""
 
-from security import canonical_pair, derive_token, load_pairwise_keys
+from collections.abc import Collection, Mapping
+
+from scorer.state import Event
+from security import (
+    AgreementFiles,
+    canonical_pair,
+    derive_token,
+    load_pairwise_keys,
+)
 
 
 class TokenIndex:
-    def __init__(self, bank, key_version, key_paths, max_references=None):
+    def __init__(
+        self,
+        bank: str,
+        key_version: str,
+        key_paths: AgreementFiles,
+        max_references: int | None = None,
+    ) -> None:
         if bank not in ("A", "B", "C"):
             raise ValueError("Invalid local bank")
         if max_references is not None and max_references < 1:
@@ -13,26 +27,30 @@ class TokenIndex:
         self.max_references = max_references
         self._reference_count = 0
         self.key_version = key_version
-        self._keys = {}
-        self._entries = {}
+        self._keys: dict[str, dict[tuple[str, str], bytes]] = {}
+        self._entries: dict[
+            tuple[tuple[str, str], str, bytes], set[tuple[str, str, str]]
+        ] = {}
         self.introduce_version(key_version, key_paths)
 
     @property
-    def active_versions(self):
+    def active_versions(self) -> tuple[str, ...]:
         return tuple(self._keys)
 
-    def matches_versions(self, keys, query_version):
+    def matches_versions(
+        self, keys: dict[str, dict[tuple[str, str], bytes]], query_version: str
+    ) -> bool:
         """Whether prepared configuration leaves the current token index unchanged."""
         return self._keys == keys and self.key_version == query_version
 
-    def introduce_version(self, version, files):
+    def introduce_version(self, version: str, files: AgreementFiles) -> None:
         """Load one version and backfill retained references for overlapping rotation."""
         keys = load_pairwise_keys(
             self.bank, version, files.private_key, files.peer_public_keys
         )
         self.apply_version(version, keys)
 
-    def apply_version(self, version, keys):
+    def apply_version(self, version: str, keys: dict[tuple[str, str], bytes]) -> None:
         """Apply prepared pair keys without filesystem access."""
         self.check_version(version, keys)
         additions = {}
@@ -47,7 +65,7 @@ class TokenIndex:
         self._entries.update(additions)
         self._reference_count += count
 
-    def check_version(self, version, keys):
+    def check_version(self, version: str, keys: dict[tuple[str, str], bytes]) -> None:
         """Cheap validation before copying or backfilling an index."""
         if not keys:
             raise ValueError("Token indexing requires trusted peer public keys")
@@ -67,7 +85,12 @@ class TokenIndex:
                 "Token index reference limit reached; no records were evicted"
             )
 
-    def check_query_version(self, version, peer_versions, versions=None):
+    def check_query_version(
+        self,
+        version: str,
+        peer_versions: Mapping[str, Collection[str]],
+        versions: Mapping[str, dict[tuple[str, str], bytes]] | None = None,
+    ) -> None:
         versions = self._keys if versions is None else versions
         if version not in versions:
             raise ValueError("Query version is not active locally")
@@ -75,12 +98,14 @@ class TokenIndex:
         if any(version not in peer_versions.get(peer, ()) for peer in peers):
             raise ValueError("Query version is not ready at every peer")
 
-    def set_query_version(self, version, peer_versions):
+    def set_query_version(
+        self, version: str, peer_versions: Mapping[str, Collection[str]]
+    ) -> None:
         """Switch only after trusted configuration confirms both endpoints ready."""
         self.check_query_version(version, peer_versions)
         self.key_version = version
 
-    def retire_version(self, version):
+    def retire_version(self, version: str) -> None:
         """After old entries/in-flight work expire, discard that version only."""
         if version == self.key_version:
             raise ValueError("Switch queries before retiring their key version")
@@ -88,11 +113,13 @@ class TokenIndex:
         self._entries = {k: v for k, v in self._entries.items() if k[1] != version}
         self._reference_count = sum(map(len, self._entries.values()))
 
-    def token_for(self, payment_id, bank_pair, version):
+    def token_for(
+        self, payment_id: str, bank_pair: tuple[str, str], version: str
+    ) -> bytes:
         pair = canonical_pair(*bank_pair)
         return derive_token(payment_id, *pair, self._keys[version][pair], version)
 
-    def tokens(self, e):
+    def tokens(self, e: Event) -> dict[str, bytes]:
         if e["counterparty_bank"] == self.bank:
             return {}
         pair = canonical_pair(self.bank, e["counterparty_bank"])
@@ -103,9 +130,11 @@ class TokenIndex:
             for version in self.active_versions
         }
 
-    def add(self, event):
+    def add(self, event: Event) -> bytes | None:
         tokens = self.tokens(event)
-        pair = canonical_pair(self.bank, event["counterparty_bank"]) if tokens else None
+        if not tokens:
+            return None
+        pair = canonical_pair(self.bank, event["counterparty_bank"])
         reference = (event["payment_id"], event["direction"], event["account"])
         additions = [
             (pair, version, token)
@@ -118,7 +147,9 @@ class TokenIndex:
         self._reference_count += len(additions)
         return tokens.get(self.key_version)
 
-    def lookup(self, bank_pair, key_version, token):
+    def lookup(
+        self, bank_pair: tuple[str, str], key_version: str, token: bytes
+    ) -> list[dict]:
         pair = canonical_pair(*bank_pair)
         if self.bank not in pair:
             raise ValueError("Lookup pair is unrelated to this bank")

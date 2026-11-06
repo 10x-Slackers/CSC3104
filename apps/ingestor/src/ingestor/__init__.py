@@ -14,7 +14,7 @@ BICS = {"A": "TSTASGSG", "B": "TSTBSGSG", "C": "TSTCSGSG"}
 BANKS = {bic: bank for bank, bic in BICS.items()}
 
 
-def records(batch, bank):
+def records(batch: dict, bank: str) -> list[dict]:
     """This bank's Kafka records for one batch, as {topic, key, headers, value}.
 
     Any KeyError, TypeError or ValueError rejects the whole batch (HTTP 400). These

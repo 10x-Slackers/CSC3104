@@ -8,6 +8,8 @@
 
 import sqlite3
 import threading
+from collections.abc import Iterable
+from pathlib import Path
 
 from privacy_node import privacy_node_pb2 as pb
 
@@ -27,7 +29,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 
 class Store:
-    def __init__(self, path=":memory:"):
+    def __init__(self, path: str | Path = ":memory:") -> None:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.executescript(SCHEMA)
         self.lock = threading.Lock()
@@ -36,13 +38,13 @@ class Store:
         with self.lock:
             return self.db.execute(sql, args).fetchall()
 
-    def get_reply(self, query_id, ref):
+    def get_reply(self, query_id: str, ref: bytes) -> pb.TraceReply | None:
         rows = self._run(
             "SELECT reply FROM replies WHERE query_id=? AND ref=?", query_id, ref
         )
         return pb.TraceReply.FromString(rows[0][0]) if rows else None
 
-    def put_reply(self, query_id, ref, reply):
+    def put_reply(self, query_id: str, ref: bytes, reply: pb.TraceReply) -> None:
         self._run(
             "INSERT OR IGNORE INTO replies VALUES (?,?,?)",
             query_id,
@@ -50,7 +52,14 @@ class Store:
             reply.SerializeToString(),
         )
 
-    def put_search(self, search_id, incoming, outgoing, state, chain_digest):
+    def put_search(
+        self,
+        search_id: str,
+        incoming: str,
+        outgoing: str,
+        state: pb.State,
+        chain_digest: str,
+    ) -> None:
         self._run(
             "INSERT INTO searches VALUES (?,?,?,?,?) ON CONFLICT (search_id) "
             "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest",
@@ -61,14 +70,16 @@ class Store:
             chain_digest,
         )
 
-    def unfinished_searches(self):
+    def unfinished_searches(self) -> list[tuple[str, str]]:
         return self._run(
             "SELECT incoming, outgoing FROM searches WHERE state IN (?,?)",
             pb.PENDING,
             pb.TIMED_OUT,
         )
 
-    def save_chain(self, result, deliver_to=()):
+    def save_chain(
+        self, result: pb.ChainResult, deliver_to: Iterable[str] = ()
+    ) -> None:
         """Insert a chain once; a later CONFIRMED result upgrades a PARTIAL one.
 
         The chain row and its outbox rows are written in one transaction, so a
@@ -97,22 +108,22 @@ class Store:
                     (result.chain_digest, bank, blob),
                 )
 
-    def chains(self):
+    def chains(self) -> list[pb.ChainResult]:
         rows = self._run("SELECT result FROM chains ORDER BY chain_digest")
         return [pb.ChainResult.FromString(r[0]) for r in rows]
 
-    def pending_deliveries(self):
+    def pending_deliveries(self) -> list[tuple[str, pb.ChainResult]]:
         rows = self._run("SELECT bank, result FROM outbox WHERE acked=0 AND dead=0")
         return [(bank, pb.ChainResult.FromString(blob)) for bank, blob in rows]
 
-    def ack(self, chain_digest, bank):
+    def ack(self, chain_digest: str, bank: str) -> None:
         self._run(
             "UPDATE outbox SET acked=1 WHERE chain_digest=? AND bank=?",
             chain_digest,
             bank,
         )
 
-    def dead_letter(self, chain_digest, bank):
+    def dead_letter(self, chain_digest: str, bank: str) -> None:
         """Stop delivering a result the receiver rejected; kept for inspection."""
         self._run(
             "UPDATE outbox SET dead=1 WHERE chain_digest=? AND bank=?",
@@ -120,5 +131,5 @@ class Store:
             bank,
         )
 
-    def dead_letters(self):
+    def dead_letters(self) -> list[tuple[str, str]]:
         return self._run("SELECT chain_digest, bank FROM outbox WHERE dead=1")

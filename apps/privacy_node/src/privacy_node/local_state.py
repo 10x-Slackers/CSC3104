@@ -4,20 +4,28 @@ CSV mode and the integrated Kafka consumer use the same in-memory state.
 Nothing here is ever sent to a peer except tokens.
 """
 
-import csv
 import threading
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Self
 
 from privacy_node import privacy_node_pb2 as pb
-from scorer.score import Scorer
+from scorer.score import Link, Scorer
+from scorer.state import Direction, Event, read_events
 from scorer.token_index import TokenIndex
-from security import canonical_pair
+from security import AgreementFiles, canonical_pair
 
 
 class LocalBank:
     def __init__(
-        self, bank, key_version, key_paths, events=(), max_token_references=None, **rule
-    ):
+        self,
+        bank: str,
+        key_version: str,
+        key_paths: AgreementFiles,
+        events: Iterable[Event] = (),
+        max_token_references: int | None = None,
+        **rule,
+    ) -> None:
         self.bank = bank
         self.index = TokenIndex(bank, key_version, key_paths, max_token_references)
         self.scorer = Scorer(bank, **rule)
@@ -30,11 +38,11 @@ class LocalBank:
             self.process(event)
 
     @property
-    def detections(self):
+    def detections(self) -> list[Link]:
         with self.lock:
             return list(self._detections.values())
 
-    def process(self, event):
+    def process(self, event: Event) -> list[Link]:
         """Publish tokens, references and candidate links before Kafka commits."""
         with self.lock:
             token = self.index.add(event)
@@ -56,27 +64,39 @@ class LocalBank:
             return detections
 
     @classmethod
-    def from_workload(cls, workload, bank, key_version, key_paths, **rule):
-        with (Path(workload) / f"bank_{bank}.csv").open() as source:
-            return cls(bank, key_version, key_paths, csv.DictReader(source), **rule)
+    def from_workload(
+        cls,
+        workload: str | Path,
+        bank: str,
+        key_version: str,
+        key_paths: AgreementFiles,
+        **rule,
+    ) -> Self:
+        events = read_events(Path(workload) / f"bank_{bank}.csv")
+        return cls(bank, key_version, key_paths, events, **rule)
 
-    def ref(self, payment_id, direction, key_version):
+    def ref(
+        self, payment_id: str, direction: Direction, key_version: str
+    ) -> pb.TokenRef:
         """Read a reference in the search's version, including during overlap."""
-        pair = "-".join(
-            canonical_pair(self.bank, self.counterparty[payment_id, direction])
-        )
-        token = self.index.token_for(payment_id, tuple(pair.split("-")), key_version)
+        banks = canonical_pair(self.bank, self.counterparty[payment_id, direction])
+        pair = "-".join(banks)
+        token = self.index.token_for(payment_id, banks, key_version)
         return pb.TokenRef(pair=pair, token=token)
 
-    def lookup(self, pair, key_version, token, direction):
+    def lookup(
+        self, pair: str, key_version: str, token: bytes, direction: Direction
+    ) -> str | None:
         """Return this bank's payment_id for a peer token, or None."""
         with self.lock:
-            for ref in self.index.lookup(tuple(pair.split("-")), key_version, token):
+            for ref in self.index.lookup(
+                canonical_pair(*pair.split("-")), key_version, token
+            ):
                 if ref["direction"] == direction:
                     return ref["payment_id"]
         return None
 
-    def links(self, payment_id, direction):
+    def links(self, payment_id: str, direction: Direction) -> list[str]:
         """Local rule links: from an incoming payment (downstream) or into an outgoing one."""
         with self.lock:
             table = self.onward if direction == "in" else self.backward

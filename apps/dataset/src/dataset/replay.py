@@ -19,6 +19,7 @@ import queue
 import random
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ from ingestor import BICS
 BATCH = 100  # payments per pacs.008 message, at most
 
 
-def payments(workload):
+def payments(workload: Path) -> Iterator[dict]:
     # Each transfer once, from its `out` event, in event-time order across the banks.
     with ExitStack() as files:
         banks = [
@@ -41,7 +42,7 @@ def payments(workload):
                 yield e
 
 
-def tx(e):
+def tx(e: dict) -> dict:
     return {
         "PmtId": {"EndToEndId": e["payment_id"]},
         "PmtTpInf": {"LclInstrm": {"Prtry": e["payment_format"]}},
@@ -54,7 +55,9 @@ def tx(e):
     }
 
 
-def post(conn, path, body):
+def post(
+    conn: http.client.HTTPConnection, path: str, body: str
+) -> tuple[int | None, str]:
     # One POST -> (status, reply); status None on a network error, then conn reconnects.
     try:
         conn.request("POST", path, body, {"Content-Type": "application/json"})
@@ -65,7 +68,7 @@ def post(conn, path, body):
         return None, f"{type(e).__name__}: {e}"
 
 
-def send(bank, url, q, failed):
+def send(bank: str, url: str, q: queue.Queue, failed: threading.Event) -> None:
     """POST this bank's queue in batches, one at a time, so its events keep their order.
 
     A batch is whatever became due while the last one was sent, at most BATCH payments.

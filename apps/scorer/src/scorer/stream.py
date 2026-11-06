@@ -7,19 +7,24 @@ history after a restart. Output is local candidates, not confirmed cross-bank al
 import argparse
 import json
 import sys
+import threading
+from collections.abc import Callable, Iterable
+from typing import TextIO
 
 from confluent_kafka import Consumer, KafkaException
 
 from scorer.baseline import make_scorer, thresholds
+from scorer.score import Link, Scorer
+from scorer.state import Event
 from scorer.token_index import TokenIndex
 from security import AgreementFiles
 
 
-def topic(bank):
+def topic(bank: str) -> str:
     return f"bank-{bank}-transactions"
 
 
-def require_full_replay(consumer, partitions):
+def require_full_replay(consumer: Consumer, partitions: list) -> None:
     """Reject offsets or assignments that cannot rebuild this in-memory bank."""
     if len(partitions) != 1 or partitions[0].partition != 0:
         raise RuntimeError(
@@ -40,14 +45,14 @@ def require_full_replay(consumer, partitions):
 
 
 def consume(
-    consumer,
-    scorer,
-    output=sys.stdout,
-    token_index=None,
-    process_event=None,
-    stop_event=None,
-    require_replay=False,
-):
+    consumer: Consumer,
+    scorer: Scorer,
+    output: TextIO = sys.stdout,
+    token_index: TokenIndex | None = None,
+    process_event: Callable[[Event], Iterable[Link]] | None = None,
+    stop_event: threading.Event | None = None,
+    require_replay: bool = False,
+) -> None:
     try:
         if process_event is not None and token_index is not None:
             raise ValueError(
@@ -63,14 +68,15 @@ def consume(
             message = consumer.poll(1)
             if message is None:
                 continue
-            if message.error():
+            error = message.error()
+            if error:
                 # librdkafka retries transient errors (e.g. topic not created yet) itself.
-                if message.error().fatal():
-                    raise KafkaException(message.error())
-                print(message.error(), file=sys.stderr)
+                if error.fatal():
+                    raise KafkaException(error)
+                print(error, file=sys.stderr)
                 continue
             # Fail without committing wrongly routed records.
-            event = json.loads(message.value())
+            event = json.loads(message.value() or b"")
             if (
                 message.topic() != topic(scorer.bank)
                 or message.key() != event["account"].encode()

@@ -10,6 +10,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import astuple, dataclass, fields
+from typing import Literal, Self, TypedDict, get_args
 
 from privacy_node import privacy_node_pb2 as pb
 
@@ -18,7 +19,10 @@ from privacy_node import privacy_node_pb2 as pb
 STATES = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
 # Simulated analyst actions; none touches a real account. "report" queues the case
 # evidence for the mock intake.
-DECISIONS = ("monitor", "suspend", "freeze", "report")
+Decision = Literal["monitor", "suspend", "freeze", "report"]
+DECISIONS = get_args(Decision)
+CaseState = Literal["partial", "confirmed"]
+ReviewStatus = Literal["approved", "rejected"]
 
 
 @dataclass(frozen=True)
@@ -44,7 +48,7 @@ class Claim:
         object.__setattr__(self, "truncated", bool(self.truncated))
 
     @classmethod
-    def from_pb(cls, c):
+    def from_pb(cls, c: pb.LinkClaim) -> Self:
         return cls(
             c.signer, c.recipient, c.query_id, c.key_version, c.signing_key_version, c.truncated, c.in_ref.pair,
             c.in_ref.token.hex(), c.out_ref.pair, c.out_ref.token.hex(), c.signature.hex(),
@@ -63,17 +67,46 @@ class AlertRule:
     min_banks: int = int(os.environ.get("CASE_MIN_BANKS", "2"))
 
 
-def transfers(claim):
+class Case(TypedDict):
+    case_id: str
+    created_at: float
+    state: CaseState
+    merged_into: str | None
+    raised_at: float | None
+    claims: list[Claim]
+    results: list[tuple[str, str, CaseState]]  # (chain_digest, sender, state)
+    decisions: list[tuple[Decision, float]]  # (action, decided_at)
+
+
+class CaseSummary(TypedDict):
+    case_id: str
+    created_at: float
+    state: CaseState
+    raised_at: float | None
+    decision: Decision | None
+
+
+class Report(TypedDict):
+    report_id: int
+    case_id: str
+    source: str
+    body: str
+    status: Literal["draft"] | ReviewStatus
+    created_at: float
+    reviewed_at: float | None
+
+
+def transfers(claim: Claim) -> list[tuple[str, str]]:
     """Case transfer references: (pair, stable token hex)."""
     refs = ((claim.in_pair, claim.in_token), (claim.out_pair, claim.out_token))
     return [(pair, token) for pair, token in refs if token]
 
 
-def banks(claim):
+def banks(claim: Claim) -> set[str]:
     return {claim.signer, *claim.in_pair.split("-"), *claim.out_pair.split("-")} - {""}
 
 
-def neighbours(signer, in_pair, out_pair):
+def neighbours(signer: str, in_pair: str, out_pair: str) -> tuple[str, str]:
     """Banks at the far end of the incoming and outgoing transfers; start/end if none."""
 
     def other(pair, none):
@@ -156,7 +189,7 @@ CREATE TABLE IF NOT EXISTS reports (
 """
 
 
-def notify(db, kind, case_id):
+def notify(db: sqlite3.Connection, kind: str, case_id: str) -> None:
     """Add one inbox entry per (kind, case); repeats are ignored."""
     db.execute(
         "INSERT INTO notifications VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
@@ -165,7 +198,9 @@ def notify(db, kind, case_id):
 
 
 class SqliteCaseStore:
-    def __init__(self, path, rule=None):
+    def __init__(
+        self, path: str | os.PathLike[str], rule: AlertRule | None = None
+    ) -> None:
         self.rule = rule or AlertRule()
         self.db = sqlite3.connect(path, isolation_level=None, timeout=30)
         self.db.row_factory = sqlite3.Row
@@ -183,7 +218,7 @@ class SqliteCaseStore:
             raise
         self.db.execute("COMMIT")
 
-    def record(self, result):
+    def record(self, result: pb.ChainResult) -> str:
         """Store a verified ChainResult; return its case ID."""
         if result.state not in STATES:
             raise ValueError(f"Not a deliverable result: {pb.State.Name(result.state)}")
@@ -284,7 +319,7 @@ class SqliteCaseStore:
             )
         return case_id
 
-    def get(self, case_id):
+    def get(self, case_id: str) -> Case | None:
         row = self.db.execute(
             "SELECT * FROM cases LEFT JOIN alerts USING (case_id) WHERE case_id = ?",
             (case_id,),
@@ -305,13 +340,14 @@ class SqliteCaseStore:
             " ORDER BY decided_at",
             (case_id,),
         )
-        return dict(row) | {
-            "claims": [Claim(*claim) for claim in claims],
-            "results": [tuple(result) for result in results],
-            "decisions": [tuple(decision) for decision in decisions],
-        }
+        return Case(
+            **row,
+            claims=[Claim(*claim) for claim in claims],
+            results=[tuple(result) for result in results],
+            decisions=[tuple(decision) for decision in decisions],
+        )
 
-    def decide(self, case_id, action):
+    def decide(self, case_id: str, action: Decision) -> None:
         if action not in DECISIONS:
             raise ValueError(f"Unknown decision: {action}")
         with self._write() as db:
@@ -326,14 +362,14 @@ class SqliteCaseStore:
                     (f"report:{case_id}:{decision}", case_id, now, now),
                 )
 
-    def save_report(self, case_id, source, body):
+    def save_report(self, case_id: str, source: str, body: str) -> int | None:
         """Store a generated report as a draft pending analyst review; return its ID."""
         return self.db.execute(
             "INSERT INTO reports (case_id, source, body, created_at) VALUES (?, ?, ?, ?)",
             (case_id, source, body, time.time()),
         ).lastrowid
 
-    def review_report(self, case_id, report_id, status):
+    def review_report(self, case_id: str, report_id: int, status: ReviewStatus) -> bool:
         """Approve or reject a case's draft once; False if it isn't a pending draft."""
         if status not in ("approved", "rejected"):
             raise ValueError(f"Unknown review: {status}")
@@ -345,16 +381,16 @@ class SqliteCaseStore:
             ).rowcount
         )
 
-    def reports(self, case_id):
+    def reports(self, case_id: str) -> list[Report]:
         return [
-            dict(row)
+            Report(**row)
             for row in self.db.execute(
                 "SELECT * FROM reports WHERE case_id = ? ORDER BY report_id DESC",
                 (case_id,),
             )
         ]
 
-    def notifications(self):
+    def notifications(self) -> list[dict]:
         return [
             dict(row)
             for row in self.db.execute(
@@ -362,7 +398,7 @@ class SqliteCaseStore:
             )
         ]
 
-    def due(self, now, max_attempts):
+    def due(self, now: float, max_attempts: int) -> list[dict]:
         """Unacked reports whose next attempt is due, oldest first."""
         return [
             dict(row)
@@ -374,20 +410,20 @@ class SqliteCaseStore:
             )
         ]
 
-    def ack(self, event_id):
+    def ack(self, event_id: str) -> None:
         self.db.execute(
             "UPDATE outbox SET acked_at = ?, error = NULL WHERE event_id = ?",
             (time.time(), event_id),
         )
 
-    def failed(self, event_id, at, error):
+    def failed(self, event_id: str, at: float, error: str) -> None:
         self.db.execute(
             "UPDATE outbox SET attempts = attempts + 1, next_at = ?, error = ?"
             " WHERE event_id = ?",
             (at, error, event_id),
         )
 
-    def outbox(self, pending=False):
+    def outbox(self, pending: bool = False) -> list[dict]:
         where = " WHERE acked_at IS NULL" if pending else ""
         return [
             dict(row)
@@ -396,10 +432,10 @@ class SqliteCaseStore:
             )
         ]
 
-    def cases(self):
+    def cases(self) -> list[CaseSummary]:
         """Live (unmerged) cases, oldest first; raised_at is None until alerted."""
         return [
-            dict(row)
+            CaseSummary(**row)
             for row in self.db.execute(
                 "SELECT case_id, created_at, state, raised_at, (SELECT action FROM"
                 " decisions d WHERE d.case_id = cases.case_id ORDER BY decided_at DESC"
