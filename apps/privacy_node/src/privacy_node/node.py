@@ -34,6 +34,7 @@ from privacy_node.claims import (
     check_result,
     claim_bytes,
     complete,
+    frame,
     has_unknown_fields,
     key,
     refs,
@@ -221,12 +222,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
             authenticated_bank(context, request.sender)
         if has_unknown_fields(request):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unknown fields")
-        slot = (
-            request.sender.encode()
-            + b"\0"
-            + request.key_version.encode()
-            + b"\0"
-            + request.ref.SerializeToString(deterministic=True)
+        slot = frame(
+            [
+                request.sender.encode(),
+                request.key_version.encode(),
+                request.ref.SerializeToString(deterministic=True),
+            ]
         )
         stored = self.store.get_reply(request.query_id, slot)
         if stored:

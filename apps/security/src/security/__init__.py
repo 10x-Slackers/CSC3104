@@ -47,14 +47,18 @@ def canonical_pair(bank_a: str, bank_b: str) -> tuple[str, str]:
     return tuple(sorted((bank_a, bank_b)))
 
 
+def _check_key_version(key_version: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", key_version):
+        raise ValueError("Key version must use ASCII letters, digits, '_' or '-'")
+
+
 def canonical_token_input(
     payment_id: str, bank_a: str, bank_b: str, key_version: str
 ) -> bytes:
     """Encode the domain, protocol, pair, key version and unchanged payment ID."""
     if not isinstance(payment_id, str):
         raise TypeError("Payment ID must be a string")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", key_version):
-        raise ValueError("Key version must use ASCII letters, digits, '_' or '-'")
+    _check_key_version(key_version)
     return json.dumps(
         [
             "csc3104.payment-token",
@@ -116,7 +120,7 @@ def derive_pair_key(
     peer_public_key: X25519PublicKey,
 ) -> bytes:
     pair = canonical_pair(bank_id, peer)
-    canonical_token_input("", *pair, key_version)
+    _check_key_version(key_version)
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,

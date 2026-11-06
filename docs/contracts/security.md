@@ -54,7 +54,9 @@ A/active.json
 ```
 
 Private PEMs use PKCS8; public PEMs use SubjectPublicKeyInfo. Generation refuses to
-overwrite existing versions. Never commit private material; `.secrets/` is ignored.
+overwrite existing versions. The first run also writes a single-version
+`active.json` (that version active, queried and signing, with both peers ready); later
+versions leave it unchanged. Never commit private material; `.secrets/` is ignored.
 
 ## Versions, rotation and reload
 

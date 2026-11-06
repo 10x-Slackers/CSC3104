@@ -43,7 +43,7 @@ def key(ref):
     return (ref.pair, ref.token) if ref.token else None
 
 
-def _frame(parts):
+def frame(parts):
     return b"".join(len(part).to_bytes(4, "big") + part for part in parts)
 
 
@@ -59,7 +59,7 @@ def claim_bytes(c):
         c.signing_key_version,
         c.in_ref.pair,
     )
-    return _frame(
+    return frame(
         [
             *(part.encode("utf-8") for part in text),
             c.in_ref.token,
@@ -141,7 +141,7 @@ def chain_digest(claims):
     """Hash distinct transfer identities in sorted order, using raw token bytes."""
     tokens = sorted({key(r) for r in refs(claims)})
     return hashlib.sha256(
-        _frame(
+        frame(
             [part for pair, token in tokens for part in (pair.encode("utf-8"), token)]
         )
     ).hexdigest()

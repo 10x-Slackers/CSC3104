@@ -4,9 +4,11 @@
 
 Run independently at each bank. Provision peers' authenticated public files in
 <root>/<bank>/trusted/{x25519,signing}/<peer>/<version>.pem. Never copy private/.
+The first run also writes a single-version <root>/<bank>/active.json.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 from security import (
@@ -37,6 +39,19 @@ def make_keys(root, bank, key_version="k1"):
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as target:
                 target.write(value)
+    manifest = root / "active.json"
+    if not manifest.exists():
+        peers = {peer: [key_version] for peer in BANKS if peer != bank}
+        manifest.write_text(
+            json.dumps(
+                {
+                    "active_versions": [key_version],
+                    "query_version": key_version,
+                    "signing_key_version": key_version,
+                    "peer_versions": peers,
+                }
+            )
+        )
     return root
 
 

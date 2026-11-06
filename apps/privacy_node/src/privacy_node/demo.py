@@ -6,7 +6,6 @@ Prints each search's state and each bank's stored chains. Keys are generated
 into a temporary folder for the run.
 """
 
-import json
 import sys
 import tempfile
 from pathlib import Path
@@ -32,21 +31,6 @@ def prepare_demo_keys(root, version="k1"):
                 target = root / bank / "trusted" / purpose / peer / f"{version}.pem"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 copyfile(root / peer / "public" / purpose / f"{version}.pem", target)
-    for bank in BANKS:
-        path = root / bank / "active.json"
-        if not path.exists():
-            path.write_text(
-                json.dumps(
-                    {
-                        "active_versions": [version],
-                        "query_version": version,
-                        "signing_key_version": version,
-                        "peer_versions": {
-                            peer: [version] for peer in BANKS if peer != bank
-                        },
-                    }
-                )
-            )
 
 
 def start_banks(workload, key_dir):

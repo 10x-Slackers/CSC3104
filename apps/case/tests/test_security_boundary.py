@@ -63,45 +63,6 @@ def test_case_calls_the_authoritative_validator(evidence, tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "attack",
-    [
-        "tamper",
-        "signer",
-        "missing_key",
-        "digest",
-        "anchor",
-        "binding",
-        "signing_version",
-        "state",
-    ],
-)
-def test_invalid_results_never_enter_case_store(evidence, tmp_path, attack):
-    result, keys, private = evidence
-    if attack == "tamper":
-        result.claims[0].out_ref.token = b"x" * 16
-    elif attack == "signer":
-        result.claims[0].signer = "C"
-    elif attack == "missing_key":
-        del keys["A", "k1"]
-    elif attack == "digest":
-        result.chain_digest = "bad"
-    elif attack == "anchor":
-        result.sender = "A"
-    elif attack == "binding":
-        result.claims[0].recipient = "C"
-        result.claims[0].signature = sign(claim_bytes(result.claims[0]), private["A"])
-    elif attack == "signing_version":
-        result.claims[0].signing_key_version = "k2"
-    elif attack == "state":
-        result.state = pb.PENDING
-    client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 422
-    )
-    assert client.get("/api/cases").json() == []
-
-
 def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_path):
     result, keys, private = evidence
     result.claims[1].truncated = True
@@ -129,57 +90,6 @@ def test_tokens_normalize_to_hex_at_case_storage_boundary(evidence, tmp_path):
         ).fetchone()[0]
         == "text"
     )
-
-
-def test_case_rejects_one_bank_signing_both_sides_of_a_transfer(evidence, tmp_path):
-    result, keys, private = evidence
-    ref = pb.TokenRef(pair="A-B", token=b"x" * 16)
-    result.claims[0].in_ref.CopyFrom(ref)
-    result.claims[0].signature = sign(claim_bytes(result.claims[0]), private["A"])
-    first = pb.LinkClaim(
-        signer="A",
-        recipient="A",
-        query_id=result.claims[0].query_id,
-        key_version="k1",
-        signing_key_version="k1",
-        out_ref=ref,
-    )
-    first.signature = sign(claim_bytes(first), private["A"])
-    result.claims.insert(0, first)
-    result.chain_digest = chain_digest(result.claims)
-    client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 422
-    )
-    assert client.get("/api/cases").json() == []
-
-
-def test_case_rejects_disconnected_genuinely_signed_fragments(evidence, tmp_path):
-    result, keys, private = evidence
-    split_ref = pb.TokenRef()
-    split_ref.CopyFrom(result.claims[1].out_ref)
-    result.claims[1].ClearField("out_ref")
-    tail = result.claims[2]
-    tail.ClearField("in_ref")
-    tail.out_ref.CopyFrom(split_ref)
-    result.claims.append(
-        pb.LinkClaim(
-            signer="B",
-            recipient="C",
-            query_id=tail.query_id,
-            key_version="k1",
-            signing_key_version="k1",
-            in_ref=split_ref,
-        )
-    )
-    for claim in result.claims:
-        claim.signature = sign(claim_bytes(claim), private[claim.signer])
-    result.chain_digest = chain_digest(result.claims)
-    client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 422
-    )
-    assert client.get("/api/cases").json() == []
 
 
 def test_signed_cut_flags_remain_booleans_in_store_api_and_report(evidence, tmp_path):

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from shutil import copyfile
 
@@ -67,3 +68,14 @@ def test_signing_key_versions_coexist_and_files_reload(tmp_path):
     reloaded = public_keys(tmp_path, "A")
     assert ("B", "k1") not in reloaded
     assert public_key_pem(reloaded["B", "k2"]) == public_key_pem(trusted["B", "k2"])
+
+
+def test_first_version_writes_a_manifest_that_later_versions_keep(tmp_path):
+    make_keys(tmp_path, "B")
+    make_keys(tmp_path, "B", "k2")
+    assert json.loads((tmp_path / "B/active.json").read_text()) == {
+        "active_versions": ["k1"],
+        "query_version": "k1",
+        "signing_key_version": "k1",
+        "peer_versions": {"A": ["k1"], "C": ["k1"]},
+    }
