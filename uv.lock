@@ -477,6 +477,7 @@ name = "evaluation"
 version = "0.1.0"
 source = { editable = "apps/evaluation" }
 dependencies = [
+    { name = "ingestor" },
     { name = "privacy-node" },
     { name = "scorer" },
     { name = "security" },
@@ -484,6 +485,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ingestor", editable = "apps/ingestor" },
     { name = "privacy-node", editable = "apps/privacy_node" },
     { name = "scorer", editable = "apps/scorer" },
     { name = "security", editable = "apps/security" },

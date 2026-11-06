@@ -1,6 +1,5 @@
 """Run every bank's live rules and privacy node trace in one process; tier the cases."""
 
-import csv
 import tempfile
 from collections import Counter
 from collections.abc import Iterator
@@ -10,6 +9,7 @@ from pathlib import Path
 from google.protobuf.message import Message
 
 from evaluation.score import Case
+from ingestor import Event, read_events
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import refs
 from privacy_node.demo import prepare_demo_keys
@@ -25,9 +25,9 @@ KEY_VERSION = "k1"
 class InProcessNode(Node):
     """A privacy node that calls its peers directly instead of over gRPC."""
 
-    def call(
-        self, bank: str, method: str, request: Message, deadline: datetime
-    ) -> Message:
+    def call[R: Message](
+        self, bank: str, method: str, request: Message, deadline: datetime, fallback: R
+    ) -> R:
         return getattr(self.peers[bank], method)(request, OfflineContext())
 
 
@@ -36,12 +36,11 @@ class OfflineContext:
         raise RuntimeError(f"peer rejected a call: {code} {details}")
 
 
-def bank_transfers(workload: str | Path, bank: str) -> Iterator[dict]:
+def bank_transfers(workload: str | Path, bank: str) -> Iterator[Event]:
     """A bank file as replay sends it: bank transfers only."""
-    with (Path(workload) / f"bank_{bank}.csv").open() as source:
-        for event in csv.DictReader(source):
-            if event["payment_format"] in BANK_TRANSFERS:
-                yield event
+    for event in read_events(Path(workload) / f"bank_{bank}.csv"):
+        if event["payment_format"] in BANK_TRANSFERS:
+            yield event
 
 
 def start_nodes(workload: str | Path, key_dir: str) -> dict[str, InProcessNode]:
