@@ -18,6 +18,8 @@ from security import canonical_pair, derive_token
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
 # Shared with the ingestor: the records it writes for one batch to Bank B
 KAFKA_EVENTS = Path(__file__).parents[2] / "ingestor/fixtures/kafka_events.json"
+# Shared with the offline evaluator: expected links and hits on the tiny fixture
+TINY_EXPECTED = Path(__file__).parents[1] / "fixtures/tiny_expected.json"
 
 
 def event(payment="in", direction="in", amount=100, time="09:00:00", **changes):
@@ -229,6 +231,27 @@ def test_consumer_failures(failure):
     else:
         output.flush.assert_called_once()
     consumer.close.assert_called_once()
+
+
+@pytest.mark.parametrize("bank", "ABC")
+def test_fast_links_match_library_sample(bank):
+    # only the fast rule exists so far; chain and the hits come with the new rules
+    expected = json.loads(TINY_EXPECTED.read_text())[bank]["links"]
+    with (TINY / f"bank_{bank}.csv").open() as source:
+        rows = [
+            r
+            for r in csv.DictReader(source)
+            if r["payment_format"] in ("GIRO", "MEPS+")
+        ]
+    scorer = Scorer(bank)
+    found = {
+        (d["incoming_payment_id"], d["outgoing_payment_id"])
+        for r in rows
+        for d in scorer.process(r)
+    }
+    assert found == {
+        (x["incoming"], x["outgoing"]) for x in expected if "fast" in x["rules"]
+    }
 
 
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])

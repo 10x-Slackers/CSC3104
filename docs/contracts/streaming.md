@@ -210,6 +210,23 @@ Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 
 **pending work:** the offline evaluator ([evaluation.md](../evaluation.md#offline-detection-evaluation)) supersedes this as the local-only vs cross-bank comparison, running the same scorer code.
 
+## Scorer as a library (**draft**, Cindy → Isaac)
+
+**pending work (Cindy):** the offline evaluator runs the live rule code over bank files, with no Kafka or Valkey.
+
+```python
+from scorer import score_file
+
+state = score_file("apps/dataset/fixtures/tiny", "B")
+```
+
+- `score_file(workload, bank)` reads `<workload>/bank_<bank>.csv` in file order, runs every rule (they skip anything but `GIRO` and `MEPS+`, as replay does) and returns a `MemoryState`. **pending work:** tokens (`tok:` and `lookup`) come with the 16-byte token API in #26; the node's CSV mode still indexes its own.
+- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` (**pending work**) will have the same methods, so the rules are one piece of code. The node and the evaluator read it with:
+  - `links(payment_id, direction)`: the `link:in:` or `link:out:` payment IDs, sorted
+  - `payment(payment_id, direction)`: the `pay:` entry, or `None`
+  - `hits()`: every hit as `{rule, account, payments, hit_id}`, in the order written
+- Sample: [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json), every bank's links and hits on the tiny fixture. It matches issue #27's fixture table and was generated from #27's reference script (chain, new payee, quick repeat) plus today's fast rule. The fixture has no quick repeat.
+
 ## Interfaces
 
 Agreed contract first ([conventions](../README.md#conventions)): the producer adds one sample message here, and both sides' tests load it.
@@ -218,7 +235,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | --- | --- | --- | --- | --- |
 | Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **agreed** (Cindy, 3 Nov), sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json) | Mon 2 Nov |
 | Valkey layout ([streaming.md](streaming.md#valkey-layout-draft-cindy--zane)) | Cindy → Zane | Key names, token-index value, local links (including intra-bank legs), `hit:` keys, windows, TTL and trim | **draft**, sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json); Zane to approve | Wed 4 Nov |
-| Scorer as a library | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample TODO | Wed 4 Nov |
+| Scorer as a library ([streaming.md](streaming.md#scorer-as-a-library-draft-cindy--isaac)) | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json); Isaac to approve | Wed 4 Nov |
 
 Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md#interfaces).
 
