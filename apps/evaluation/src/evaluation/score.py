@@ -1,22 +1,28 @@
 """Score cases against Altman's labels for the dev or eval split."""
 
 import csv
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, namedtuple
 from pathlib import Path
 
 from scorer.score import BANK_TRANSFERS
 
 SPLITS = {"dev": ("2022-09-01", "2022-09-05"), "eval": ("2022-09-06", "2022-09-10")}
+Transfer = namedtuple("Transfer", "day bank counterparty_bank payment_format")
 
 
 def load(workload):
-    """Return ({payment_id: outgoing event}, {payment_id: label row})."""
+    """Return ({payment_id: Transfer}, {payment_id: label row})."""
     transfers = {}
     for path in sorted(Path(workload).glob("bank_*.csv")):
         with path.open() as source:
             for event in csv.DictReader(source):
                 if event["direction"] == "out":
-                    transfers[event["payment_id"]] = event
+                    transfers[event["payment_id"]] = Transfer(
+                        event["event_time"][:10],
+                        event["bank"],
+                        event["counterparty_bank"],
+                        event["payment_format"],
+                    )
     with (Path(workload) / "labels.csv").open() as source:
         labels = {row["payment_id"]: row for row in csv.DictReader(source)}
     return transfers, labels
@@ -31,7 +37,7 @@ def score(cases, transfers, labels, split):
     first, last = SPLITS[split]
 
     def day(p):
-        return transfers[p]["event_time"][:10]
+        return transfers[p].day
 
     def in_split(d):
         return first <= d <= last
@@ -50,10 +56,10 @@ def score(cases, transfers, labels, split):
 
     def scope(p):
         t = transfers[p]
-        if t["bank"] == t["counterparty_bank"]:
+        if t.bank == t.counterparty_bank:
             return "same_bank"
-        if t["payment_format"] not in BANK_TRANSFERS:
-            return t["payment_format"]
+        if t.payment_format not in BANK_TRANSFERS:
+            return t.payment_format
         return "after_ordinary_activity" if day(p) > ordinary_end else "in_scope"
 
     flagged = set().union(*(c.ids for c in cases))
@@ -68,20 +74,20 @@ def score(cases, transfers, labels, split):
             row["caught_tier2"] += not tier2.isdisjoint(ids)
 
     in_scope = [p for p in counted if scope(p) == "in_scope"]
-    own_days = [p for p in transfers if in_split(day(p))]
-    own_flagged = [p for p in own_days if p in flagged]
-    load = Counter(
+    own_days = {p for p in transfers if in_split(day(p))}
+    own_flagged = own_days & flagged
+    per_bank_tier = Counter(
         f"{c.bank} tier {c.tier}" for c in cases if in_split(max(map(day, c.ids)))
     )
     days = len({day(p) for p in own_days})
 
     return {
         "patterns": {name: dict(row) for name, row in sorted(patterns.items())},
-        "payment_recall": fraction([p for p in in_scope if p in flagged], in_scope),
+        "payment_recall": fraction(flagged.intersection(in_scope), in_scope),
         "laundering_by_scope": dict(sorted(Counter(map(scope, counted)).items())),
-        "precision": fraction([p for p in own_flagged if p in laundering], own_flagged),
-        "false_positive_rate": fraction(
-            [p for p in own_flagged if p not in laundering], own_days
-        ),
-        "cases_per_bank_per_day": {k: n / days for k, n in sorted(load.items())},
+        "precision": fraction(own_flagged & laundering, own_flagged),
+        "false_positive_rate": fraction(own_flagged - laundering, own_days),
+        "cases_per_bank_per_day": {
+            k: n / days for k, n in sorted(per_bank_tier.items())
+        },
     }

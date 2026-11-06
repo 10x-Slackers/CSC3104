@@ -49,16 +49,15 @@ def bank_transfers(workload, bank):
 def start_nodes(workload, key_dir):
     make_keys(key_dir)
     public_keys = {b: load_verification_key(f"{key_dir}/public/{b}.pem") for b in BANKS}
-    nodes = {}
+    nodes, peers = {}, {}
     for bank in BANKS:
         events = bank_transfers(workload, bank)
         local = LocalBank(bank, KEY_VERSION, pair_paths(key_dir, bank), events)
         signing_key = load_signing_key(f"{key_dir}/signing/{bank}.pem")
         nodes[bank] = InProcessNode(
-            local, Store(), signing_key, public_keys, {}, KEY_VERSION
+            local, Store(), signing_key, public_keys, peers, KEY_VERSION
         )
-    for node in nodes.values():
-        node.peers.update(nodes)
+    peers.update(nodes)
     return nodes
 
 
@@ -75,18 +74,18 @@ def run(workload):
         for (payment_id, _), ref in node.local.refs.items():
             payment_of[key(ref)] = payment_id
     cases = []
-    for bank, node in nodes.items():
-        cases += bank_cases(bank, node, payment_of)
+    for node in nodes.values():
+        cases += bank_cases(node, payment_of)
     return cases, dict(sorted(searches.items()))
 
 
-def bank_cases(bank, node, payment_of):
+def bank_cases(node, payment_of):
     found = [(1, hit["payments"]) for hit in node.local.scorer.state.hits()]
     for chain in node.store.chains():
-        tier = chain_tier(chain, bank)
+        tier = chain_tier(chain, node.bank)
         if tier:
             found.append((tier, [payment_of[key(ref)] for ref in refs(chain.claims)]))
-    return merge(bank, found)
+    return merge(node.bank, found)
 
 
 def chain_tier(chain, bank):

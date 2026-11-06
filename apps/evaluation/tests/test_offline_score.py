@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from evaluation.run import Case, run
-from evaluation.score import load, score
+from evaluation.score import Transfer, load, score
 
 TINY = Path(__file__).parents[2] / "dataset/fixtures/tiny"
 
@@ -26,9 +26,8 @@ def test_fixture_report():
 
 
 def test_split_by_attempt_start():
-    def out(day, fmt="GIRO", to="B"):
-        event = {"event_time": f"2022-09-{day:02}T09:00:00Z", "bank": "A"}
-        return event | {"counterparty_bank": to, "payment_format": fmt}
+    def out(day, fmt="GIRO"):
+        return Transfer(f"2022-09-{day:02}", "A", "B", fmt)
 
     transfers = {"a1": out(5), "a2": out(6), "n1": out(6, "Cash"), "o1": out(12)}
     row = {"altman_laundering": "1", "attempt_id": "7", "altman_pattern": "CYCLE"}
