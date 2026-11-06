@@ -209,13 +209,15 @@ def test_peer_error_fails_search_without_retry(banks, monkeypatch):
 
 def test_intra_bank_detection_is_not_searched(tmp_path):
     make_keys(tmp_path)
-    event = {"bank": "B", "account": "B-x", "payment_format": "Wire"}
+    event = {"bank": "B", "account": "B-x", "payment_format": "MEPS+"}
     events = [
         event
         | {"payment_id": "q1", "direction": "in", "counterparty_bank": "B"}
+        | {"counterparty_account": "B-y"}
         | {"event_time": "2022-09-05T09:00:00Z", "amount": "100"},
         event
         | {"payment_id": "q2", "direction": "out", "counterparty_bank": "C"}
+        | {"counterparty_account": "C-z"}
         | {"event_time": "2022-09-05T09:05:00Z", "amount": "95"},
     ]
     scorer = Scorer("B")
@@ -592,8 +594,9 @@ def test_concurrent_state_reads_and_old_token_retention(tmp_path):
     assert len(local.detections) == 4
     ref = local.refs["p06", "in"]
     local.process(
-        rows[3] | {"payment_id": "later", "event_time": "2022-09-06T12:00:00Z"}
+        rows[3] | {"payment_id": "later", "event_time": "2022-09-12T12:00:00Z"}
     )
+    assert ("p06", "in") not in local.scorer.state.window("B-m1")
     assert local.lookup(ref.pair, "k1", ref.token, "in") == "p06"
 
 

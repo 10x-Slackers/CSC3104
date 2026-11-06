@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
+from scorer import score_file
 from scorer.score import Scorer
 from scorer.stream import consume, require_full_replay
 from scorer.token_index import TokenIndex
@@ -30,98 +31,127 @@ def event(payment="in", direction="in", amount=100, time="09:00:00", **changes):
         "event_time": f"2022-09-05T{time}Z",
         "bank": "B",
         "account": "bob",
+        "counterparty_account": "A-alice",
         "counterparty_bank": "A",
-        "payment_format": "ACH",
+        "payment_format": "GIRO",
     } | changes
 
 
+def out(payment="out", amount=95, time="09:05:00", **changes):
+    """bob forwards money on to C-carol at Bank C."""
+    to_c = {"counterparty_account": "C-carol", "counterparty_bank": "C"}
+    return event(payment, "out", amount, time, **to_c | changes)
+
+
+def run(scorer, *events):
+    return [link for e in events for link in scorer.process(e)]
+
+
 @pytest.mark.parametrize(
-    "amount,time,expected",
+    "amount,time,rules",
     [
-        (90, "09:01:00", True),
-        (98, "09:30:00", True),
-        (89.99, "09:10:00", False),
-        (98.01, "09:10:00", False),
-        (95, "09:00:59", False),
-        (95, "09:30:01", False),
+        (90, "09:01:00", ["fast", "chain"]),
+        (98, "09:30:00", ["fast", "chain"]),
+        (89.99, "09:10:00", []),
+        (98.01, "09:10:00", ["chain"]),
+        (110, "09:10:00", ["chain"]),
+        (110.01, "09:10:00", []),
+        (95, "09:00:59", []),
+        (95, "09:30:01", ["chain"]),
     ],
 )
-def test_boundaries(amount, time, expected):
+def test_link_rules(amount, time, rules):
+    links = run(Scorer("B"), event(), out(amount=amount, time=time))
+    assert [link["rules"] for link in links] == ([rules] if rules else [])
+    if links:
+        assert links[0]["ratio"] == pytest.approx(amount / 100)
+
+
+@pytest.mark.parametrize("time,linked", [("09:00:00", True), ("09:00:01", False)])
+def test_chain_window_is_72_hours(time, linked):
+    links = run(Scorer("B"), event(), out(event_time=f"2022-09-08T{time}Z"))
+    assert bool(links) == linked
+
+
+def test_chain_needs_a_leg_with_another_bank():
+    inside = {"counterparty_bank": "B", "counterparty_account": "B-dan"}
+    assert run(Scorer("B"), event(**inside), out(time="10:00:00", **inside)) == []
+    assert run(Scorer("B"), event(**inside), out(time="10:00:00"))[0]["rules"] == [
+        "chain"
+    ]
+
+
+def test_only_bank_transfers():
+    assert run(Scorer("B"), event(payment_format="Cheque"), out()) == []
+
+
+def test_repeats_and_either_order():
     scorer = Scorer("B")
-    assert scorer.process(event()) == []
-    result = scorer.process(event("out", "out", amount, time))
-    assert bool(result) == expected
-    if result:
-        assert result[0]["ratio"] == amount / 100
+    links = run(scorer, out(), event(), event(), out())
+    assert [(x["incoming_payment_id"], x["outgoing_payment_id"]) for x in links] == [
+        ("in", "out")
+    ]
+    assert len(scorer.state.hits()) == 2  # chain and new payee, written once
 
 
-def test_duplicates_and_local_accounts():
+def test_late_events_and_trim():
     scorer = Scorer("B")
-    incoming = event()
-    outgoing = event("out", "out", 95, "09:05:00")
-    scorer.process(incoming)
-    assert scorer.process(incoming) == []
-    assert scorer.process(outgoing | {"account": "someone_else"}) == []
-    assert len(scorer.process(outgoing)) == 1
-    assert scorer.process(outgoing) == []
+    scorer.process(out())
+    # up to 72 h behind the account's latest event is still matched
+    assert run(scorer, event(event_time="2022-09-02T09:05:00Z", amount=95)) != []
+    assert run(scorer, event("late", event_time="2022-09-02T09:04:59Z")) == []
+    assert ("late", "in") not in scorer.state.window("bob")
+    # a much later event trims everything older than twice the window
+    scorer.process(event("new", event_time="2022-09-20T09:00:00Z"))
+    assert set(scorer.state.window("bob")) == {("new", "in")}
 
 
-def test_out_of_order_and_bounds():
+def test_late_event_finds_partner_kept_for_twice_the_window():
     scorer = Scorer("B")
-    scorer.process(event("out", "out", 95, "09:05:00"))
-    assert len(scorer.process(event())) == 1
-    scorer.process(event("future", time="11:00:00"))
-    assert scorer.process(event()) == []
-    assert len(scorer.history) == 1
-    scorer = Scorer("B", max_events=2)
-    for i in range(10):
-        scorer.process(event(str(i)))
-    assert len(scorer.history) == 2
+    scorer.process(event())
+    scorer.process(event("later", event_time="2022-09-09T13:00:00Z"))  # 100 h on
+    late = out(event_time="2022-09-06T15:00:00Z")  # 30 h after the in leg, 70 h late
+    assert [x["incoming_payment_id"] for x in scorer.process(late)] == ["in"]
 
 
-def test_account_time_windows():
+def test_late_payment_keeps_the_newer_last_paid():
     scorer = Scorer("B")
-    outgoing = event("out", "out", 95, "09:05:00")
-    scorer.process(outgoing)
-    scorer.process(event("alice-new", account="alice", time="12:00:00"))
-    results = scorer.process(event())
-    assert len(results) == 1
-    assert (results[0]["incoming_payment_id"], results[0]["outgoing_payment_id"]) == (
-        "in",
-        "out",
+    scorer.process(out("new", time="12:00:00"))
+    scorer.process(out("old", time="09:00:00"))
+    assert (
+        scorer.state.last_paid("bob", "C-carol")[0]
+        == scorer.state.window("bob")["new", "out"][0]
     )
-    assert scorer.process(event()) == []
-    assert scorer.process(outgoing) == []
-    scorer.process(event("bob-new", time="11:00:00"))
-    assert scorer.process(event()) == []
-    assert set(scorer.accounts) == {"alice", "bob"}
-    assert len(scorer.history) == 2
+    assert [h["rule"] for h in scorer.state.hits()] == ["new_payee"]
 
 
-def test_interleaved_account_capacity_eviction():
-    scorer = Scorer("B", max_events=2)
-    scorer.process(event("alice-new", account="alice", time="12:00:00"))
-    scorer.process(event())
-    assert len(scorer.process(event("out", "out", 95, "09:05:00"))) == 1
-    assert set(scorer.accounts) == {"bob"}
-    assert set(scorer.latest) == {"alice", "bob"}
-    assert len(scorer.history) == 2
-    assert scorer.process(event()) == []
+@pytest.mark.parametrize(
+    "second,repeat", [("15:00:00", True), ("2022-09-06T09:00:01Z", False)]
+)
+def test_new_payee_and_quick_repeat(second, repeat):
+    # issue #27's example: 09:00 new payee, 15:00 quick repeat, 16:00 nothing
+    scorer = Scorer("A")
+
+    def pay(payment, time):
+        when = time if "T" in time else f"2022-09-05T{time}Z"
+        return out(payment, 100, bank="A", account="A-x", event_time=when)
+
+    run(
+        scorer,
+        pay("q1", "09:00:00"),
+        pay("q2", second),
+        pay("q3", "2022-09-06T10:00:00Z"),
+    )
+    hits = [(h["rule"], h["payments"]) for h in scorer.state.hits()]
+    assert hits == [("new_payee", ["q1"])] + (
+        [("quick_repeat", ["q2"])] if repeat else []
+    )
 
 
-def test_capacity_eviction_keeps_watermark():
-    scorer = Scorer("B", max_events=1)
-    scorer.process(event("x", time="12:00:00"))
-    scorer.process(event("y", account="alice", time="12:00:00"))
-    assert scorer.process(event()) == []
-    assert scorer.process(event("out", "out", 95, "09:05:00")) == []
-
-
-def test_late_event_finds_expired_window_partner():
+def test_no_new_payee_inside_the_bank():
     scorer = Scorer("B")
-    scorer.process(event())
-    scorer.process(event("later", time="09:40:00"))
-    assert len(scorer.process(event("out", "out", 95, "09:20:00"))) == 1
+    scorer.process(out(counterparty_bank="B", counterparty_account="B-dan"))
+    assert scorer.state.hits() == []
 
 
 @pytest.mark.parametrize(
@@ -234,24 +264,27 @@ def test_consumer_failures(failure):
 
 
 @pytest.mark.parametrize("bank", "ABC")
-def test_fast_links_match_library_sample(bank):
-    # only the fast rule exists so far; chain and the hits come with the new rules
-    expected = json.loads(TINY_EXPECTED.read_text())[bank]["links"]
-    with (TINY / f"bank_{bank}.csv").open() as source:
-        rows = [
-            r
-            for r in csv.DictReader(source)
-            if r["payment_format"] in ("GIRO", "MEPS+")
-        ]
+def test_score_file_matches_library_sample(bank):
+    expected = json.loads(TINY_EXPECTED.read_text())[bank]
     scorer = Scorer(bank)
-    found = {
-        (d["incoming_payment_id"], d["outgoing_payment_id"])
-        for r in rows
-        for d in scorer.process(r)
-    }
-    assert found == {
-        (x["incoming"], x["outgoing"]) for x in expected if "fast" in x["rules"]
-    }
+    with (TINY / f"bank_{bank}.csv").open() as source:
+        links = [link for e in csv.DictReader(source) for link in scorer.process(e)]
+    found = sorted(
+        (
+            {
+                "incoming": x["incoming_payment_id"],
+                "outgoing": x["outgoing_payment_id"],
+                "account": x["account"],
+                "rules": x["rules"],
+            }
+            for x in links
+        ),
+        key=lambda x: (x["incoming"], x["outgoing"]),
+    )
+    assert found == expected["links"]
+    hits = sorted(scorer.state.hits(), key=lambda h: (h["rule"], h["payments"]))
+    assert hits == expected["hits"]
+    assert score_file(TINY, bank).hits() == scorer.state.hits()
 
 
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])
@@ -277,9 +310,8 @@ def test_consume_is_repeatable(bank, count):
     assert len({r["detection_id"] for r in first}) == count
 
 
-def test_identity_and_account_index_eviction():
-    incoming = event()
-    outgoing = event("out", "out", 95, "09:05:00")
+def test_detection_identity():
+    incoming, outgoing = event(), out()
 
     def detect(bank, events):
         scorer = Scorer(bank)
@@ -292,13 +324,6 @@ def test_identity_and_account_index_eviction():
         result["detection_id"]
         != detect("B", [incoming | {"payment_id": "other"}, outgoing])["detection_id"]
     )
-    scorer = Scorer("B", max_events=1)
-    scorer.process(incoming)
-    scorer.process(event("unrelated", account="alice"))
-    assert set(scorer.accounts) == {"alice"}
-    assert scorer.process(outgoing) == []
-    scorer.process(event("future", account="carol", time="10:00:00"))
-    assert set(scorer.accounts) == {"carol"}
 
 
 @pytest.mark.parametrize("bad", [message(event(bank="A")), message(event())])
