@@ -95,14 +95,14 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 | `altman-1-6sep` | `apps/dataset/out/altman-1-6sep --start 2022-09-01 --hours 144` | 2,696,535 | Offline = live (experiment 13) |
 | `altman-medium` | `apps/dataset/out/altman-medium --altman HI-Medium` | 29,336,378 | Out-of-sample check; its bank transfers for replay on EKS (below) |
 
-`altman-small` takes about 30 s and writes 825 MB; `altman-medium` takes about 4 minutes and writes 5.5 GB. Peak memory on Linux (a Python 3.12 container) is 2.9 GB for `altman-small` and about 19 GB for `altman-medium` (estimated from 6.5 times the transfers; Docker's 8 GB VM is too small to measure it). macOS reports about 4 GB and 11 GB, because it compresses memory and doesn't count the compressed part. So `altman-medium` is built on a machine with that much memory, not in k3d (an 8 GB VM) or in a pod. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
+`altman-small` takes about 30 s and writes 825 MB; `altman-medium` takes about 4 minutes and writes 5.5 GB. Peak memory on Linux (a Python 3.12 container) is 2.9 GB for `altman-small` and about 19 GB for `altman-medium` (estimated from 6.5 times the transfers; Docker's 8 GB VM is too small to measure it). macOS reports about 11 GB for altman-medium, because under memory pressure it compresses memory and doesn't count the compressed part. So `altman-medium` is built on a machine with that much memory, not in k3d (an 8 GB VM) or in a pod. HI-Medium gives the same inputs as the exploratory sweep: 31,086 laundering transfers on 1–16 Sep, 17,777 of them cross-bank GIRO or MEPS+.
 
-**Bank transfers only, for replay.** Replay reads only the GIRO and MEPS+ rows, so the bank files a replay Job gets can leave out the rest. For `altman-medium` that takes them from 5.5 GB to 817 MB (A 274 MB, B 271 MB, C 276 MB), and replay reads the same 4,509,233 payments in the same order. `workload.json` is copied unchanged because replay needs its `t0`, so its counts are still the full workload's. The offline evaluator keeps reading the full `altman-medium` (rule 6).
+**Bank transfers only, for replay.**  Replay reads only the out rows of GIRO and MEPS+ payments (each payment once, from its sender's file, then sent to both banks), so the bank files a replay Job gets can leave out the rest. For altman-medium that takes them from 5.5 GB to 413 MB (A 139 MB, B 134 MB, C 140 MB), and replay reads the same 4,509,233 payments in the same order. `workload.json` is copied unchanged because replay needs its `t0`, so its counts are still the full workload's. The offline evaluator keeps reading the full `altman-medium` (rule 6).
 
 ```sh
 mkdir -p apps/dataset/out/altman-medium-bt
-for b in A B C; do  # keep the header and rows whose 9th column, payment_format, is GIRO or MEPS+
-  awk -F, 'NR==1 || $9=="GIRO" || $9=="MEPS+"' apps/dataset/out/altman-medium/bank_$b.csv > apps/dataset/out/altman-medium-bt/bank_$b.csv
+for b in A B C; do   # keep the header and outgoing rows ($4, direction) whose payment_format ($9) is GIRO or MEPS+
+  awk -F, 'NR==1 || ($4=="out" && ($9=="GIRO" || $9=="MEPS+"))' apps/dataset/out/altman-medium/bank_$b.csv > apps/dataset/out/altman-medium-bt/bank_$b.csv
 done
 cp apps/dataset/out/altman-medium/workload.json apps/dataset/out/altman-medium-bt/
 ```
