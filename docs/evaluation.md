@@ -1,6 +1,6 @@
 # Evaluation
 
-Owner: Isaac · Evidence supplied by every owner · Status: **pending work** (no runs yet)
+Owner: Isaac · Evidence supplied by every owner · Status: offline evaluator built; **pending work**: the evaluation runs
 
 Every claim needs a measured indicator, and the main results need graphs. Detection quality is measured **offline**, and the system (latency, scaling, failures) on the **cluster**.
 
@@ -17,10 +17,11 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 
 ## Offline detection evaluation
 
-**pending work (Isaac):** a workspace package `apps/evaluation/`, run with `uv run python -m evaluation.offline`.
+`apps/evaluation/` (Isaac): `uv run python -m evaluation.offline apps/dataset/out/altman-small --split dev` prints the report below as JSON. A run over `altman-small` takes about a minute and 3 GB.
 
 - **Input:** `prepare.py`'s bank files and labels file (`altman-small`, and `altman-medium` for experiment 14), with the attempt ID and `altman_pattern` per laundering transfer.
-- **Same code as the live path:** each bank's scorer runs as a library over its bank file, with an in-memory state store. The existing in-process three-node trace (the privacy node's CSV mode) then produces cross-bank chains and tiers. No Kafka, Valkey or gRPC servers.
+- **Same code as the live path:** each bank's privacy node reads its bank file with the live scorer (the node's CSV mode, `LocalBank`), then searches every local detection, as the batch run on k3d does after replay. Peer `Trace` and `Deliver` calls are direct method calls between the three nodes. No Kafka, Valkey or gRPC servers.
+- **Tiers and cases** follow [case.md](contracts/case.md#cases-and-alerts) until the case service has them: every rule hit is Tier 1 at its bank; a stored chain is Tier 2 at every bank on it when at least 2 banks' claims are rule-backed, otherwise Tier 1 at the rule-backed bank. At each bank, results sharing a transfer join one case at the highest tier, which promotes Tier 1 hits.
 - **Output, per Altman pattern type:** attempts caught at Tier 1 (local) and at Tier 2 (cross-bank), precision, and analyst load (cases per bank per day, by tier). An attempt counts as caught if any of its transfers is in a case. Also report **payment-level** recall over the scope, which counts laundering in no attempt (about a third of HI-Small's in-scope laundering), and the false-positive rate as ordinary payments flagged / all payments on the split's own days.
 - **Where it runs:** a laptop for the full splits; CI runs it on the committed fixture as a regression test.
 - **Bridge to the cluster:** replay the `altman-1-6sep` workload (1 Sep to the end of the first eval day) through k3d at `--speed 0`, so the live rules have the same history as the offline run, and compare 6 Sep's stored cases with the offline run over the same workload. They must match (experiment 13).
