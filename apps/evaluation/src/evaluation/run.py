@@ -11,13 +11,13 @@ from google.protobuf.message import Message
 
 from evaluation.score import Case
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.claims import check_payload, key, refs
-from privacy_node.keys import BANKS, make_keys, pair_paths
+from privacy_node.claims import refs
+from privacy_node.demo import prepare_demo_keys
+from privacy_node.keys import BANKS, own_key, pair_paths, public_keys
 from privacy_node.local_state import LocalBank
 from privacy_node.node import Node
 from privacy_node.store import Store
 from scorer.score import BANK_TRANSFERS
-from security import load_signing_key, load_verification_key
 
 KEY_VERSION = "k1"
 
@@ -28,7 +28,6 @@ class InProcessNode(Node):
     def call(
         self, bank: str, method: str, request: Message, deadline: datetime
     ) -> Message:
-        check_payload(request)
         return getattr(self.peers[bank], method)(request, OfflineContext())
 
 
@@ -46,15 +45,14 @@ def bank_transfers(workload: str | Path, bank: str) -> Iterator[dict]:
 
 
 def start_nodes(workload: str | Path, key_dir: str) -> dict[str, InProcessNode]:
-    make_keys(key_dir)
-    public_keys = {b: load_verification_key(f"{key_dir}/public/{b}.pem") for b in BANKS}
+    prepare_demo_keys(key_dir)
     nodes, peers = {}, {}
     for bank in BANKS:
         events = bank_transfers(workload, bank)
         local = LocalBank(bank, KEY_VERSION, pair_paths(key_dir, bank), events)
-        signing_key = load_signing_key(f"{key_dir}/signing/{bank}.pem")
+        trusted = public_keys(key_dir, bank)
         nodes[bank] = InProcessNode(
-            local, Store(), signing_key, public_keys, peers, KEY_VERSION
+            local, Store(), own_key(key_dir, bank), trusted, peers
         )
     peers.update(nodes)
     return nodes
@@ -64,26 +62,30 @@ def run(workload: str | Path) -> tuple[list[Case], dict[str, int]]:
     """Run every bank's rules and searches; return (cases, search state counts)."""
     with tempfile.TemporaryDirectory() as key_dir:
         nodes = start_nodes(workload, key_dir)
-    searches: Counter[str] = Counter()
-    for node in nodes.values():
-        for result in node.search_detections():
-            searches[pb.State.Name(result.state)] += 1
-    payment_of: dict[str, str] = {}
-    for node in nodes.values():
-        for (payment_id, _), ref in node.local.refs.items():
-            payment_of[key(ref)] = payment_id
+        searches: Counter[str] = Counter()
+        for node in nodes.values():
+            for result in node.search_detections():
+                searches[pb.State.Name(result.state)] += 1
     cases: list[Case] = []
     for node in nodes.values():
-        cases += bank_cases(node, payment_of)
+        cases += bank_cases(node, nodes)
     return cases, dict(sorted(searches.items()))
 
 
-def bank_cases(node: InProcessNode, payment_of: dict[str, str]) -> list[Case]:
+def payment_id(ref: pb.TokenRef, nodes: dict[str, InProcessNode]) -> str | None:
+    """Both banks of a pair index its transfers; ask the first one."""
+    local = nodes[ref.pair.split("-")[0]].local
+    return local.lookup(ref.pair, KEY_VERSION, ref.token, "out") or local.lookup(
+        ref.pair, KEY_VERSION, ref.token, "in"
+    )
+
+
+def bank_cases(node: InProcessNode, nodes: dict[str, InProcessNode]) -> list[Case]:
     found = [(1, hit["payments"]) for hit in node.local.scorer.state.hits()]
     for chain in node.store.chains():
         tier = chain_tier(chain, node.bank)
         if tier:
-            found.append((tier, [payment_of[key(ref)] for ref in refs(chain.claims)]))
+            found.append((tier, [payment_id(r, nodes) for r in refs(chain.claims)]))
     return merge(node.bank, found)
 
 
