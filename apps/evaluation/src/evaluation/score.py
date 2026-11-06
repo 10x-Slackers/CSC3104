@@ -10,6 +10,8 @@ from typing import NamedTuple
 from scorer.score import BANK_TRANSFERS
 
 SPLITS = {"dev": ("2022-09-01", "2022-09-05"), "eval": ("2022-09-06", "2022-09-10")}
+# altman-small; the generator only finishes its patterns after (contracts/data.md)
+ORDINARY_END = "2022-09-10"
 
 
 @dataclass(eq=False)
@@ -73,7 +75,6 @@ def score(
 
     laundering = {p for p, row in labels.items() if row["altman_laundering"] == "1"}
     counted = [p for p in laundering if in_split(start.get(p, day(p)))]
-    ordinary_end = max(day(p) for p in transfers if p not in laundering)
 
     def scope(p: str) -> str:
         t = transfers[p]
@@ -81,7 +82,7 @@ def score(
             return "same_bank"
         if t.payment_format not in BANK_TRANSFERS:
             return t.payment_format
-        return "after_ordinary_activity" if day(p) > ordinary_end else "in_scope"
+        return "after_ordinary_activity" if day(p) > ORDINARY_END else "in_scope"
 
     flagged = set().union(*(c.ids for c in cases))
     tier2 = set().union(*(c.ids for c in cases if c.tier == 2))
@@ -90,9 +91,13 @@ def score(
     for ids in attempts.values():
         if in_split(start[ids[0]]):
             row = patterns[labels[ids[0]]["altman_pattern"]]
+            caught = not flagged.isdisjoint(ids)
+            reachable = any(scope(p) == "in_scope" for p in ids)
             row["attempts"] += 1
-            row["caught_any_tier"] += not flagged.isdisjoint(ids)
+            row["caught_any_tier"] += caught
             row["caught_tier2"] += not tier2.isdisjoint(ids)
+            row["attempts_in_scope"] += reachable
+            row["caught_in_scope"] += reachable and caught
 
     in_scope = [p for p in counted if scope(p) == "in_scope"]
     own_days = {p for p in transfers if in_split(day(p))}

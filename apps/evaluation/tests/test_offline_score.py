@@ -10,7 +10,13 @@ def test_fixture_report():
     cases, _ = run(TINY)
     report = score(cases, *load(TINY), "dev")
     assert report["patterns"] == {
-        "FAN-OUT": {"attempts": 1, "caught_any_tier": 1, "caught_tier2": 0}
+        "FAN-OUT": {
+            "attempts": 1,
+            "caught_any_tier": 1,
+            "caught_tier2": 0,
+            "attempts_in_scope": 1,
+            "caught_in_scope": 1,
+        }
     }
     assert report["laundering_by_scope"] == {"in_scope": 1}
     assert report["payment_recall"] == 1
@@ -26,17 +32,40 @@ def test_fixture_report():
 
 
 def test_split_by_attempt_start():
-    def out(day, fmt="GIRO"):
-        return Transfer(f"2022-09-{day:02}", "A", "B", fmt)
+    def out(day, fmt="GIRO", to="B"):
+        return Transfer(f"2022-09-{day:02}", "A", to, fmt)
 
-    transfers = {"a1": out(5), "a2": out(6), "n1": out(6, "Cash"), "o1": out(12)}
+    transfers = {"a1": out(5), "a2": out(6), "a3": out(11), "s1": out(2, to="A")}
+    transfers |= {"n1": out(6, "Cash"), "o1": out(12)}
     row = {"altman_laundering": "1", "attempt_id": "7", "altman_pattern": "CYCLE"}
-    labels = {"a1": row, "a2": row, "n1": row | {"attempt_id": ""}}
+    stack = row | {"attempt_id": "8", "altman_pattern": "STACK"}
+    labels = {"a1": row, "a2": row, "a3": row, "s1": stack}
+    labels["n1"] = row | {"attempt_id": ""}
     cases = [Case("B", 2, {"a2"})]
     dev, eval_ = (score(cases, transfers, labels, s) for s in ("dev", "eval"))
-    # The attempt starts on 5 Sep, so both its transfers count in dev only.
+    # The attempt starts on 5 Sep, so all its transfers count in dev only.
+    # A same-bank attempt counts, but not as one the rules could reach.
     assert dev["patterns"] == {
-        "CYCLE": {"attempts": 1, "caught_any_tier": 1, "caught_tier2": 1}
+        "CYCLE": {
+            "attempts": 1,
+            "caught_any_tier": 1,
+            "caught_tier2": 1,
+            "attempts_in_scope": 1,
+            "caught_in_scope": 1,
+        },
+        "STACK": {
+            "attempts": 1,
+            "caught_any_tier": 0,
+            "caught_tier2": 0,
+            "attempts_in_scope": 0,
+            "caught_in_scope": 0,
+        },
+    }
+    # 11 Sep is after ordinary activity, even with a stray ordinary payment on 12 Sep.
+    assert dev["laundering_by_scope"] == {
+        "after_ordinary_activity": 1,
+        "in_scope": 2,
+        "same_bank": 1,
     }
     assert dev["payment_recall"] == 1 / 2
     assert eval_["patterns"] == {}
