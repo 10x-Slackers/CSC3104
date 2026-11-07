@@ -75,7 +75,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        stop, wait = threading.Event(), interval  # a local, so pyright narrows it
+        stop, wait = threading.Event(), interval  # a local, so dispatcher sees a float
         if wait is not None:
 
             def dispatcher():

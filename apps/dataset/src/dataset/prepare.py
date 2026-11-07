@@ -96,10 +96,10 @@ def altman(name: str, start: str | None = None, hours: float = 6) -> pd.DataFram
     )
 
 
-def split(t: pd.DataFrame):
+def split(t: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     # Transfers -> ({bank: events}, labels), with event_time already a TIME string.
     labels = t.reindex(columns=LABEL_COLS)  # Altman workloads have no planted chains
-    labels = labels[(labels.altman_laundering == 1) | labels.chain_id.notna()]
+    labels = labels.loc[(labels.altman_laundering == 1) | labels.chain_id.notna()]
     sides = {"out": ("from", "to"), "in": ("to", "from")}
     # same-minute transfers keep the source file's order
     t = t.sort_values("time", kind="stable", ignore_index=True)
