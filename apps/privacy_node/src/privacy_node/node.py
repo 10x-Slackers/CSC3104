@@ -19,12 +19,15 @@ import signal
 import threading
 import traceback
 import uuid
+from collections.abc import Callable, Iterable, Mapping
 from concurrent import futures
 from copy import copy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import grpc
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from google.protobuf.message import Message
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node import privacy_node_pb2_grpc as pb_grpc
@@ -46,7 +49,7 @@ from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
 from privacy_node.transport import TlsFiles, authenticated_bank
 from scorer.stream import consume
-from security import load_pairwise_keys, sign
+from security import PublicKeys, load_pairwise_keys, sign
 
 log = logging.getLogger(__name__)
 
@@ -60,23 +63,27 @@ SEVERITY = [
 ]
 
 
-def now():
+def now() -> datetime:
     return datetime.now(UTC)
 
 
-def worst(*states):
+UNREADABLE_TRACE = pb.TraceReply(state=pb.INVALID_CLAIM)
+
+
+def worst(*states: pb.State) -> pb.State:
     return max(states, key=SEVERITY.index)
 
 
-def unreadable(reply):
+def unreadable(reply: Message) -> bool:
     """A peer reply carrying a field or a state our .proto doesn't define.
 
     proto3 keeps an unknown enum number as a plain int in a known field, so
     has_unknown_fields can't see state=99; worst() would crash on it instead.
     """
-    if has_unknown_fields(reply):
-        return True
-    return "state" in reply.DESCRIPTOR.fields_by_name and reply.state not in SEVERITY
+    return (
+        has_unknown_fields(reply)
+        or getattr(reply, "state", pb.NO_MATCH) not in SEVERITY
+    )
 
 
 # The same request may succeed later (https://grpc.io/docs/guides/status-codes/).
@@ -89,7 +96,7 @@ TRANSIENT = frozenset(
 )
 
 
-def failure_state(error):
+def failure_state(error: grpc.RpcError) -> pb.State:
     if error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
         return pb.TIMED_OUT
     if error.code() in TRANSIENT:
@@ -100,21 +107,21 @@ def failure_state(error):
 class Node(pb_grpc.PrivacyNodeServicer):
     def __init__(
         self,
-        local,
-        store,
-        signing_key,
-        public_keys,
-        peers,
-        ingestion_grace_seconds=0,
-        signing_key_version="k1",
-        tls=None,
-    ):
+        local: LocalBank,
+        store: Store,
+        signing_key: Ed25519PrivateKey,
+        public_keys: PublicKeys,
+        peers: Mapping[str, str],
+        ingestion_grace_seconds: float = 0,
+        signing_key_version: str = "k1",
+        tls: TlsFiles | None = None,
+    ) -> None:
         self.bank = local.bank
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
         self.peers = peers
         self.signing_key_version, self.tls = signing_key_version, tls
-        self.reload_keys = None
+        self.reload_keys: Callable[[], None] | None = None
         self._key_reload = None
         self._started_detections = set()
         if ingestion_grace_seconds < 0:
@@ -125,11 +132,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
     # ---- outgoing calls -------------------------------------------------
 
     @property
-    def key_version(self):
+    def key_version(self) -> str:
         return self.local.index.key_version
 
-    def call(self, bank, method, request, deadline):
-        """Open one channel per call so Service balancing can select a replica."""
+    def call[R: Message](
+        self, bank: str, method: str, request: Message, deadline: datetime, fallback: R
+    ) -> R:
+        """Open one channel per call so Service balancing can select a replica.
+
+        An unreadable reply is logged and replaced by fallback.
+        """
         target = self.peers[bank]
         with (
             self.tls.channel(target) if self.tls else grpc.insecure_channel(target)
@@ -140,18 +152,18 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if not unreadable(reply):
             return reply
         log.warning("unreadable %s reply from bank=%s", method, bank)
-        return pb.TraceReply(state=pb.INVALID_CLAIM) if method == "Trace" else pb.Ack()
+        return copy(fallback)  # callers may change their reply
 
     def request(
         self,
-        query_id,
-        ref,
-        direction,
-        hops_remaining,
-        deadline,
-        visited,
-        key_version,
-    ):
+        query_id: str,
+        ref: pb.TokenRef,
+        direction: pb.Direction,
+        hops_remaining: int,
+        deadline: str,
+        visited: Iterable[pb.TokenRef],
+        key_version: str,
+    ) -> pb.TraceRequest:
         return pb.TraceRequest(
             query_id=query_id,
             sender=self.bank,
@@ -163,7 +175,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
             visited=visited,
         )
 
-    def claim(self, recipient, query_id, in_ref, out_ref, key_version, truncated=False):
+    def claim(
+        self,
+        recipient: str,
+        query_id: str,
+        in_ref: pb.TokenRef,
+        out_ref: pb.TokenRef,
+        key_version: str,
+        truncated: bool = False,
+    ) -> pb.LinkClaim:
         with self.local.lock:
             signing_key, signing_version = self.signing_key, self.signing_key_version
         c = pb.LinkClaim(
@@ -179,7 +199,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         c.signature = sign(claim_bytes(c), signing_key)
         return c
 
-    def reload_key_directory(self, root, config):
+    def reload_key_directory(self, root: str | Path, config: dict) -> None:
         """Apply a trusted mounted active-version manifest without restarting."""
         active = config["active_versions"]
         keys = {}
@@ -217,7 +237,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     # ---- answering a peer -----------------------------------------------
 
-    def Trace(self, request, context):
+    def Trace(
+        self, request: pb.TraceRequest, context: grpc.ServicerContext
+    ) -> pb.TraceReply:
         if self.tls:
             authenticated_bank(context, request.sender)
         if has_unknown_fields(request):
@@ -237,7 +259,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self.store.put_reply(request.query_id, slot, reply)
         return reply
 
-    def follow(self, request):
+    def follow(self, request: pb.TraceRequest) -> pb.TraceReply:
         if now() > datetime.fromisoformat(request.deadline):
             return pb.TraceReply(state=pb.TIMED_OUT)
         down = request.direction == pb.DOWNSTREAM
@@ -249,7 +271,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
             return pb.TraceReply(state=pb.NO_MATCH)
         return self.extend(request, payment, down)
 
-    def extend(self, request, payment, down):
+    def extend(
+        self, request: pb.TraceRequest, payment: str, down: bool
+    ) -> pb.TraceReply:
         """Sign this bank's link for the transfer and follow it one more hop."""
         here, there = ("in", "out") if down else ("out", "in")
         this_ref = request.ref
@@ -288,16 +312,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         peer = self.local.counterparty[nexts[0], there]
         try:
-            reply = self.call(
-                peer, "Trace", forward, datetime.fromisoformat(request.deadline)
-            )
+            deadline = datetime.fromisoformat(request.deadline)
+            reply = self.call(peer, "Trace", forward, deadline, UNREADABLE_TRACE)
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
         return pb.TraceReply(
             state=worst(state, reply.state), claims=[claim(next_ref), *reply.claims]
         )
 
-    def Deliver(self, request, context):
+    def Deliver(self, request: pb.ChainResult, context: grpc.ServicerContext) -> pb.Ack:
         """Store a chain result pushed by the bank that assembled it."""
         if self.tls:
             authenticated_bank(context, request.sender)
@@ -310,7 +333,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     # ---- starting a search ----------------------------------------------
 
-    def leg(self, direction, payment, ref, budget, deadline, visited, key_version):
+    def leg(
+        self,
+        direction: pb.Direction,
+        payment: str,
+        ref: pb.TokenRef,
+        budget: int,
+        deadline: datetime,
+        visited: Iterable[pb.TokenRef],
+        key_version: str,
+    ) -> tuple[pb.State, list[pb.LinkClaim]]:
         """Query the next bank in one direction and check the claims that come back."""
         query_id = str(uuid.uuid4())
         side = "out" if direction == pb.DOWNSTREAM else "in"
@@ -323,6 +355,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 "Trace",
                 request,
                 deadline,
+                UNREADABLE_TRACE,
             )
         except grpc.RpcError as error:
             return failure_state(error), []
@@ -330,7 +363,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         fresh = bound(claims, self.bank, query_id)
         return (reply.state if fresh else pb.INVALID_CLAIM), claims
 
-    def search(self, incoming, outgoing):
+    def search(self, incoming: str, outgoing: str) -> pb.ChainResult:
         """Trace both ways from a local detection, assemble and store for delivery."""
         search_id = hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode())
         search_id = search_id.hexdigest()
@@ -379,7 +412,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.store.put_search(search_id, incoming, outgoing, state, result.chain_digest)
         return result
 
-    def search_detections(self):
+    def search_detections(self) -> list[pb.ChainResult]:
         results = [
             self.search(d["incoming_payment_id"], d["outgoing_payment_id"])
             for d in self.local.detections
@@ -387,7 +420,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.deliver_pending()
         return results
 
-    def search_new_detections(self, stop=None):
+    def search_new_detections(
+        self, stop: threading.Event | None = None
+    ) -> list[pb.ChainResult]:
         """Start each live candidate once; housekeeping owns pending retries."""
         results = []
         for detection in self.local.detections:
@@ -407,12 +442,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
     # ---- housekeeping ---------------------------------------------------
 
-    def deliver_pending(self, stop=None):
+    def deliver_pending(self, stop: threading.Event | None = None) -> None:
         for bank, result in self.store.pending_deliveries():
             if stop is not None and stop.is_set():
                 break
             try:
-                self.call(bank, "Deliver", result, now() + timedelta(seconds=5))
+                self.call(
+                    bank, "Deliver", result, now() + timedelta(seconds=5), pb.Ack()
+                )
                 self.store.ack(result.chain_digest, bank)
             except grpc.RpcError as error:
                 if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
@@ -426,15 +463,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     error.details(),
                 )
 
-    def housekeeping(self, stop=None):
+    def housekeeping(self, stop: threading.Event | None = None) -> None:
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
-        if self.reload_keys and (
+        reload_keys = self.reload_keys
+        if reload_keys and (
             self._key_reload is None or not self._key_reload.is_alive()
         ):
 
             def reload():
                 try:
-                    self.reload_keys()
+                    reload_keys()
                 except Exception:  # noqa: BLE001 - retain working keys and retry later
                     traceback.print_exc()
 
@@ -447,7 +485,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.deliver_pending(stop=stop)
 
 
-def serve(node, port=0):
+def serve(node: Node, port: int = 0) -> tuple[grpc.Server, int]:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
     pb_grpc.add_PrivacyNodeServicer_to_server(node, server)
     port = (

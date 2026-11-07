@@ -6,11 +6,11 @@ Uses temporary local keys and the explicitly insecure localhost demo transport.
 Use the separate mTLS tests and k3d procedure for authenticated transport evidence.
 """
 
-import csv
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from ingestor import read_events
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.demo import TINY, prepare_demo_keys, start_banks
 from privacy_node.keys import pair_paths, public_keys
@@ -30,15 +30,13 @@ def main():
                 )
                 node.public_keys = public_keys(key_dir, bank)
             for bank, node in nodes.items():
-                with (Path(TINY) / f"bank_{bank}.csv").open() as source:
-                    for event in csv.DictReader(source):
-                        event["payment_id"] += "-overlap"
-                        event["account"] += "-overlap"
-                        event["event_time"] = (
-                            datetime.fromisoformat(event["event_time"])
-                            + timedelta(days=1)
-                        ).isoformat()
-                        node.local.process(event)
+                for event in read_events(Path(TINY) / f"bank_{bank}.csv"):
+                    event["payment_id"] += "-overlap"
+                    event["account"] += "-overlap"
+                    event["event_time"] = (
+                        datetime.fromisoformat(event["event_time"]) + timedelta(days=1)
+                    ).isoformat()
+                    node.local.process(event)
             index = nodes["B"].local.index
             for version in ("k1", "k2"):
                 token = index.token_for("p06-overlap", ("A", "B"), version)

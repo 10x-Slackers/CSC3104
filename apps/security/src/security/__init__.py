@@ -20,6 +20,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+PairKeys = dict[tuple[str, str], bytes]  # bank pair -> derived pair key
+PublicKeys = Mapping[tuple[str, str], Ed25519PublicKey]  # (bank, key version) -> key
+
 FORBIDDEN_FIELDS = frozenset(
     {
         "account",
@@ -44,7 +47,7 @@ def canonical_pair(bank_a: str, bank_b: str) -> tuple[str, str]:
     """Sort exact, case-sensitive bank IDs; same-bank tokens are unsupported."""
     if not bank_a or not bank_b or bank_a == bank_b:
         raise ValueError("A token requires two distinct nonempty bank IDs")
-    return tuple(sorted((bank_a, bank_b)))
+    return (bank_a, bank_b) if bank_a < bank_b else (bank_b, bank_a)
 
 
 def _check_key_version(key_version: str) -> None:
@@ -134,7 +137,7 @@ def load_pairwise_keys(
     key_version: str,
     local_private_key: str | Path,
     peer_public_keys: Mapping[str, str | Path],
-) -> dict[tuple[str, str], bytes]:
+) -> PairKeys:
     """Re-read mounted X25519 material and derive, never transport, pair keys."""
     private = load_agreement_key(local_private_key)
     return {
@@ -180,7 +183,7 @@ def load_verification_key(path: str | Path) -> Ed25519PublicKey:
 
 def load_verification_keys(
     key_paths: Mapping[tuple[str, str], str | Path],
-) -> dict[tuple[str, str], Ed25519PublicKey]:
+) -> PublicKeys:
     """Trusted signing keys are addressed by (bank, signing key version)."""
     return {
         identity: load_verification_key(path) for identity, path in key_paths.items()

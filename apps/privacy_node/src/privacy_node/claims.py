@@ -1,13 +1,16 @@
 """Canonical claim bytes and shared verification for both result receivers."""
 
 import hashlib
+from collections.abc import Iterable, Sequence
 from itertools import pairwise
 
+from google.protobuf.message import Message
+
 from privacy_node import privacy_node_pb2 as pb
-from security import verify
+from security import PublicKeys, verify
 
 # Per-message approved field names; descriptor tests require explicit approval of additions.
-APPROVED_FIELDS = {
+APPROVED_FIELDS: dict[str, set[str]] = {
     "TokenRef": {"pair", "token"},
     "TraceRequest": {
         "query_id",
@@ -38,16 +41,16 @@ ALLOWED_FIELDS = frozenset().union(*APPROVED_FIELDS.values())
 PAIRS = {"A-B", "A-C", "B-C"}
 
 
-def key(ref):
+def key(ref: pb.TokenRef) -> tuple[str, bytes] | None:
     """Hashable raw-token identity; None for a missing reference."""
     return (ref.pair, ref.token) if ref.token else None
 
 
-def frame(parts):
+def frame(parts: Iterable[bytes]) -> bytes:
     return b"".join(len(part).to_bytes(4, "big") + part for part in parts)
 
 
-def claim_bytes(c):
+def claim_bytes(c: pb.LinkClaim) -> bytes:
     """Fixed order, 4-byte length-prefixed UTF-8 strings and raw token bytes."""
     text = (
         "csc3104.link-claim",
@@ -70,11 +73,11 @@ def claim_bytes(c):
     )
 
 
-def _valid_ref(ref):
+def _valid_ref(ref: pb.TokenRef) -> bool:
     return len(ref.token) == 16 and ref.pair in PAIRS if ref.token else not ref.pair
 
 
-def valid_claim(c, public_keys):
+def valid_claim(c: pb.LinkClaim, public_keys: PublicKeys) -> bool:
     """Verify with a trusted versioned signing key and check token ownership."""
     public_key = public_keys.get((c.signer, c.signing_key_version))
     vouched = refs([c])
@@ -95,7 +98,7 @@ def valid_claim(c, public_keys):
     )
 
 
-def valid_chain(claims, public_keys):
+def valid_chain(claims: Sequence[pb.LinkClaim], public_keys: PublicKeys) -> bool:
     """Each shared transfer is vouched for by its two distinct endpoint banks."""
     witnesses = {}
     for claim in claims:
@@ -115,7 +118,7 @@ def valid_chain(claims, public_keys):
     )
 
 
-def bound(claims, recipient, query_id):
+def bound(claims: Sequence[pb.LinkClaim], recipient: str, query_id: str) -> bool:
     """Each signed claim targets its requester in one search leg."""
     recipients = [recipient] + [c.signer for c in claims[:-1]]
     return all(
@@ -124,11 +127,11 @@ def bound(claims, recipient, query_id):
     )
 
 
-def refs(claims):
+def refs(claims: Iterable[pb.LinkClaim]) -> list[pb.TokenRef]:
     return [r for c in claims for r in (c.in_ref, c.out_ref) if r.token]
 
 
-def complete(claims):
+def complete(claims: Sequence[pb.LinkClaim]) -> bool:
     """Natural ends or a closed loop, never an unvisited token at a cut."""
     if not claims or any(c.truncated for c in claims):
         return False
@@ -137,9 +140,9 @@ def complete(claims):
     return all(end is None or keys.count(end) > 1 for end in ends)
 
 
-def chain_digest(claims):
+def chain_digest(claims: Iterable[pb.LinkClaim]) -> str:
     """Hash distinct transfer identities in sorted order, using raw token bytes."""
-    tokens = sorted({key(r) for r in refs(claims)})
+    tokens = sorted({(r.pair, r.token) for r in refs(claims)})
     return hashlib.sha256(
         frame(
             [part for pair, token in tokens for part in (pair.encode("utf-8"), token)]
@@ -147,7 +150,7 @@ def chain_digest(claims):
     ).hexdigest()
 
 
-def has_unknown_fields(message):
+def has_unknown_fields(message: Message) -> bool:
     """True if the message, or any message nested in it, carries fields our .proto doesn't define."""
     known = type(message)()
     known.CopyFrom(message)
@@ -155,7 +158,9 @@ def has_unknown_fields(message):
     return known.ByteSize() != message.ByteSize()
 
 
-def check_result(result, public_keys, bank):
+def check_result(
+    result: pb.ChainResult, public_keys: PublicKeys, bank: str
+) -> pb.ChainResult:
     """Return a verified copy (cuts become PARTIAL), or raise ValueError.
 
     Shared by peer Deliver and bank-local case /results; neither consumer may

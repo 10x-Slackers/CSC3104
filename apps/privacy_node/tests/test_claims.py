@@ -92,7 +92,7 @@ def test_one_bank_cannot_sign_both_sides_of_a_shared_transfer(banks):
     with pytest.raises(ValueError, match="invalid chain result"):
         check_result(result, keys, "B")
     with pytest.raises(grpc.RpcError) as error:
-        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5))
+        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5), pb.Ack())
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert banks["C"].store.chains() == []
 
@@ -131,7 +131,7 @@ def test_one_bank_cannot_close_a_loop_with_its_own_unconfirmed_endpoints(banks):
     with pytest.raises(ValueError, match="invalid chain result"):
         check_result(result, keys, "C")
     with pytest.raises(grpc.RpcError) as error:
-        banks["C"].call("A", "Deliver", result, now() + timedelta(seconds=5))
+        banks["C"].call("A", "Deliver", result, now() + timedelta(seconds=5), pb.Ack())
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert banks["A"].store.chains() == []
 
@@ -260,6 +260,6 @@ def test_disconnected_signed_fragments_are_rejected_by_validator_and_deliver(ban
     with pytest.raises(ValueError, match="invalid chain result"):
         check_result(result, banks["B"].public_keys, "C")
     with pytest.raises(grpc.RpcError) as error:
-        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5))
+        banks["B"].call("C", "Deliver", result, now() + timedelta(seconds=5), pb.Ack())
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert banks["C"].store.chains() == []

@@ -32,7 +32,7 @@ producer = Producer(
 )
 
 
-def handle(body):
+def handle(body: str | bytes) -> tuple[int, dict]:
     """One batch -> (HTTP status, reply). 200 only once Kafka has every event."""
     ts = time.time()  # every record's Kafka timestamp, which latency is measured from
     try:
@@ -68,7 +68,7 @@ def handle(body):
     return status, reply
 
 
-def lambda_handler(event, context):
+def lambda_handler(event: dict, context: object) -> dict:
     body = event.get("body") or ""
     if event.get("isBase64Encoded", False):
         body = base64.b64decode(body).decode("utf-8")
@@ -84,17 +84,17 @@ def lambda_handler(event, context):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # keep-alive: replay reuses one connection
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         # Readiness only: a Kafka outage shows as 503 on POST, not here.
         if self.path == "/healthz":
             self.reply(200, {"ok": True})
         else:
             self.reply(404, {"error": "not found"})
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         self.reply(*handle(self.rfile.read(int(self.headers["Content-Length"]))))
 
-    def reply(self, status, reply):
+    def reply(self, status: int, reply: dict) -> None:
         body = json.dumps(reply).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")

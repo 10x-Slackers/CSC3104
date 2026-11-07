@@ -7,9 +7,12 @@ Reports carry the case's tokens and signing banks; never accounts or amounts.
 
 import json
 import os
+import threading
 import time
 import urllib.request
+from collections.abc import Callable
 
+from case.case_store import SqliteCaseStore
 from case.report import report_input
 
 # Role 5 delivery timings (case.md); no other role sets them.
@@ -19,15 +22,22 @@ MAX_BACKOFF = 60.0
 MESSAGE_FIELDS = ("case_id", "state", "merged_into", "raised_at", "links")
 
 
-def message(store, event, bank):
+def message(store: SqliteCaseStore, event: dict, bank: str) -> dict:
     """The report event: the case's allow-listed evidence, as of sending."""
-    data = report_input(store.get(event["case_id"]))
+    case = store.get(event["case_id"])
+    assert case is not None  # merges keep the old case row, so it always exists
+    data = report_input(case)
     return {"event_id": event["event_id"], "bank": bank} | {
         f: data[f] for f in MESSAGE_FIELDS
     }
 
 
-def dispatch(store, send, bank, now=time.time):
+def dispatch(
+    store: SqliteCaseStore,
+    send: Callable[[dict], object],
+    bank: str,
+    now: Callable[[], float] = time.time,
+) -> int:
     """Send every due report once; return how many were acknowledged."""
     started, sent = now(), 0
     for event in store.due(started, MAX_ATTEMPTS):
@@ -42,13 +52,19 @@ def dispatch(store, send, bank, now=time.time):
     return sent
 
 
-def run(store, send, bank, stop, interval=1.0):
+def run(
+    store: SqliteCaseStore,
+    send: Callable[[dict], object],
+    bank: str,
+    stop: threading.Event,
+    interval: float = 1.0,
+) -> None:
     """Housekeeping loop for a background thread; set stop to end it."""
     while not stop.wait(interval):
         dispatch(store, send, bank)
 
 
-def webhook(url, timeout=10):
+def webhook(url: str, timeout: float = 10) -> Callable[[dict], None]:
     """POST each message as JSON; non-2xx responses raise and are retried."""
 
     def send(msg):

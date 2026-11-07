@@ -1,15 +1,16 @@
-import csv
 import io
 import json
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
 from confluent_kafka import KafkaError, KafkaException, TopicPartition
 
+from ingestor import Event, read_events
 from scorer import score_file
 from scorer.score import Scorer
 from scorer.stream import consume, require_full_replay
@@ -29,21 +30,27 @@ KAFKA_EVENTS = Path(__file__).parents[2] / "ingestor/fixtures/kafka_events.json"
 TINY_EXPECTED = Path(__file__).parents[1] / "fixtures/tiny_expected.json"
 
 
-def event(payment="in", direction="in", amount=100, time="09:00:00", **changes):
-    return {
-        "payment_id": payment,
-        "direction": direction,
-        "amount": amount,
-        "event_time": f"2022-09-05T{time}Z",
-        "bank": "B",
-        "account": "bob",
-        "counterparty_account": "A-alice",
-        "counterparty_bank": "A",
-        "payment_format": "GIRO",
-    } | changes
+def event(
+    payment="in", direction="in", amount: float = 100, time="09:00:00", **changes
+) -> Event:
+    return cast(
+        Event,
+        {
+            "payment_id": payment,
+            "direction": direction,
+            "amount": amount,
+            "event_time": f"2022-09-05T{time}Z",
+            "bank": "B",
+            "account": "bob",
+            "counterparty_account": "A-alice",
+            "counterparty_bank": "A",
+            "payment_format": "GIRO",
+        }
+        | changes,
+    )
 
 
-def out(payment="out", amount=95, time="09:05:00", **changes):
+def out(payment="out", amount: float = 95, time="09:05:00", **changes) -> Event:
     """bob forwards money on to C-carol at Bank C."""
     to_c = {"counterparty_account": "C-carol", "counterparty_bank": "C"}
     return event(payment, "out", amount, time, **to_c | changes)
@@ -169,8 +176,7 @@ def test_no_new_payee_inside_the_bank():
     ],
 )
 def test_tiny(bank, pairs):
-    with (TINY / f"bank_{bank}.csv").open() as source:
-        events = list(csv.DictReader(source))
+    events = list(read_events(TINY / f"bank_{bank}.csv"))
 
     def run():
         scorer = Scorer(bank)
@@ -273,8 +279,8 @@ def test_consumer_failures(failure):
 def test_score_file_matches_library_sample(bank):
     expected = json.loads(TINY_EXPECTED.read_text())[bank]
     scorer = Scorer(bank)
-    with (TINY / f"bank_{bank}.csv").open() as source:
-        links = [link for e in csv.DictReader(source) for link in scorer.process(e)]
+    events = read_events(TINY / f"bank_{bank}.csv")
+    links = [link for e in events for link in scorer.process(e)]
     found = sorted(
         (
             {
@@ -295,8 +301,7 @@ def test_score_file_matches_library_sample(bank):
 
 @pytest.mark.parametrize("bank,count", [("A", 1), ("B", 4), ("C", 3)])
 def test_consume_is_repeatable(bank, count):
-    with (TINY / f"bank_{bank}.csv").open() as source:
-        events = list(csv.DictReader(source))
+    events = list(read_events(TINY / f"bank_{bank}.csv"))
 
     def run():
         consumer = Mock(**{"commit.return_value": []})
@@ -365,8 +370,7 @@ def test_fixture_token_indexes(pair_key_paths):
         paths = key_files(pair_key_paths, bank)
         index = TokenIndex(bank, "k1", paths)
         rebuilt = TokenIndex(bank, "k1", paths)
-        with (TINY / f"bank_{bank}.csv").open() as source:
-            events = list(csv.DictReader(source))
+        events = list(read_events(TINY / f"bank_{bank}.csv"))
         for e in events:
             token = index.add(e)
             assert index.add(e) == token
@@ -440,8 +444,7 @@ def test_invalid_index_keys(failure, pair_key_paths, tmp_path):
 
 
 def test_consumer_indexes_unflagged_and_preserves_results(pair_key_paths):
-    with (TINY / "bank_B.csv").open() as source:
-        events = list(csv.DictReader(source))
+    events = list(read_events(TINY / "bank_B.csv"))
     paths = key_files(pair_key_paths, "B")
     index = TokenIndex("B", "k1", paths)
     scorer = Scorer("B")

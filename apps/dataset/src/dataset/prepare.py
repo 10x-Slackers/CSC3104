@@ -31,11 +31,11 @@ EVENT_COLS = ["payment_id", "event_time", "bank", "direction", "account", "count
 LABEL_COLS = ["payment_id", "altman_laundering", "attempt_id", "altman_pattern", "chain_id", "hop", "scenario"]  # fmt: skip
 
 
-def pid(seed):
+def pid(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
-def altman(name, start=None, hours=6):
+def altman(name: str, start: str | None = None, hours: float = 6) -> pd.DataFrame:
     # One Altman file (whole, or a slice from start) mapped onto A/B/C.
     def get(f):
         return kagglehub.dataset_download(DATASET, path=f"{name}_{f}")
@@ -65,8 +65,8 @@ def altman(name, start=None, hours=6):
     fb, tb = df["From Bank"], df["To Bank"]
     keep = ~((fb == tb) & (df["Account"] == df["Account.1"]))  # self-transfers
     if start:
-        start = pd.Timestamp(start)
-        keep &= (df.time >= start) & (df.time < start + pd.Timedelta(hours=hours))
+        t0 = pd.Timestamp(start)
+        keep &= (df.time >= t0) & (df.time < t0 + pd.Timedelta(hours=hours))
     df, fb, tb = df[keep], fb[keep], tb[keep]
     return pd.DataFrame(
         {
@@ -96,10 +96,10 @@ def altman(name, start=None, hours=6):
     )
 
 
-def split(t):
+def split(t: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     # Transfers -> ({bank: events}, labels), with event_time already a TIME string.
     labels = t.reindex(columns=LABEL_COLS)  # Altman workloads have no planted chains
-    labels = labels[(labels.altman_laundering == 1) | labels.chain_id.notna()]
+    labels = labels.loc[(labels.altman_laundering == 1) | labels.chain_id.notna()]
     sides = {"out": ("from", "to"), "in": ("to", "from")}
     # same-minute transfers keep the source file's order
     t = t.sort_values("time", kind="stable", ignore_index=True)
@@ -121,7 +121,7 @@ def split(t):
     return {b: ev.loc[ev.bank == b, EVENT_COLS] for b in "ABC"}, labels
 
 
-def read_transfers(path):
+def read_transfers(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(
         path,
         parse_dates=["time"],

@@ -4,13 +4,14 @@ Events are trusted as they are: the ingestor validates them before Kafka. The ru
 are in streaming.md and issue #27; they only look at bank transfers.
 """
 
-import csv
 import hashlib
 import json
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import TypedDict
 
+from ingestor import Event, read_events
 from scorer.state import MemoryState
 
 BANK_TRANSFERS = ("GIRO", "MEPS+")
@@ -19,7 +20,20 @@ CHAIN_WINDOW = 72 * 3600  # also the allowed lateness
 REPEAT_WINDOW = 24 * 3600
 
 
-def digest(*parts):
+class Link(TypedDict):
+    detection_id: str
+    bank: str
+    account: str
+    incoming_payment_id: str
+    outgoing_payment_id: str
+    incoming_time: str
+    outgoing_time: str
+    ratio: float
+    delay_seconds: float
+    rules: list[str]
+
+
+def digest(*parts: object) -> str:
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -31,8 +45,13 @@ class Scorer:
     """
 
     def __init__(
-        self, bank, min_ratio="0.90", max_ratio="0.98", min_delay=60, window=1800
-    ):
+        self,
+        bank: str,
+        min_ratio: str | float | Decimal = "0.90",
+        max_ratio: str | float | Decimal = "0.98",
+        min_delay: float = 60,
+        window: float = 1800,
+    ) -> None:
         if bank not in ("A", "B", "C"):
             raise ValueError("invalid bank")
         self.bank = bank
@@ -45,7 +64,7 @@ class Scorer:
         self.min_delay, self.window = min_delay, window
         self.state = MemoryState()
 
-    def hit(self, rule, account, *payments):
+    def hit(self, rule: str, account: str, *payments: str) -> None:
         hit_id = digest(self.bank, rule, *payments)
         self.state.put_hit(
             {
@@ -56,7 +75,7 @@ class Scorer:
             }
         )
 
-    def process(self, e):
+    def process(self, e: Event) -> list[Link]:
         if e["payment_format"] not in BANK_TRANSFERS:
             return []
         account, now = e["account"], datetime.fromisoformat(e["event_time"]).timestamp()
@@ -72,7 +91,7 @@ class Scorer:
             return []  # a repeat, or too late
         self.state.trim(account, latest - 2 * CHAIN_WINDOW)
 
-        links = []
+        links: list[Link] = []
         for ts, other in list(events.values()):
             if (
                 other["direction"] == e["direction"]
@@ -131,17 +150,16 @@ class Scorer:
             if cross and last is None:
                 self.hit("new_payee", account, e["payment_id"])
                 flagged = True
-            elif cross and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
+            elif cross and last and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
                 self.hit("quick_repeat", account, e["payment_id"])
             self.state.set_last_paid(account, payee, now, flagged)
         self.state.add_event(account, key, now, e)
         return links
 
 
-def score_file(workload, bank):
+def score_file(workload: str | Path, bank: str) -> MemoryState:
     """Run the live rules over one bank file, as the offline evaluator does."""
     scorer = Scorer(bank)
-    with (Path(workload) / f"bank_{bank}.csv").open() as source:
-        for e in csv.DictReader(source):
-            scorer.process(e)
+    for e in read_events(Path(workload) / f"bank_{bank}.csv"):
+        scorer.process(e)
     return scorer.state

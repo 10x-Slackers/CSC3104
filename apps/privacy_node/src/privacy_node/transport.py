@@ -10,7 +10,7 @@ BANK_URIS = {
 }
 
 
-def authenticated_bank(context, sender):
+def authenticated_bank(context: grpc.ServicerContext, sender: str) -> str:
     """Bind the message sender to a bank URI SAN authenticated by the lab CA."""
     auth = context.auth_context()
     banks = {
@@ -34,19 +34,19 @@ class TlsFiles:
     private_key: str | Path
     ca: str | Path
 
-    def read(self):
+    def read(self) -> tuple[bytes, ...]:
         return tuple(
             Path(path).read_bytes()
             for path in (self.certificate, self.private_key, self.ca)
         )
 
-    def channel(self, target):
+    def channel(self, target: str) -> grpc.Channel:
         """A new channel uses current mounted credentials and verifies the target DNS."""
         certificate, private_key, ca = self.read()
         credentials = grpc.ssl_channel_credentials(ca, private_key, certificate)
         return grpc.secure_channel(target, credentials)
 
-    def server_credentials(self):
+    def server_credentials(self) -> grpc.ServerCredentials:
         """gRPC asks for renewed material before each new connection's handshake."""
 
         def configuration():

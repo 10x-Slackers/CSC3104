@@ -11,8 +11,11 @@ import argparse
 import json
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from security import (
     AgreementFiles,
+    PublicKeys,
     generate_agreement_key,
     generate_signing_key,
     load_signing_key,
@@ -24,7 +27,7 @@ from security import (
 BANKS = ("A", "B", "C")
 
 
-def make_keys(root, bank, key_version="k1"):
+def make_keys(root: str | Path, bank: str, key_version: str = "k1") -> Path:
     """Create fresh local material without replacing an existing version."""
     root = Path(root) / bank
     for purpose, key in (
@@ -55,7 +58,7 @@ def make_keys(root, bank, key_version="k1"):
     return root
 
 
-def pair_paths(root, bank, key_version="k1"):
+def pair_paths(root: str | Path, bank: str, key_version: str = "k1") -> AgreementFiles:
     """Paths to this bank's private key and already provisioned peer publics."""
     root = Path(root) / bank
     return AgreementFiles(
@@ -68,7 +71,7 @@ def pair_paths(root, bank, key_version="k1"):
     )
 
 
-def public_keys(root, bank):
+def public_keys(root: str | Path, bank: str) -> PublicKeys:
     """Re-read trusted verification files, including overlapping versions."""
     trusted = Path(root) / bank / "trusted" / "signing"
     paths = {(p.parent.name, p.stem): p for p in trusted.glob("*/*.pem")}
@@ -77,7 +80,7 @@ def public_keys(root, bank):
     return load_verification_keys(paths)
 
 
-def own_key(root, bank, key_version="k1"):
+def own_key(root: str | Path, bank: str, key_version: str = "k1") -> Ed25519PrivateKey:
     return load_signing_key(
         Path(root) / bank / "private" / "signing" / f"{key_version}.pem"
     )

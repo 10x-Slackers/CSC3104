@@ -5,8 +5,9 @@ Every report is stored as a draft labelled with its source ("template").
 """
 
 from datetime import UTC, datetime
+from typing import Protocol, TypedDict
 
-from case.case_store import neighbours
+from case.case_store import Case, CaseState, SqliteCaseStore, neighbours
 from security import check_peer_payload
 
 LINK_FIELDS = (
@@ -27,22 +28,44 @@ ALLOWED = {
 }  # fmt: skip
 
 
-def report_input(case):
+class ReportInput(TypedDict):
+    case_id: str
+    state: CaseState
+    raised_at: float | None
+    merged_into: str | None
+    links: list[dict]
+    results: list[dict]
+    decisions: list[dict]
+
+
+def report_input(case: Case) -> ReportInput:
     """Select only approved evidence fields, with tokens as readable hex."""
-    data = {k: case[k] for k in ("case_id", "state", "raised_at", "merged_into")}
-    data["links"] = [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]]
-    data["results"] = [
-        {"chain_digest": d, "sender": s, "state": st} for d, s, st in case["results"]
-    ]
-    data["decisions"] = [{"action": a, "decided_at": t} for a, t in case["decisions"]]
+    data = ReportInput(
+        case_id=case["case_id"],
+        state=case["state"],
+        raised_at=case["raised_at"],
+        merged_into=case["merged_into"],
+        links=[{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]],
+        results=[
+            {"chain_digest": d, "sender": s, "state": st}
+            for d, s, st in case["results"]
+        ],
+        decisions=[{"action": a, "decided_at": t} for a, t in case["decisions"]],
+    )
     check_peer_payload(data, ALLOWED)
     return data
 
 
-def when(timestamp, none="-"):
+def when(timestamp: float | None, none: str = "-") -> str:
     if timestamp is None:
         return none
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+class ReportClient(Protocol):
+    source: str  # stored with the report
+
+    def draft(self, data: ReportInput) -> str: ...
 
 
 class TemplateClient:
@@ -50,7 +73,7 @@ class TemplateClient:
 
     source = "template"
 
-    def draft(self, data):
+    def draft(self, data: ReportInput) -> str:
         links = data["links"]
         pairs = [link[p] for link in links for p in ("in_pair", "out_pair")]
         banks = sorted({b for pair in pairs if pair for b in pair.split("-")})
@@ -104,10 +127,7 @@ class TemplateClient:
         return "\n".join(lines)
 
 
-def draft_report(store, case, client):
-    """Filter, draft and store as a draft; return the new report ID.
-
-    A client has a `source` label (stored with the report) and `draft(data) -> str`.
-    """
+def draft_report(store: SqliteCaseStore, case: Case, client: ReportClient) -> int:
+    """Filter, draft and store as a draft; return the new report ID."""
     data = report_input(case)
     return store.save_report(case["case_id"], client.source, client.draft(data))

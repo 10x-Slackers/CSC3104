@@ -10,7 +10,6 @@ Contract: docs/contracts/data.md (Replay, Ingestor).
 """
 
 import argparse
-import csv
 import heapq
 import http.client
 import itertools
@@ -19,33 +18,29 @@ import queue
 import random
 import threading
 import time
-from contextlib import ExitStack
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ingestor import BICS
+from ingestor import BICS, Event, read_events
 
 BATCH = 100  # payments per pacs.008 message, at most
 
 
-def payments(workload):
+def payments(workload: Path) -> Iterator[Event]:
     # Each transfer once, from its `out` event, in event-time order across the banks.
-    with ExitStack() as files:
-        banks = [
-            csv.DictReader(files.enter_context(open(workload / f"bank_{b}.csv")))
-            for b in "ABC"
-        ]
-        for e in heapq.merge(*banks, key=lambda e: e["event_time"]):
-            if e["direction"] == "out" and e["payment_format"] in ("GIRO", "MEPS+"):
-                yield e
+    banks = [read_events(workload / f"bank_{b}.csv") for b in "ABC"]
+    for e in heapq.merge(*banks, key=lambda e: e["event_time"]):
+        if e["direction"] == "out" and e["payment_format"] in ("GIRO", "MEPS+"):
+            yield e
 
 
-def tx(e):
+def tx(e: Event) -> dict:
     return {
         "PmtId": {"EndToEndId": e["payment_id"]},
         "PmtTpInf": {"LclInstrm": {"Prtry": e["payment_format"]}},
-        "IntrBkSttlmAmt": {"Ccy": "SGD", "Amt": f"{float(e['amount']):.2f}"},
+        "IntrBkSttlmAmt": {"Ccy": "SGD", "Amt": f"{e['amount']:.2f}"},
         "AccptncDtTm": e["event_time"],
         "DbtrAcct": {"Id": {"Othr": {"Id": e["account"]}}},
         "DbtrAgt": {"FinInstnId": {"BICFI": BICS[e["bank"]]}},
@@ -54,7 +49,9 @@ def tx(e):
     }
 
 
-def post(conn, path, body):
+def post(
+    conn: http.client.HTTPConnection, path: str, body: str
+) -> tuple[int | None, str]:
     # One POST -> (status, reply); status None on a network error, then conn reconnects.
     try:
         conn.request("POST", path, body, {"Content-Type": "application/json"})
@@ -65,7 +62,7 @@ def post(conn, path, body):
         return None, f"{type(e).__name__}: {e}"
 
 
-def send(bank, url, q, failed):
+def send(bank: str, url: str, q: queue.Queue, failed: threading.Event) -> None:
     """POST this bank's queue in batches, one at a time, so its events keep their order.
 
     A batch is whatever became due while the last one was sent, at most BATCH payments.

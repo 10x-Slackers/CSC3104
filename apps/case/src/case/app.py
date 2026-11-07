@@ -9,6 +9,7 @@ go straight to this UI's inbox; reports go to the mock intake (intake.py).
 
 import os
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from html import escape
@@ -19,13 +20,14 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.protobuf.message import DecodeError
 
-from case.case_store import SqliteCaseStore, neighbours
+from case.case_store import Case, Decision, ReviewStatus, SqliteCaseStore, neighbours
 from case.evidence import check_result, load_public_keys
 from case.outbox import run, webhook
-from case.report import TemplateClient, draft_report, when
+from case.report import ReportClient, TemplateClient, draft_report, when
 from privacy_node import privacy_node_pb2 as pb
+from security import PublicKeys
 
-ACTIONS = {  # keys are case_store.DECISIONS
+ACTIONS: dict[Decision, str] = {
     "monitor": "Continue monitoring",
     "suspend": "Suspend outgoing transactions",
     "freeze": "Freeze accounts",
@@ -38,27 +40,34 @@ padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color
 </style>"""
 
 
-def short(token):
+def short(token: str) -> str:
     """Show the stored token hex; peer messages still use raw bytes."""
     if not token:
         return "-"
     return f"<code title='{escape(token)}'>{escape(token[:24])}…</code>"
 
 
-def page(bank, title, body):
+def page(bank: str, title: str, body: str) -> HTMLResponse:
     return HTMLResponse(
         f"<!doctype html><title>{escape(title)}</title>{STYLE}"
         f"<p class=muted><a href='/'>Bank {escape(bank)} cases</a></p>{body}"
     )
 
 
-def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
+def create_app(
+    db: str | os.PathLike[str],
+    bank: str,
+    intake_url: str,
+    public_keys: Callable[[], PublicKeys],
+    interval: float | None = 1.0,
+    client: ReportClient | None = None,
+) -> FastAPI:
     """interval=None skips the background dispatcher (tests call dispatch directly)."""
     client = client or TemplateClient()
     send = webhook(intake_url)
     local = threading.local()
 
-    def store():
+    def store() -> SqliteCaseStore:
         """One connection per thread: a SQLite connection belongs to its thread."""
         if not hasattr(local, "store"):
             local.store = SqliteCaseStore(db)
@@ -66,23 +75,24 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        stop = threading.Event()
+        stop, wait = threading.Event(), interval  # a local, so dispatcher sees a float
+        if wait is not None:
 
-        def dispatcher():
-            run(store(), send, bank, stop, interval)  # this thread's own connection
+            def dispatcher():
+                run(store(), send, bank, stop, wait)  # this thread's own connection
 
-        if interval is not None:
             threading.Thread(target=dispatcher, daemon=True).start()
         yield
         stop.set()
 
     app = FastAPI(title=f"Bank {bank} cases", lifespan=lifespan)
 
+    # The store rejects results in undeliverable states.
     @app.exception_handler(ValueError)
-    async def invalid(request, exc):  # the store rejects unknown actions and states
+    async def invalid(request: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, 422)
 
-    def load(case_id):
+    def load(case_id: str) -> Case:
         case = store().get(case_id)
         if case is None:
             raise HTTPException(404, "No such case")
@@ -174,7 +184,7 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
         )
 
     @app.post("/cases/{case_id}/decision")
-    def decide(case_id: str, action: Annotated[str, Form()]):
+    def decide(case_id: str, action: Annotated[Decision, Form()]):
         load(case_id)
         store().decide(case_id, action)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
@@ -185,7 +195,7 @@ def create_app(db, bank, intake_url, public_keys, interval=1.0, client=None):
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
     @app.post("/cases/{case_id}/reports/{report_id}/review")
-    def review(case_id: str, report_id: int, status: Annotated[str, Form()]):
+    def review(case_id: str, report_id: int, status: Annotated[ReviewStatus, Form()]):
         if not store().review_report(case_id, report_id, status):
             raise HTTPException(409, "Report is not a pending draft")
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
