@@ -1,0 +1,53 @@
+# Bank-local detection: the only Kafka consumer, writing state to Valkey; KEDA scales it on lag.
+{{- $bank := .Values.bank }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scorer
+spec:
+  selector:
+    matchLabels: {app: scorer}
+  template:
+    metadata:
+      labels: {app: scorer}
+    spec:
+      {{- include "bank.pod" . | nindent 6 }}
+      containers:
+        - name: scorer
+          image: {{ .Values.image.repository }}/scorer:{{ .Values.image.tag }}
+          args:
+            - python
+            - -m
+            - scorer.stream
+            - {{ $bank }}
+            - --bootstrap-servers=kafka-kafka-bootstrap:9092
+            - --key-version=k1
+            - --x25519-private=/keys/{{ $bank }}/private/x25519/k1.pem
+            {{- range without (list "A" "B" "C") $bank }}
+            - --peer-public-key
+            - {{ . }}
+            - /keys/{{ $bank }}/trusted/x25519/{{ . }}/k1.pem
+            {{- end }}
+          volumeMounts:
+            - {name: keys, mountPath: /keys}
+          {{- include "bank.container" . | nindent 10 }}
+      volumes:
+        - {{- include "bank.keyVolume" . | nindent 10 }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: scorer
+spec:
+  scaleTargetRef:
+    name: scorer
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka-kafka-bootstrap.{{ .Release.Namespace }}.svc:9092
+        consumerGroup: scorer-{{ $bank }}
+        topic: bank-{{ $bank }}-transactions
+        lagThreshold: "100"
+        offsetResetPolicy: earliest

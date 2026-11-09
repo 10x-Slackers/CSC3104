@@ -143,7 +143,7 @@ Integrated mode runs Role 2's consumer inside the privacy-node process. Use
 `uv run python -m privacy_node.node --bank B --bootstrap-servers <brokers>
 --group <fresh-group> --search` with `--key-directory ROOT` and the TLS
 and peer options from [protocol.md](protocol.md). `--workload` selects the existing
-standalone CSV mode instead; the two input modes are mutually exclusive.
+standalone CSV mode instead. `--valkey-url` is the deployed shape: the node reads the scorer's state from Valkey and never consumes Kafka. The three input modes are mutually exclusive.
 
 The consumer calls `LocalBank.process(event)`, which uses the existing `Scorer`
 and `TokenIndex` under one local lock and publishes token references and local

@@ -1,0 +1,10 @@
+# This bank's private keys, trusted peer public keys and active.json (docs/contracts/security.md).
+# Secret keys can't contain "/", so each path is stored with "__" and mapped back in bank.keyVolume.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bank-keys
+data:
+  {{- range $path, $_ := .Files.Glob (printf "keys/%s/**" .Values.bank) }}
+  {{ $path | trimPrefix "keys/" | replace "/" "__" }}: {{ $.Files.Get $path | b64enc }}
+  {{- end }}

@@ -1,0 +1,53 @@
+# Peer-to-peer chain tracing over mTLS (docs/contracts/security.md), reading the scorer's state from Valkey.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: privacy-node
+spec:
+  selector:
+    matchLabels: {app: privacy-node}
+  template:
+    metadata:
+      labels: {app: privacy-node}
+    spec:
+      {{- include "bank.pod" . | nindent 6 }}
+      containers:
+        - name: privacy-node
+          image: {{ .Values.image.repository }}/privacy-node:{{ .Values.image.tag }}
+          args:
+            - python
+            - -m
+            - privacy_node.node
+            - --bank={{ .Values.bank }}
+            - --valkey-url=valkey://valkey:6379
+            - --key-directory=/keys
+            - --tls-cert=/tls/tls.crt
+            - --tls-key=/tls/tls.key
+            - --tls-ca=/tls/ca.crt
+            - --search
+            {{- range without (list "A" "B" "C") .Values.bank }}
+            - --peer
+            - {{ . }}
+            - privacy-node.bank-{{ lower . }}.svc:50051
+            {{- end }}
+          ports:
+            - containerPort: 50051
+          readinessProbe:
+            tcpSocket: {port: 50051}
+          volumeMounts:
+            - {name: keys, mountPath: /keys}
+            - {name: tls, mountPath: /tls}
+          {{- include "bank.container" . | nindent 10 }}
+      volumes:
+        - {{- include "bank.keyVolume" . | nindent 10 }}
+        - name: tls
+          secret: {secretName: privacy-node-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: privacy-node
+spec:
+  selector: {app: privacy-node}
+  ports:
+    - port: 50051

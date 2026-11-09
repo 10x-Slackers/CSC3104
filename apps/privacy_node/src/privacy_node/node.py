@@ -9,6 +9,7 @@ Run one per bank, e.g.:
 
 For live Kafka state, replace --workload with --bootstrap-servers <brokers>
 and use a fresh --group to rebuild state. --search starts live candidates.
+--valkey-url reads the scorer's state from Valkey, as deployed by the chart.
 """
 
 import argparse
@@ -504,6 +505,7 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--workload", help="standalone CSV initialization")
     source.add_argument("--bootstrap-servers", help="integrated bank-local Kafka mode")
+    source.add_argument("--valkey-url", help="scorer state in Valkey (reads pending)")
     parser.add_argument(
         "--group", help="Kafka group; use a fresh group to rebuild state"
     )
@@ -553,12 +555,12 @@ def main():
         for name in ("min_ratio", "max_ratio", "min_delay", "window")
     }
     rule["max_token_references"] = args.max_token_references
-    if args.bootstrap_servers:
-        local = LocalBank(args.bank, query_version, keys, **rule)
-    else:
+    if args.workload:
         local = LocalBank.from_workload(
             args.workload, args.bank, query_version, keys, **rule
         )
+    else:
+        local = LocalBank(args.bank, query_version, keys, **rule)
     for version in config["active_versions"]:
         if version != query_version:
             local.index.introduce_version(
@@ -595,7 +597,7 @@ def main():
     def loop():
         while not stop.wait(args.housekeeping_seconds):
             try:
-                if args.search and args.bootstrap_servers:
+                if args.search and not args.workload:
                     node.search_new_detections(stop=stop)
                 node.housekeeping(stop=stop)
             except Exception:  # noqa: BLE001 - log and retry on the next pass
