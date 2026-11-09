@@ -7,7 +7,7 @@ Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPoli
 > - **Topic:** a declared `KafkaTopic` per bank (6 partitions, key = account, `retention.ms -1`, auto-create off).
 > - **HA flag:** one values flag runs a bank with replicas (Kafka 3 with `min.insync.replicas` 2, PostgreSQL 3, privacy node 2). One bank uses it on k3d, which is a one-node PoC, so failover there is pod-level only; every bank uses it on EKS.
 > - **New components:** Valkey per bank; KEDA `ScaledObject` for the scorer; the ingestor and summary service as containers locally and Lambda function URLs (`AWS_IAM`) on EKS; replay as a Job in a `replay` namespace.
-> - **Hardening:** per-path and per-store NetworkPolicies; `automountServiceAccountToken: false`; requests, memory limits and readiness probes; PSS `warn: restricted`; k3s secrets encryption; one Dockerfile pattern.
+> - **Hardening:** per-path and per-store NetworkPolicies; `automountServiceAccountToken: false`; requests, memory limits and readiness probes; PSS `warn: restricted`; k3s secrets encryption.
 > - **EKS:** scripted cluster, VPC CNI network policy, Pod Identity, ElastiCache, a Kafka listener for the ingestor Lambda.
 
 Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monitoring and the evaluation harness.
@@ -35,7 +35,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | Certificates | cert-manager v1.21.2 | k3d: lab CA `ClusterIssuer/bank-ca`; Secret `privacy-node-tls` per bank (**draft**: SAN `privacy-node.bank-<x>.svc`, plus a SPIFFE-style URI SAN naming the bank; **pending work** with Zane and Caleb) |
 | CNI enforcing NetworkPolicy | k3d: k3s's built-in network policy controller. EKS: TODO | k3d: enforced; `check-netpol.sh` passes |
 | Registry | ECR | TODO |
-| Images | One pattern: python-slim, `uv sync --frozen --no-dev`, non-root, tagged with the git SHA; only the architectures needed | **pending work** |
+| Images | One pattern, the root `Dockerfile`: `python:3.12-slim`, `uv sync --locked --no-dev --no-editable --package <app>`, only the virtual environment copied into the final stage, non-root (UID 65532), tagged with the git SHA; only the architectures needed. Build: `docker build --build-arg APP=<package> -t csc3104/<package>:$(git rev-parse --short HEAD) .`; the chart sets each container's command (`python -m <package>.<module>`). The ingestor Lambda ships as a zip instead | Dockerfile done; images for each service, k3d import and ECR **pending work** |
 | CI | GitHub Actions | TODO |
 | Monitoring | No dedicated stack: k3s metrics-server (`kubectl top`), `kubectl get hpa` for KEDA lag and replicas, `kafka-consumer-groups.sh` for lag, CloudWatch for Lambda, JSON logs to stdout | TODO |
 | Fault injection | `kubectl delete pod`, `kubectl scale --replicas=0`, a temporary deny-all NetworkPolicy | TODO |
