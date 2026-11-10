@@ -3,11 +3,10 @@
 # Usage: deploy/replay.sh <workload> [replay flags, e.g. --speed 0]. Run after k3d-up.sh. Contract: docs/contracts/data.md (Replay).
 set -euo pipefail
 workload=$1; shift
-tag=$(git -C "$(dirname "$0")" rev-parse --short HEAD 2>/dev/null || echo dev)
+tag=$(kubectl get deploy ingestor -n bank-a -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)  # what k3d-up.sh imported
 args=$(printf ', "%s"' "$@")
 
-kubectl delete job replay -n replay --ignore-not-found
-kubectl apply -n replay -f - <<YAML
+kubectl replace --force -n replay -f - <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -31,5 +30,4 @@ spec:
         - name: workloads
           hostPath: {path: /workloads, type: Directory}
 YAML
-kubectl wait -n replay --for=condition=Ready pod -l job-name=replay --timeout=2m
-kubectl logs -n replay -f job/replay
+kubectl logs -n replay -f job/replay --pod-running-timeout=2m

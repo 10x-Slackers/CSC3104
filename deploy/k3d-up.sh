@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 # The fixed subnet matches apiServerCIDRs in charts/bank/values.yaml. Workloads are mounted for replay.sh.
 k3d cluster create csc3104 --subnet 172.28.0.0/16 --wait \
-  --volume "$(cd .. && pwd)/apps/dataset/out:/workloads@server:0"
+  --volume "$PWD/../apps/dataset/out:/workloads@server:0"
 kubectl config use-context k3d-csc3104
 
 helm install --wait strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator --version 1.2.0 \
