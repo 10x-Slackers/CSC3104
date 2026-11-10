@@ -621,6 +621,22 @@ def test_kafka_cli_sigterm_closes_consumer(tmp_path, monkeypatch):
     server.stop.assert_called_once_with(0)
 
 
+def test_valkey_cli_starts_empty_without_kafka_or_workload(tmp_path, monkeypatch):
+    prepare_demo_keys(tmp_path)
+    monkeypatch.setattr("confluent_kafka.Consumer", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(LocalBank, "from_workload", Mock(side_effect=AssertionError))
+    server = Mock()
+    server.wait_for_termination.return_value = False
+    serve = Mock(return_value=(server, 0))
+    monkeypatch.setattr(node_module, "serve", serve)
+    args = ["node", "--bank", "B", "--valkey-url", "valkey://valkey:6379"]
+    args += ["--key-directory", str(tmp_path), "--insecure-demo"]
+    monkeypatch.setattr(sys, "argv", args)
+    node_module.main()
+    assert serve.call_args.args[0].local.detections == []
+    server.stop.assert_called_once_with(0)
+
+
 @pytest.mark.parametrize("operation", ["search", "delivery"])
 def test_shutdown_stops_between_queued_operations(banks, monkeypatch, operation):
     nodes, _ = banks

@@ -1,4 +1,5 @@
 # Privacy-node mTLS certificate (server and client), signed by the lab CA. Secret: privacy-node-tls.
+# Peers check the DNS name; the URI SAN is the bank identity the node binds `sender` to (security.md).
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -7,6 +8,8 @@ spec:
   secretName: privacy-node-tls
   dnsNames:
     - privacy-node.{{ .Release.Namespace }}.svc
+  uris:
+    - spiffe://csc3104/bank/{{ .Values.bank }}/privacy-node
   usages: [server auth, client auth]
   issuerRef:
     name: bank-ca
