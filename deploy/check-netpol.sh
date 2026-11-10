@@ -40,4 +40,10 @@ peer c privacy-node.bank-a:50051 open
 probe bank-a privacy-node.bank-b:50051 blocked
 probe default privacy-node.bank-a:50051 blocked
 peer a kafka-kafka-bootstrap.bank-b:9092 blocked
+# Replay: only to each bank's ingestor HTTP port.
+probe replay ingestor.bank-a:8080 open
+probe replay ingestor.bank-c:8080 open
+probe bank-b ingestor.bank-b:8080 open
+probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
+probe default ingestor.bank-b:8080 blocked
 exit $failed
