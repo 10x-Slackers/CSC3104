@@ -32,3 +32,28 @@ spec:
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}
+---
+# Privacy node <-> the other banks' privacy nodes, gRPC port only (docs/contracts/security.md).
+# Listing its own namespace changes nothing: the baseline already allows traffic inside the bank.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: privacy-node-peers
+spec:
+  podSelector:
+    matchLabels: {app: privacy-node}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}]
+          podSelector:
+            matchLabels: {app: privacy-node}
+      ports: [{protocol: TCP, port: 50051}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}]
+          podSelector:
+            matchLabels: {app: privacy-node}
+      ports: [{protocol: TCP, port: 50051}]

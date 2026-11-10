@@ -36,3 +36,20 @@ spec:
       transaction.state.log.min.isr: 1
       default.replication.factor: 1
       min.insync.replicas: 1
+      auto.create.topics.enable: false
+  entityOperator:
+    topicOperator: {jvmOptions: {"-Xmx": 128m}}
+---
+# Declared rather than auto-created: 6 partitions keyed by account, so up to 6 scorer replicas each own
+# some; kept forever, since Kafka is the source of truth and Valkey is rebuilt from it.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: transactions
+  labels:
+    strimzi.io/cluster: kafka
+spec:
+  topicName: bank-{{ .Values.bank }}-transactions
+  partitions: 6
+  config:
+    retention.ms: -1
