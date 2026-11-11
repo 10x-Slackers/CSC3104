@@ -171,7 +171,7 @@ def create_app(
             "<table><tr><th>#<th>Banks (from → confirming → to)"
             f"<th>Incoming token<th>Outgoing token</tr>{links or '<tr><td colspan=4>None'}</table>"
             f"<h2>From the privacy node</h2><ul>{messages}</ul>"
-            "<h2>Draft summary</h2><p class=muted>Drafted from a fixed template, not AI, for you to review.</p>"
+            "<h2>Draft summary</h2><p class=muted>Drafted from a fixed template for you to review.</p>"
             + (
                 f"<pre>{escape(draft)}</pre>"
                 if draft
