@@ -8,7 +8,7 @@ Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPoli
 > - **State through Valkey:** the chart already runs the target topology, but nothing uses Valkey yet. The scorer keeps state in memory and takes CLI flags until its `ValkeyState` and env-var config land (Cindy); the node starts empty and finds no chains until it reads Valkey (Zane).
 > - **New components:** the summary service as a container locally; the ingestor and summary service as Lambda function URLs (`AWS_IAM`) on EKS; replay as a Job in a `replay` namespace.
 > - **Hardening:** per-path and per-store NetworkPolicies; PSS `warn: restricted`; k3s secrets encryption.
-> - **EKS:** the account is an AWS Academy Learner Lab, which can't create IAM roles, so everything runs as the pre-made `LabRole` and Pod Identity is dropped. Pods take `LabRole` from the node's metadata service instead (hop limit 2), which the bank namespaces' default-deny policy blocks. `deploy/terraform` creates the cluster with VPC CNI network policy and the ECR repositories; the workloads bucket is created once with `aws s3 mb` (the lab blocks a read that Terraform's bucket resource needs) and survives teardown; still to come: installing the chart, ElastiCache, the Lambdas and a Kafka listener for the ingestor Lambda.
+> - **EKS:** the account is an AWS Academy Learner Lab, which can't create IAM roles, so everything runs as the pre-made `LabRole` and Pod Identity is dropped. Pods take the role from the node's metadata service instead, which the bank namespaces' default-deny policy should block (not yet probed on EKS, and a new pod may get through before its policy applies). `deploy/terraform` creates the cluster and the ECR repositories; the workloads bucket is created once by hand and survives teardown. Still to come: installing the chart, ElastiCache, the Lambdas and a Kafka listener for the ingestor Lambda.
 
 Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monitoring and the evaluation harness.
 
@@ -17,7 +17,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | | Local | Cloud |
 | --- | --- | --- |
 | Cluster | k3d | Amazon EKS |
-| Setup command | `deploy/k3d-up.sh` | AWS resources only so far: `terraform -chdir=deploy/terraform apply` with the Learner Lab's credentials in `~/.aws/credentials`, then the `kubeconfig_command` output. Installing the chart: TODO |
+| Setup command | `deploy/k3d-up.sh` | AWS resources only so far: with the Learner Lab's credentials in `~/.aws/credentials`, `terraform -chdir=deploy/terraform init`, `terraform -chdir=deploy/terraform apply`, then the `kubeconfig_command` output. Once per account, create the workloads bucket (Terraform output `workloads_bucket`): `aws s3 mb s3://csc3104-workloads-<account-id>`. Installing the chart: TODO |
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | TODO |
 | Teardown | `k3d cluster delete csc3104` | `terraform -chdir=deploy/terraform destroy` |
 | Check | `deploy/check-netpol.sh` | TODO |
@@ -72,7 +72,7 @@ Current baseline (`bank-baseline` policy): deny all, then allow traffic within t
 | Privacy node ↔ other banks' privacy nodes | Ingress from the other two bank namespaces **and** `app: privacy-node` pods, gRPC port only, with matching egress. **Done** (`privacy-node-peers`), probed in `check-netpol.sh` |
 | Replay → ingestor (k3d) | Ingress from the `replay` namespace to `app: ingestor` on its HTTP port. **Done** (`replay-to-ingestor`), probed in `check-netpol.sh` |
 | Ingestor Lambda → Kafka (EKS) | Ingress from the Lambda's VPC subnets to the broker port |
-| Case service → summary Lambda (EKS) | Egress to AWS on 443; locally the summary container sits in the namespace |
+| Case service → summary Lambda (EKS) | Egress to AWS on 443, and to the node's metadata service (`169.254.169.254:80`) from `app: case-service` only, so it can sign the call as `LabRole`. This hands that pod the whole role: an accepted limitation of the lab account. Locally the summary container sits in the namespace |
 | Analyst → web UI | `kubectl port-forward` only, no Ingress; access control is cluster RBAC |
 
 The API-server rule should be narrowed from the whole k3d node subnet. On EKS, enable the VPC CNI network-policy feature and run the probes as a Job.
@@ -88,5 +88,5 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 ## Open
 
-- [ ] EKS setup and check commands (Isaac); the AWS resources and teardown are in `deploy/terraform`.
+- [ ] EKS setup and check commands (Isaac).
 - [x] How the replay Job gets its workload: mounted (agreed on [#29](https://github.com/10x-Slackers/CSC3104/issues/29), 9 Nov).

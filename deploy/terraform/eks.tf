@@ -4,8 +4,8 @@ data "aws_subnets" "default" {
     values = ["true"]
   }
   filter {
-    name   = "availability-zone" # EKS has no control-plane capacity in us-east-1e
-    values = ["us-east-1a", "us-east-1b", "us-east-1c"]
+    name   = "availability-zone-id" # EKS can't use use1-az3; zone names differ per account
+    values = ["use1-az1", "use1-az2", "use1-az6"]
   }
 }
 
@@ -25,7 +25,7 @@ resource "aws_launch_template" "nodes" {
   }
 }
 
-# One node per zone; three t3a.large (the cheapest x86 large; 2 vCPU, 8 GB, 35 pods each) hold all three banks with replicas.
+# Three t3a.large (the lab allows nothing bigger) across three zones hold all three banks with replicas.
 resource "aws_eks_node_group" "nodes" {
   cluster_name    = aws_eks_cluster.csc3104.name
   node_group_name = "nodes"
@@ -43,7 +43,6 @@ resource "aws_eks_node_group" "nodes" {
   }
 }
 
-# The VPC CNI enforces NetworkPolicy once enabled; the EBS driver provisions the Kafka and PostgreSQL volumes.
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.csc3104.name
   addon_name                  = "vpc-cni"
@@ -51,6 +50,7 @@ resource "aws_eks_addon" "vpc_cni" {
   configuration_values        = jsonencode({ enableNetworkPolicy = "true" })
 }
 
+# Provisions the Kafka and PostgreSQL volumes.
 resource "aws_eks_addon" "ebs_csi" {
   cluster_name = aws_eks_cluster.csc3104.name
   addon_name   = "aws-ebs-csi-driver"
