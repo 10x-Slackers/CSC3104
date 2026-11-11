@@ -1,0 +1,10 @@
+[project]
+name = "summary"
+version = "0.1.0"
+description = "Role 5: draft case summaries from a fixed template, as a container or a Lambda"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

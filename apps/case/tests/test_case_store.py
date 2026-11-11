@@ -2,18 +2,30 @@ import threading
 
 import pytest
 
-from case.case_store import AlertRule, Claim, SqliteCaseStore, transfers
-from case.outbox import dispatch
-from case.report import TemplateClient, draft_report
-from privacy_node import privacy_node_pb2 as pb
-from sample_chains import as_partial, bridged, leaks, m1, o1, v1
+from case.case_store import CaseStore, Claim, transfers
+from case.evidence import parse
+from sample_chains import (
+    SAMPLE,
+    as_partial,
+    bridged,
+    chain,
+    foreign,
+    leaks,
+    leg,
+    m1,
+    message,
+    o1,
+    public_keys,
+    unchecked,
+    v1,
+)
 
 # DEPENDS ON Role 3 (privacy node): every test here uses real ChainResults from its
 # nodes (sample_chains.py), so a change to privacy_node.proto affects them all.
 
 
 def alerts(store):
-    return store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+    return store.db.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"]
 
 
 def test_transfer_keys_normalize_role3_bytes_to_hex():
@@ -27,138 +39,138 @@ def test_transfer_keys_normalize_role3_bytes_to_hex():
 
 
 def test_case_id_is_role3_chain_digest(store):
-    result = m1()
-    assert store.record(result) == result.chain_digest
+    result = o1()
+    assert store.record(message(result)) == result.chain_digest
     case = store.get(result.chain_digest)
-    assert [c.signer for c in case["claims"]] == ["A", "B", "C"]
-    assert case["state"] == "confirmed" and case["raised_at"] is not None
+    assert [c.signer for c in case["claims"]] == ["A", "B", "C", "A"]
+    assert (case["tier"], case["state"]) == (2, "confirmed")
+    assert case["raised_at"] is not None
 
 
-# DEPENDS ON Role 2 (streaming and scoring): the minimum chain length is theirs to set.
-def test_rule_comes_from_config(tmp_path):
-    store = SqliteCaseStore(tmp_path / "cases.db", AlertRule(min_transfers=3))
-    assert store.get(store.record(m1()))["raised_at"] is None  # 2 transfers
-    assert store.get(store.record(o1()))["raised_at"] is not None  # 3 transfers
+@pytest.mark.parametrize(
+    "result,bank,tier",
+    [
+        (m1, "B", 1),  # only B's rule links p06 -> p07: local suspicion at B
+        (m1, "A", 0),  # ... and nothing at A or C
+        (m1, "C", 0),
+        (o1, "A", 2),  # B's and C's rules link the loop: an alert everywhere
+        (lambda: v1()[0], "C", 2),  # partial, but two banks' rules link it
+    ],
+)
+def test_tier_counts_rule_backed_banks(store, result, bank, tier):
+    case = store.get(store.record(message(result(), bank)))
+    assert case["tier"] == tier
+    assert (case["raised_at"] is not None) == (tier == 2)
+    assert [c["case_id"] for c in store.cases()] == ([case["case_id"]] if tier else [])
 
 
-def test_overlapping_searches_share_one_case_and_alert(store):
-    # o1 loop searched from B and from C: Role 3 gives both the same digest.
-    first = store.record(o1("B"))
-    assert store.record(o1("C")) == first
-    assert store.record(o1("B")) == first  # redelivery
-    assert [c["case_id"] for c in store.cases()] == [first]
-    assert len(store.get(first)["results"]) == 2
+def test_own_legs_are_snapshotted_once(store):
+    case = store.get(store.record(message(m1(), "B")))
+    assert [(g["payment_id"], g["direction"], g["account"]) for g in case["legs"]] == [
+        ("p06", "in", "B-m1"),
+        ("p07", "out", "B-m1"),
+    ]
+    assert leaks(str(case), foreign("B")) == set()  # A's and C's legs stay tokens
+
+
+def test_every_sample_message_kind_is_stored(store):
+    """The shared sample (docs/contracts/protocol.md), with a freshly signed chain."""
+    pending, hit, local = (parse(m, public_keys(), "B") for m in SAMPLE[1:])
+    fresh = chain(m1(), "B")
+    assert fresh.keys() == SAMPLE[0].keys()
+    assert fresh["result"].keys() == SAMPLE[0]["result"].keys()
+    waiting = store.record(pending)
+    assert store.get(waiting)["state"] == "pending"
+    assert store.get(waiting)["messages"][0]["detail"] == "C"
+    # The hit on p07 and then the confirmed chain join the pending case.
+    assert store.record(hit) == waiting
+    assert store.record(message(m1(), "B")) == waiting
+    case = store.get(waiting)
+    assert (case["tier"], case["state"], case["raised_at"]) == (1, "confirmed", None)
+    internal = store.get(store.record(local))
+    assert (internal["tier"], internal["state"]) == (1, "local")
+    assert {g["account"] for g in internal["legs"]} == {"B-bob", "B-carol"}
+    assert len(store.cases()) == 2
+
+
+def test_tier_1_case_is_promoted_by_a_tier_2_chain(store):
+    hit = SAMPLE[2] | {"key": "new-payee-p11", "legs": [leg("B", "p11", "out")]}
+    case_id = store.record(parse(hit, public_keys(), "B"))
+    assert store.cases()[0]["tier"] == 1 and alerts(store) == 0
+    assert store.record(message(o1(), "B")) == case_id  # o1 includes p11
+    assert store.get(case_id)["tier"] == 2 and store.get(case_id)["raised_at"]
+    assert [n["kind"] for n in store.notifications()] == ["alert"]
+
+
+def test_overlapping_partials_join_one_case(store):
+    # Over-limit v1: five partial results from three banks, all sharing transfers.
+    results = v1()
+    assert len(results) == 5
+    ids = {store.record(message(r, r.claims[0].signer)) for r in results}
+    assert len(ids) == 1
+    [case] = store.cases()
+    assert (case["state"], case["tier"]) == ("partial", 2)
     assert alerts(store) == 1
 
 
-def test_overlapping_partials_join_one_case_without_alert(store):
-    # Over-limit v1: five partial results from three banks, all sharing transfers.
-    results = v1()
-    assert len(results) == 5 and len({r.chain_digest for r in results}) == 1
-    assert len({store.record(r) for r in results}) == 1
-    [case] = store.cases()
-    assert case["state"] == "partial" and case["raised_at"] is None
-    # One digest, so each sending bank's searches are one (digest, sender) row.
-    assert len(store.get(case["case_id"])["results"]) == 3
-
-
-def test_partial_upgrades_to_confirmed_and_alerts_once(store):
-    case_id = store.record(as_partial(m1()))
-    assert store.get(case_id)["state"] == "partial"
-    assert store.get(case_id)["raised_at"] is None
-    assert store.record(m1()) == case_id
+def test_partial_upgrades_to_confirmed_without_a_second_alert(store):
+    case_id = store.record(message(as_partial(o1())))
     raised = store.get(case_id)["raised_at"]
-    assert store.get(case_id)["state"] == "confirmed" and raised is not None
-    store.record(as_partial(m1()))  # never downgrades
+    assert store.get(case_id)["state"] == "partial" and raised is not None
+    assert store.record(message(o1())) == case_id
     assert store.get(case_id)["state"] == "confirmed"
     assert store.get(case_id)["raised_at"] == raised
+    assert len(store.get(case_id)["messages"]) == 1  # one row per key, upgraded
 
 
-# The five result types from the workload split, plus Role 3's PENDING. Only CONFIRMED
-# and PARTIAL are ever delivered (protocol.md); the rest must never become evidence.
-@pytest.mark.parametrize(
-    "state,expected",
-    [
-        (pb.CONFIRMED, ("confirmed", True)),
-        (pb.PARTIAL, ("partial", False)),
-        (pb.NO_MATCH, None),
-        (pb.TIMED_OUT, None),
-        (pb.INVALID_CLAIM, None),
-        (pb.FAILED, None),
-        (pb.PENDING, None),
-    ],
-)
-def test_each_result_type(store, state, expected):
-    result = m1()
-    result.state = state
-    if expected is None:
-        with pytest.raises(ValueError):
-            store.record(result)
-        assert store.cases() == [] and store.outbox() == []
-        return
-    case = store.get(store.record(result))
-    assert (case["state"], case["raised_at"] is not None) == expected
-
-
-def test_same_claim_submitted_twice_is_stored_once(store):
-    case_id = store.record(m1())
-    store.record(m1())
+def test_redelivery_is_stored_once(store):
+    case_id = store.record(message(o1()))
+    store.record(message(o1()))
     case = store.get(case_id)
-    assert len(case["claims"]) == 3 and len(case["results"]) == 1
-    # o1 from B and from C: the same four links, signed for different queries.
-    loop = store.record(o1("B"))
-    store.record(o1("C"))
-    assert len(store.get(loop)["claims"]) == 4
-    assert len(store.get(loop)["results"]) == 2
+    assert len(case["claims"]) == 4 and len(case["messages"]) == 1
+    assert alerts(store) == 1
 
 
 def test_bridging_result_merges_into_oldest_case(store):
-    first, second, whole = bridged()
+    first, second, whole = (unchecked(r, "A") for r in bridged())
     old, new = store.record(first), store.record(second)
     assert old != new
+    store.flag(new, "bookmarked")
     assert store.record(whole) == old
     assert [c["case_id"] for c in store.cases()] == [old]
     assert store.get(new)["merged_into"] == old
-    assert store.get(new)["raised_at"] is None
+    assert store.get(old)["bookmarked"]  # flags move with the evidence
     assert len(store.get(old)["claims"]) == 6
     assert alerts(store) == 1
 
 
-def test_concurrent_writers_create_one_case(tmp_path):
-    path = tmp_path / "cases.db"
-    SqliteCaseStore(path)
-    ids = []
+def test_concurrent_writers_create_one_case(url):
+    CaseStore(url)
+    ids, messages = [], [message(o1("B")), message(o1("C"))] * 8
     threads = [
-        threading.Thread(target=lambda r=r: ids.append(SqliteCaseStore(path).record(r)))
-        for r in [o1("B"), o1("C")] * 8
+        threading.Thread(target=lambda m=m: ids.append(CaseStore(url).record(m)))
+        for m in messages
     ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    store = SqliteCaseStore(path)
+    store = CaseStore(url)
     assert len(set(ids)) == 1 and len(store.cases()) == 1
     assert alerts(store) == 1
 
 
-def test_close_and_reopen_keeps_cases_alerts_and_pending_outbox(tmp_path):
-    path = tmp_path / "cases.db"
-    store = SqliteCaseStore(path)
-    confirmed = store.record(m1())
-    for result in v1():
-        store.record(result)
-    store.decide(confirmed, "report")
+def test_close_and_reopen_keeps_cases_and_alerts(url):
+    store = CaseStore(url)
+    confirmed = store.record(message(o1()))
+    store.flag(confirmed, "reviewed")
     before = store.cases()
-    store.db.close()
+    store.db.conn.close()
 
-    reopened = SqliteCaseStore(path)
-    assert reopened.cases() == before
-    assert reopened.get(confirmed)["raised_at"] is not None
-    assert reopened.record(m1()) == confirmed  # still one alert after a redelivery
+    reopened = CaseStore(url)
+    assert reopened.cases() == before and before[0]["reviewed"]
+    assert reopened.record(message(o1())) == confirmed  # still one alert
     assert [n["kind"] for n in reopened.notifications()] == ["alert"]
-    sent = []
-    assert dispatch(reopened, sent.append, "B") == 1  # the pending report
-    assert dispatch(reopened, sent.append, "B") == 0
 
 
 def test_leak_check_catches_planted_values():
@@ -170,19 +182,14 @@ def test_leak_check_catches_planted_values():
     assert leaks("created_at 1793000120.05, pair A-B, Wired") == set()
 
 
-def test_nothing_sensitive_in_any_stored_table(store):
+def test_no_other_banks_data_in_any_stored_table(store):
     for result in [m1(), o1(), *v1()]:
-        store.record(result)
-    case_id = store.cases()[0]["case_id"]
-    store.decide(case_id, "report")
-    draft_report(store, store.get(case_id), TemplateClient())
-    dispatch(store, lambda message: None, "B")
-    tables = [row[0] for row in store.db.execute("SELECT name FROM sqlite_master")]
+        store.record(message(result, "B"))
     dump = "\n".join(
         str(value)
-        for table in tables
-        if not table.startswith("sqlite_")
+        for table in ("cases", "transfers", "messages", "claims", "own_legs")
         for row in store.db.execute(f"SELECT * FROM {table}")
-        for value in row
+        for value in row.values()
     )
-    assert "reports" in tables and dump and leaks(dump) == set()
+    assert "B-m1" in dump  # B's own legs are stored
+    assert leaks(dump, foreign("B")) == set()

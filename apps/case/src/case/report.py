@@ -1,133 +1,61 @@
-"""Draft case reports for analyst review. Template only: there is no AI report.
+"""The case service's side of the summary service (apps/summary): its input and the call.
 
-The allow-list filter runs first, so a client only ever sees permitted case fields.
-Every report is stored as a draft labelled with its source ("template").
+`report_input` copies only the listed case fields: this bank's own legs, and other banks'
+legs as tokens. A failure or timeout means "no draft", so a summary outage never blocks
+detection (a bulkhead). Signatures never reach a summary.
 """
 
-from datetime import UTC, datetime
-from typing import Protocol, TypedDict
+import json
+import urllib.request
+from collections.abc import Callable
 
-from case.case_store import Case, CaseState, SqliteCaseStore, neighbours
-from security import check_peer_payload
+from case import log
+from case.case_store import Case
 
-LINK_FIELDS = (
-    "signer",
-    "in_pair",
-    "in_token",
-    "out_pair",
-    "out_token",
-    "key_version",
-    "signing_key_version",
-    "truncated",
-)
-# Everything a report client may see. Signatures, accounts, amounts and payment IDs
-# are not listed, so they can never reach a report.
-ALLOWED = {
-    "case_id", "state", "raised_at", "merged_into", "links", "results", "decisions",
-    "chain_digest", "sender", "action", "decided_at", *LINK_FIELDS,
-}  # fmt: skip
+CASE_FIELDS = ("case_id", "tier", "state", "raised_at", "merged_into")
+LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token", "key_version", "signing_key_version", "truncated")  # fmt: skip
+LEG_FIELDS = ("payment_id", "direction", "account", "amount", "pair")
+MESSAGE_FIELDS = ("key", "kind", "state", "detail")
 
 
-class ReportInput(TypedDict):
-    case_id: str
-    state: CaseState
-    raised_at: float | None
-    merged_into: str | None
-    links: list[dict]
-    results: list[dict]
-    decisions: list[dict]
+def report_input(case: Case) -> dict:
+    """The summary service's JSON input: listed fields only (Caleb reviews them)."""
+    return {f: case[f] for f in CASE_FIELDS} | {
+        "links": [{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]],
+        "legs": [{f: leg[f] for f in LEG_FIELDS} for leg in case["legs"]],
+        "messages": [{f: m[f] for f in MESSAGE_FIELDS} for m in case["messages"]],
+    }
 
 
-def report_input(case: Case) -> ReportInput:
-    """Select only approved evidence fields, with tokens as readable hex."""
-    data = ReportInput(
-        case_id=case["case_id"],
-        state=case["state"],
-        raised_at=case["raised_at"],
-        merged_into=case["merged_into"],
-        links=[{f: getattr(c, f) for f in LINK_FIELDS} for c in case["claims"]],
-        results=[
-            {"chain_digest": d, "sender": s, "state": st}
-            for d, s, st in case["results"]
-        ],
-        decisions=[{"action": a, "decided_at": t} for a, t in case["decisions"]],
-    )
-    check_peer_payload(data, ALLOWED)
-    return data
+def signed(url: str, body: bytes, headers: dict, region: str) -> dict:
+    """SigV4 headers for a Lambda function URL with AuthType AWS_IAM (EKS Pod Identity)."""
+    from botocore.auth import SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.session import Session
+
+    request = AWSRequest("POST", url, data=body, headers=headers)
+    SigV4Auth(Session().get_credentials(), "lambda", region).add_auth(request)
+    return dict(request.headers)
 
 
-def when(timestamp: float | None, none: str = "-") -> str:
-    if timestamp is None:
-        return none
-    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+def summarizer(
+    url: str, timeout: float = 2.0, region: str = ""
+) -> Callable[[Case], str | None]:
+    """Call the summary service; None is "no draft". region set means sign for AWS."""
 
+    def summarize(case: Case) -> str | None:
+        if not url:
+            return None
+        body = json.dumps(report_input(case)).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            if region:
+                headers = signed(url, body, headers, region)
+            request = urllib.request.Request(url, body, headers)
+            with urllib.request.urlopen(request, timeout=timeout) as reply:
+                return json.load(reply)["draft"]
+        except Exception as exc:  # noqa: BLE001 - any failure means no draft
+            log(event="no_draft", case_id=case["case_id"], error=type(exc).__name__)
+            return None
 
-class ReportClient(Protocol):
-    source: str  # stored with the report
-
-    def draft(self, data: ReportInput) -> str: ...
-
-
-class TemplateClient:
-    """Fills a fixed template from the permitted fields; no model, keys or network."""
-
-    source = "template"
-
-    def draft(self, data: ReportInput) -> str:
-        links = data["links"]
-        pairs = [link[p] for link in links for p in ("in_pair", "out_pair")]
-        banks = sorted({b for pair in pairs if pair for b in pair.split("-")})
-        signers = sorted({link["signer"] for link in links})
-        lines = [
-            "DRAFT: template report, not AI-generated. Pending analyst review.",
-            "",
-            f"Case: {data['case_id']}",
-            f"State: {data['state']}",
-            f"Alert raised: {when(data['raised_at'], 'not raised')}",
-        ]
-        if data["merged_into"]:
-            lines.append(f"Merged into case: {data['merged_into']}")
-        lines += [
-            "",
-            (
-                f"Summary: {len(links)} signed link claim(s) across banks"
-                f" {', '.join(banks)}, from {', '.join(signers)}."
-            ),
-            "",
-            "Links in money-flow order (from bank -> confirming bank -> to bank):",
-        ]
-        for i, link in enumerate(links, 1):
-            start, end = neighbours(link["signer"], link["in_pair"], link["out_pair"])
-            lines.append(
-                f"  {i}. {start} -> {link['signer']} -> {end}, confirmed by"
-                f" {link['signer']}: {link['in_token'] or '-'} -> {link['out_token'] or '-'}"
-            )
-        lines += ["", "Chain results received:"]
-        lines += [
-            f"  {r['state']} from {r['sender']} (digest {r['chain_digest'][:16]})"
-            for r in data["results"]
-        ]
-        lines += ["", "Analyst decisions so far:"]
-        lines += [
-            f"  {when(d['decided_at'])}: {d['action']}" for d in data["decisions"]
-        ]
-        if not data["decisions"]:
-            lines.append("  none")
-        lines += [
-            "",
-            (
-                "Limits: a rule flags suspicion, not proven laundering. A signature proves"
-                " which bank made a claim, not that its records are true."
-            ),
-        ]
-        if data["state"] != "confirmed":
-            lines.append(
-                f"This case is {data['state']}: links may be missing or unconfirmed."
-            )
-        return "\n".join(lines)
-
-
-def draft_report(store: SqliteCaseStore, case: Case, client: ReportClient) -> int:
-    """Filter, draft and store as a draft; return the new report ID."""
-    data = report_input(case)
-    return store.save_report(case["case_id"], client.source, client.draft(data))
+    return summarize

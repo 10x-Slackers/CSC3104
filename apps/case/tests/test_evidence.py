@@ -2,9 +2,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from case.app import create_app
-from case.evidence import check_result, load_public_keys
+from case.evidence import check_result, load_public_keys, parse
 from privacy_node.claims import chain_digest
-from sample_chains import m1, o1, public_keys
+from sample_chains import SAMPLE, chain, m1, o1, public_keys
 from security import public_key_pem
 
 
@@ -56,16 +56,37 @@ def test_public_keys_load_own_and_peer_versions_from_bank_key_directory(tmp_path
     assert set(keys) == set(public_keys())
     assert check_result(m1(), keys, "B")
     client = TestClient(
-        create_app(
-            tmp_path / "cases.db",
-            "B",
-            "http://127.0.0.1:9",
-            lambda: load_public_keys(tmp_path, "B"),
-            interval=None,
-        )
+        create_app(tmp_path / "cases.db", "B", lambda: load_public_keys(tmp_path, "B"))
     )
-    result = m1().SerializeToString()
-    assert client.post("/results", content=result).status_code == 200
+    result = chain(m1(), "B")
+    assert client.post("/results", json=result).status_code == 200
     # The loader re-reads own public material; missing own keys cannot verify evidence.
     (tmp_path / "B/public/signing/k1.pem").unlink()
-    assert client.post("/results", content=result).status_code == 422
+    assert client.post("/results", json=result).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda m: m.update(key="0" * 64),  # not the chain digest
+        lambda m: m.update(kind="decision"),
+        lambda m: m["result"].update(note="extra"),  # unknown field
+        lambda m: m["result"].update(state="PENDING"),  # never evidence
+        lambda m: m.pop("legs"),
+    ],
+    ids=["key", "kind", "unknown-field", "pending-state", "no-legs"],
+)
+def test_bad_message_is_rejected(edit):
+    bad = chain(m1(), "B")
+    edit(bad)
+    with pytest.raises((KeyError, ValueError)):
+        parse(bad, public_keys(), "B")
+
+
+def test_sample_kinds_parse_without_a_signature():
+    kinds = [parse(m, public_keys(), "B") for m in SAMPLE[1:]]
+    assert [(m.kind, m.tier, m.detail) for m in kinds] == [
+        ("pending", 1, "C"),
+        ("hit", 1, "new_payee"),
+        ("local", 1, ""),
+    ]

@@ -2,9 +2,10 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from google.protobuf.json_format import MessageToDict
 
 from case.app import create_app
-from case.case_store import SqliteCaseStore
+from case.case_store import CaseStore
 from case.evidence import check_result
 from case.report import report_input
 from privacy_node import privacy_node_pb2 as pb
@@ -36,16 +37,14 @@ def evidence():
     return result, keys, private
 
 
+def posted(result):
+    """A chain message with no own legs: only the claims matter here."""
+    return {"key": result.chain_digest, "kind": "chain", "legs": [],
+            "result": MessageToDict(result)}  # fmt: skip
+
+
 def client_for(tmp_path, keys):
-    return TestClient(
-        create_app(
-            tmp_path / "cases.db",
-            "B",
-            "http://127.0.0.1:9",
-            lambda: keys,
-            interval=None,
-        )
-    )
+    return TestClient(create_app(tmp_path / "cases.db", "B", lambda: keys))
 
 
 def test_case_calls_the_authoritative_validator(evidence, tmp_path):
@@ -54,13 +53,9 @@ def test_case_calls_the_authoritative_validator(evidence, tmp_path):
 
     assert check_result is authoritative
     client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 200
-    )
+    assert client.post("/results", json=posted(result)).status_code == 200
     result.state = pb.PARTIAL
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 200
-    )
+    assert client.post("/results", json=posted(result)).status_code == 200
 
 
 def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_path):
@@ -68,9 +63,7 @@ def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_pa
     result.claims[1].truncated = True
     result.claims[1].signature = sign(claim_bytes(result.claims[1]), private["B"])
     client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 200
-    )
+    assert client.post("/results", json=posted(result)).status_code == 200
     [case] = client.get("/api/cases").json()
     assert case["state"] == "partial" and case["raised_at"] is None
 
@@ -78,16 +71,14 @@ def test_signed_cut_falsely_confirmed_is_stored_only_as_partial(evidence, tmp_pa
 def test_tokens_normalize_to_hex_at_case_storage_boundary(evidence, tmp_path):
     result, keys, _ = evidence
     client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 200
-    )
-    store = SqliteCaseStore(tmp_path / "cases.db")
+    assert client.post("/results", json=posted(result)).status_code == 200
+    store = CaseStore(str(tmp_path / "cases.db"))
     case = store.get(result.chain_digest)
     assert case["claims"][1].in_token == (b"a" * 16).hex()
     assert (
         store.db.execute(
-            "SELECT typeof(in_token) FROM claims WHERE signer='B'"
-        ).fetchone()[0]
+            "SELECT typeof(in_token) AS t FROM claims WHERE signer='B'"
+        ).fetchone()["t"]
         == "text"
     )
 
@@ -97,10 +88,8 @@ def test_signed_cut_flags_remain_booleans_in_store_api_and_report(evidence, tmp_
     result.claims[1].truncated = True
     result.claims[1].signature = sign(claim_bytes(result.claims[1]), private["B"])
     client = client_for(tmp_path, keys)
-    assert (
-        client.post("/results", content=result.SerializeToString()).status_code == 200
-    )
-    case = SqliteCaseStore(tmp_path / "cases.db").get(result.chain_digest)
+    assert client.post("/results", json=posted(result)).status_code == 200
+    case = CaseStore(str(tmp_path / "cases.db")).get(result.chain_digest)
     assert [claim.truncated for claim in case["claims"]] == [False, True, False]
     assert all(type(claim.truncated) is bool for claim in case["claims"])
     response = client.get(f"/api/cases/{result.chain_digest}").json()

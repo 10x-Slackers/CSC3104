@@ -1,28 +1,23 @@
-"""Bank-local case store: verified chain results, case identity and one alert per case.
+"""Bank-local case store: the node's messages, joined into cases at the highest tier.
 
-Holds only tokens, bank IDs and claim metadata; never accounts, amounts or payment IDs.
-Input is Role 3's ChainResult (privacy_node/privacy_node.proto), already verified
-with claims.check_result. Contract: docs/contracts/case.md. SQLite for now.
+Fed only by this bank's privacy node, once per message key (docs/contracts/protocol.md),
+so the store keeps the transfer join but little other deduplication. Other banks' legs
+stay tokens; this bank's own legs are snapshotted into `own_legs` when they arrive.
+PostgreSQL in the cluster (a `postgresql://` URL); a SQLite file for tests and local runs.
+Nothing is ever deleted (MAS Notice 626 para 12.3). Contract: docs/contracts/case.md.
 """
 
-import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import astuple, dataclass, fields
-from typing import Literal, Self, TypedDict, get_args
+from dataclasses import astuple, dataclass, field, fields
+from typing import Literal, Self, TypedDict
 
 from privacy_node import privacy_node_pb2 as pb
 
-# Only confirmed and partial results become chains and are delivered (protocol.md).
-# A case is confirmed once any of its results is; nothing downgrades it.
-CaseState = Literal["partial", "confirmed"]
-STATES: dict[int, CaseState] = {pb.PARTIAL: "partial", pb.CONFIRMED: "confirmed"}
-# Simulated analyst actions; none touches a real account. "report" queues the case
-# evidence for the mock intake.
-Decision = Literal["monitor", "suspend", "freeze", "report"]
-DECISIONS = get_args(Decision)
-ReviewStatus = Literal["approved", "rejected"]
+Kind = Literal["chain", "pending", "local", "hit"]
+# A case's state is its strongest message's, in this order.
+STATES = ("confirmed", "partial", "pending", "local", "hit")
 
 
 @dataclass(frozen=True)
@@ -55,55 +50,48 @@ class Claim:
         )  # fmt: skip
 
 
+class Leg(TypedDict):
+    """One of this bank's own payments on a case; token is empty for intra-bank legs."""
+
+    payment_id: str
+    direction: str
+    account: str
+    amount: float
+    pair: str
+    token: str
+
+
 @dataclass(frozen=True)
-class AlertRule:
-    """When a confirmed case is complete enough to alert. Links are counted as transfers.
+class Message:
+    """One payload from the node, already checked (evidence.parse)."""
 
-    DEPENDS ON Role 2 (streaming and scoring): the minimum chain length, still TODO in
-    streaming.md; until then >= 2 transfers across >= 2 banks. Status: pending.
-    """
-
-    min_transfers: int = int(os.environ.get("CASE_MIN_TRANSFERS", "2"))
-    min_banks: int = int(os.environ.get("CASE_MIN_BANKS", "2"))
+    key: str  # chain_digest, search ID or hit ID
+    kind: Kind
+    tier: int  # 2 alert, 1 local suspicion, 0 evidence only
+    state: str  # one of STATES
+    legs: list[Leg]
+    claims: list[Claim] = field(default_factory=list)
+    detail: str = ""  # sender, the bank waited for, or the rule
 
 
 class Case(TypedDict):
     case_id: str
     created_at: float
-    state: CaseState
+    tier: int
+    state: str
     merged_into: str | None
+    bookmarked: bool
+    reviewed: bool
     raised_at: float | None
     claims: list[Claim]
-    results: list[tuple[str, str, CaseState]]  # (chain_digest, sender, state)
-    decisions: list[tuple[Decision, float]]  # (action, decided_at)
-
-
-class CaseSummary(TypedDict):
-    case_id: str
-    created_at: float
-    state: CaseState
-    raised_at: float | None
-    decision: Decision | None
-
-
-class Report(TypedDict):
-    report_id: int
-    case_id: str
-    source: str
-    body: str
-    status: Literal["draft"] | ReviewStatus
-    created_at: float
-    reviewed_at: float | None
+    messages: list[dict]
+    legs: list[Leg]
 
 
 def transfers(claim: Claim) -> list[tuple[str, str]]:
-    """Case transfer references: (pair, stable token hex)."""
+    """Case transfer references: (pair, token hex)."""
     refs = ((claim.in_pair, claim.in_token), (claim.out_pair, claim.out_token))
     return [(pair, token) for pair, token in refs if token]
-
-
-def banks(claim: Claim) -> set[str]:
-    return {claim.signer, *claim.in_pair.split("-"), *claim.out_pair.split("-")} - {""}
 
 
 def neighbours(signer: str, in_pair: str, out_pair: str) -> tuple[str, str]:
@@ -119,77 +107,110 @@ CLAIM_COLUMNS = ", ".join(f.name for f in fields(Claim))
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS cases (
     case_id TEXT PRIMARY KEY,
-    created_at REAL NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    tier INTEGER NOT NULL,
     state TEXT NOT NULL,
-    merged_into TEXT
+    merged_into TEXT,
+    bookmarked INTEGER NOT NULL DEFAULT 0,
+    reviewed INTEGER NOT NULL DEFAULT 0
 );
--- Each transfer belongs to one case: a result sharing any transfer joins that case.
+-- Each transfer belongs to one case: a message sharing any transfer joins that case.
+-- ref is "tok:<pair>:<token hex>" for a cross-bank transfer, "pay:<payment_id>" for
+-- this bank's own payments.
 CREATE TABLE IF NOT EXISTS transfers (
-    key_version TEXT NOT NULL,
-    pair TEXT NOT NULL,
-    token TEXT NOT NULL,
+    ref TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL
+);
+-- The idempotent consumer: one row per node message key, upgraded in place.
+CREATE TABLE IF NOT EXISTS messages (
+    key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    detail TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    PRIMARY KEY (key_version, pair, token)
+    received_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS claims (
     {", ".join(f.name + (" INTEGER" if f.name == "truncated" else " TEXT") + " NOT NULL" for f in fields(Claim))},
     case_id TEXT NOT NULL,
+    received_at DOUBLE PRECISION NOT NULL,
+    position INTEGER NOT NULL,
     PRIMARY KEY (signer, key_version, in_pair, in_token, out_pair, out_token)
 );
--- Every delivered result, once per (digest, sending bank, state).
-CREATE TABLE IF NOT EXISTS results (
-    chain_digest TEXT NOT NULL,
-    sender TEXT NOT NULL,
-    state TEXT NOT NULL,
+-- Protected: this bank's own legs, snapshotted once, because the token index expires
+-- in days while cases are kept. Never sent to a peer.
+CREATE TABLE IF NOT EXISTS own_legs (
+    payment_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    account TEXT NOT NULL,
+    amount DOUBLE PRECISION NOT NULL,
+    pair TEXT NOT NULL,
+    token TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    received_at REAL NOT NULL,
-    PRIMARY KEY (chain_digest, sender, state)
+    PRIMARY KEY (payment_id, direction)
 );
--- The durable uniqueness rule: at most one alert per case at this bank.
+-- At most one alert per case at this bank.
 CREATE TABLE IF NOT EXISTS alerts (
     case_id TEXT PRIMARY KEY,
-    raised_at REAL NOT NULL
+    raised_at DOUBLE PRECISION NOT NULL
 );
--- Transactional outbox for reports to the mock intake, written with the decision and
--- delivered at least once. event_id is "report:<case_id>:<decision>", so the intake
--- deduplicates redeliveries on it while a later report decision still sends.
-CREATE TABLE IF NOT EXISTS outbox (
-    event_id TEXT PRIMARY KEY,
-    case_id TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_at REAL NOT NULL,
-    acked_at REAL,
-    error TEXT
-);
--- Analyst decisions, append-only. No free text, so nobody can type an account in.
-CREATE TABLE IF NOT EXISTS decisions (
-    case_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    decided_at REAL NOT NULL
-);
--- The analyst's inbox, written in the same transaction as the alert or merge it
--- announces; event_id "<kind>:<case_id>" keeps each one to a single row.
+-- The analyst's inbox, written in the same transaction as the alert or merge.
 CREATE TABLE IF NOT EXISTS notifications (
     event_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
--- Generated reports: drafts until an analyst approves or rejects them.
-CREATE TABLE IF NOT EXISTS reports (
-    report_id INTEGER PRIMARY KEY,
-    case_id TEXT NOT NULL,
-    source TEXT NOT NULL,
-    body TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    created_at REAL NOT NULL,
-    reviewed_at REAL
+    created_at DOUBLE PRECISION NOT NULL
 );
 """
 
 
-def notify(db: sqlite3.Connection, kind: str, case_id: str) -> None:
+class Db:
+    """One connection; SQL uses ? placeholders for both SQLite and PostgreSQL."""
+
+    def __init__(self, url: str) -> None:
+        self.pg = url.startswith("postgres")
+        if self.pg:
+            import psycopg
+            from psycopg.rows import dict_row
+
+            self.conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+            self.conn.execute(SCHEMA)
+        else:
+            self.conn = sqlite3.connect(url, isolation_level=None, timeout=30)
+            self.conn.row_factory = lambda cur, row: {
+                d[0]: v for d, v in zip(cur.description, row, strict=True)
+            }
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.executescript(SCHEMA)
+
+    def execute(self, sql: str, args=()):
+        return self.conn.execute(sql.replace("?", "%s") if self.pg else sql, args)
+
+    def executemany(self, sql: str, rows) -> None:
+        if self.pg:
+            self.conn.cursor().executemany(sql.replace("?", "%s"), rows)
+        else:
+            self.conn.executemany(sql, rows)
+
+    @contextmanager
+    def write(self):
+        """One transaction; concurrent writers queue, so a merge sees every case."""
+        if self.pg:
+            with self.conn.transaction():
+                self.conn.execute("LOCK TABLE cases IN SHARE ROW EXCLUSIVE MODE")
+                yield self
+            return
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield self
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
+        self.conn.execute("COMMIT")
+
+
+def notify(db: Db, kind: str, case_id: str) -> None:
     """Add one inbox entry per (kind, case); repeats are ignored."""
     db.execute(
         "INSERT INTO notifications VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
@@ -197,123 +218,111 @@ def notify(db: sqlite3.Connection, kind: str, case_id: str) -> None:
     )
 
 
-class SqliteCaseStore:
-    def __init__(
-        self, path: str | os.PathLike[str], rule: AlertRule | None = None
-    ) -> None:
-        self.rule = rule or AlertRule()
-        self.db = sqlite3.connect(path, isolation_level=None, timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript(SCHEMA)
+class CaseStore:
+    def __init__(self, url: str) -> None:
+        self.db = Db(str(url))
 
-    @contextmanager
-    def _write(self):
-        # IMMEDIATE takes the write lock before the reads, so concurrent writers serialise.
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.db
-        except BaseException:
-            self.db.execute("ROLLBACK")
-            raise
-        self.db.execute("COMMIT")
-
-    def record(self, result: pb.ChainResult) -> str:
-        """Store a verified ChainResult; return its case ID."""
-        if result.state not in STATES:
-            raise ValueError(f"Not a deliverable result: {pb.State.Name(result.state)}")
-        claims = [Claim.from_pb(c) for c in result.claims]
-        keys = sorted(
-            {(claim.key_version, *key) for claim in claims for key in transfers(claim)}
+    def record(self, m: Message) -> str:
+        """Store one node message and return its case ID."""
+        refs = sorted(
+            {f"tok:{pair}:{token}" for c in m.claims for pair, token in transfers(c)}
+            | {f"tok:{leg['pair']}:{leg['token']}" for leg in m.legs if leg["token"]}
+            | {f"pay:{leg['payment_id']}" for leg in m.legs}
         )
-        with self._write() as db:
-            case_id = self._case_for(db, keys, result.chain_digest)
-            row = (result.chain_digest, result.sender, STATES[result.state], case_id)
+        now = time.time()
+        with self.db.write() as db:
+            case_id = self._case_for(db, refs, m.key, now)
             db.execute(
-                "INSERT INTO results VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (*row, time.time()),
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key)"
+                " DO UPDATE SET tier = excluded.tier, state = excluded.state,"
+                " detail = excluded.detail, case_id = excluded.case_id",
+                (m.key, m.kind, m.tier, m.state, m.detail, case_id, now),
             )
             db.executemany(
-                "INSERT INTO transfers VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                [(*key, case_id) for key in keys],
+                "INSERT INTO transfers VALUES (?, ?) ON CONFLICT DO NOTHING",
+                [(ref, case_id) for ref in refs],
             )
             db.executemany(
-                f"INSERT INTO claims ({CLAIM_COLUMNS}, case_id)"
-                f" VALUES ({', '.join('?' * (len(fields(Claim)) + 1))})"
+                f"INSERT INTO claims ({CLAIM_COLUMNS}, case_id, received_at, position)"
+                f" VALUES ({', '.join('?' * (len(fields(Claim)) + 3))})"
                 " ON CONFLICT DO NOTHING",
-                [astuple(claim) + (case_id,) for claim in claims],
+                [
+                    (
+                        *(int(v) if type(v) is bool else v for v in astuple(c)),
+                        case_id,
+                        now,
+                        i,
+                    )
+                    for i, c in enumerate(m.claims)
+                ],
             )
-            confirmed = db.execute(
-                "SELECT 1 FROM results WHERE case_id = ? AND state = 'confirmed'",
-                (case_id,),
-            ).fetchone()
-            state = "confirmed" if confirmed else "partial"
-            db.execute("UPDATE cases SET state = ? WHERE case_id = ?", (state, case_id))
-            count = db.execute(
-                "SELECT COUNT(*) FROM transfers WHERE case_id = ?", (case_id,)
-            ).fetchone()[0]
-            involved = {
-                bank
-                for row in db.execute(
-                    f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ?", (case_id,)
-                )
-                for bank in banks(Claim(*row))
-            }
-            if (
-                state == "confirmed"
-                and count >= self.rule.min_transfers
-                and len(involved) >= self.rule.min_banks
-            ):
+            db.executemany(
+                "INSERT INTO own_legs VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [(*(leg[f] for f in Leg.__annotations__), case_id) for leg in m.legs],
+            )
+            rows = db.execute(
+                "SELECT tier, state FROM messages WHERE case_id = ?", (case_id,)
+            ).fetchall()
+            tier = max(r["tier"] for r in rows)
+            state = min((r["state"] for r in rows), key=STATES.index)
+            db.execute(
+                "UPDATE cases SET tier = ?, state = ? WHERE case_id = ?",
+                (tier, state, case_id),
+            )
+            if tier == 2:
                 raised = db.execute(
                     "INSERT INTO alerts VALUES (?, ?) ON CONFLICT DO NOTHING",
-                    (case_id, time.time()),
+                    (case_id, now),
                 )
                 if raised.rowcount:
                     notify(db, "alert", case_id)
         return case_id
 
-    def _case_for(self, db, keys, digest):
-        """Find the case these transfers join, merging cases a result bridges.
+    def _case_for(self, db: Db, refs: list[str], key: str, now: float) -> str:
+        """Find the case these transfers join, merging cases a message bridges.
 
-        A new case takes Role 3's chain_digest as its ID. Overlapping partial results
-        (e.g. over-limit v1, cut at different windows) share transfers, so they join
-        one case even though their digests differ.
+        A new case takes the message key (Role 3's chain_digest for a chain) as its ID.
+        Chains longer than the hop limit arrive as overlapping partial results with
+        different digests; they share transfers, so they join one case.
         """
         found = [
-            row[0]
+            row["case_id"]
             for row in db.execute(
-                "SELECT DISTINCT case_id FROM transfers JOIN cases USING (case_id)"
-                f" WHERE (key_version, pair, token) IN ({', '.join('(?, ?, ?)' for _ in keys)})"
-                " ORDER BY created_at, case_id",
-                [part for key in keys for part in key],
+                "SELECT DISTINCT t.case_id, c.created_at FROM transfers t"
+                " JOIN cases c ON c.case_id = t.case_id"
+                f" WHERE t.ref IN ({', '.join('?' * len(refs))})"
+                " ORDER BY c.created_at, t.case_id",
+                refs,
             )
         ]
         if not found:
             db.execute(
-                "INSERT INTO cases (case_id, created_at, state) VALUES (?, ?, ?)",
-                (digest, time.time(), "partial"),
+                "INSERT INTO cases (case_id, created_at, tier, state) VALUES (?, ?, 0, 'hit')",
+                (key, now),
             )
-            return digest
-        # Merge into the oldest case: evidence, analyst history and pending reports move
-        # with it, and it keeps its alert or adopts a merged one.
+            return key
+        # Merge into the oldest case: evidence and flags move to it, and it keeps its
+        # alert or adopts a merged one.
         case_id = found[0]
         for old in found[1:]:
-            # Tell the analyst an alerted case now lives on under the surviving case.
             if db.execute("SELECT 1 FROM alerts WHERE case_id = ?", (old,)).fetchone():
                 notify(db, "merged", old)
-            for table in ("transfers", "claims", "results", "decisions", "reports"):
+            for table in ("transfers", "messages", "claims", "own_legs"):
                 db.execute(
                     f"UPDATE {table} SET case_id = ? WHERE case_id = ?", (case_id, old)
                 )
             db.execute(
-                "UPDATE outbox SET case_id = ? WHERE case_id = ? AND acked_at IS NULL",
-                (case_id, old),
-            )
-            db.execute(
-                "UPDATE OR IGNORE alerts SET case_id = ? WHERE case_id = ?",
+                "INSERT INTO alerts SELECT ?, raised_at FROM alerts WHERE case_id = ?"
+                " ON CONFLICT DO NOTHING",
                 (case_id, old),
             )
             db.execute("DELETE FROM alerts WHERE case_id = ?", (old,))
+            db.execute(
+                "UPDATE cases SET bookmarked = (SELECT MAX(bookmarked) FROM cases"
+                " WHERE case_id IN (?, ?)), reviewed = (SELECT MAX(reviewed) FROM cases"
+                " WHERE case_id IN (?, ?)) WHERE case_id = ?",
+                (case_id, old, case_id, old, case_id),
+            )
             db.execute(
                 "UPDATE cases SET merged_into = ? WHERE case_id = ?", (case_id, old)
             )
@@ -327,120 +336,47 @@ class SqliteCaseStore:
         if row is None:
             return None
         claims = self.db.execute(
-            f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ? ORDER BY rowid",
+            f"SELECT {CLAIM_COLUMNS} FROM claims WHERE case_id = ?"
+            " ORDER BY received_at, position",
             (case_id,),
         )
-        results = self.db.execute(
-            "SELECT chain_digest, sender, state FROM results WHERE case_id = ?"
-            " ORDER BY received_at, chain_digest, sender",
+        messages = self.db.execute(
+            "SELECT key, kind, tier, state, detail, received_at FROM messages"
+            " WHERE case_id = ? ORDER BY received_at, key",
             (case_id,),
         )
-        decisions = self.db.execute(
-            "SELECT action, decided_at FROM decisions WHERE case_id = ?"
-            " ORDER BY decided_at",
+        legs = self.db.execute(
+            "SELECT payment_id, direction, account, amount, pair, token FROM own_legs"
+            " WHERE case_id = ? ORDER BY payment_id, direction",
             (case_id,),
         )
         return Case(
-            **row,
-            claims=[Claim(*claim) for claim in claims],
-            results=[tuple(result) for result in results],
-            decisions=[tuple(decision) for decision in decisions],
+            **row | {f: bool(row[f]) for f in ("bookmarked", "reviewed")},
+            claims=[Claim(**c) for c in claims],
+            messages=messages.fetchall(),
+            legs=legs.fetchall(),
         )
 
-    def decide(self, case_id: str, action: Decision) -> None:
-        if action not in DECISIONS:
-            raise ValueError(f"Unknown decision: {action}")
-        with self._write() as db:
-            now = time.time()
-            decision = db.execute(
-                "INSERT INTO decisions VALUES (?, ?, ?)", (case_id, action, now)
-            ).lastrowid
-            if action == "report":
-                db.execute(
-                    "INSERT INTO outbox (event_id, case_id, created_at, next_at)"
-                    " VALUES (?, ?, ?, ?)",
-                    (f"report:{case_id}:{decision}", case_id, now, now),
-                )
-
-    def save_report(self, case_id: str, source: str, body: str) -> int:
-        """Store a generated report as a draft pending analyst review; return its ID."""
-        return self.db.execute(
-            "INSERT INTO reports (case_id, source, body, created_at) VALUES (?, ?, ?, ?)"
-            " RETURNING report_id",
-            (case_id, source, body, time.time()),
-        ).fetchone()[0]
-
-    def review_report(self, case_id: str, report_id: int, status: ReviewStatus) -> bool:
-        """Approve or reject a case's draft once; False if it isn't a pending draft."""
-        if status not in get_args(ReviewStatus):
-            raise ValueError(f"Unknown review: {status}")
-        return bool(
-            self.db.execute(
-                "UPDATE reports SET status = ?, reviewed_at = ?"
-                " WHERE case_id = ? AND report_id = ? AND status = 'draft'",
-                (status, time.time(), case_id, report_id),
-            ).rowcount
+    def flag(self, case_id: str, flag: Literal["bookmarked", "reviewed"]) -> None:
+        """Toggle the analyst's bookmark or reviewed flag."""
+        assert flag in ("bookmarked", "reviewed")
+        self.db.execute(
+            f"UPDATE cases SET {flag} = 1 - {flag} WHERE case_id = ?", (case_id,)
         )
-
-    def reports(self, case_id: str) -> list[Report]:
-        return [
-            Report(**row)
-            for row in self.db.execute(
-                "SELECT * FROM reports WHERE case_id = ? ORDER BY report_id DESC",
-                (case_id,),
-            )
-        ]
 
     def notifications(self) -> list[dict]:
+        return self.db.execute(
+            "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+
+    def cases(self) -> list[dict]:
+        """Live cases with a tier, alerts first, then oldest first."""
         return [
-            dict(row)
+            row | {f: bool(row[f]) for f in ("bookmarked", "reviewed")}
             for row in self.db.execute(
-                "SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20"
-            )
-        ]
-
-    def due(self, now: float, max_attempts: int) -> list[dict]:
-        """Unacked reports whose next attempt is due, oldest first."""
-        return [
-            dict(row)
-            for row in self.db.execute(
-                "SELECT event_id, case_id, attempts FROM outbox"
-                " WHERE acked_at IS NULL AND attempts < ? AND next_at <= ?"
-                " ORDER BY created_at, event_id",
-                (max_attempts, now),
-            )
-        ]
-
-    def ack(self, event_id: str) -> None:
-        self.db.execute(
-            "UPDATE outbox SET acked_at = ?, error = NULL WHERE event_id = ?",
-            (time.time(), event_id),
-        )
-
-    def failed(self, event_id: str, at: float, error: str) -> None:
-        self.db.execute(
-            "UPDATE outbox SET attempts = attempts + 1, next_at = ?, error = ?"
-            " WHERE event_id = ?",
-            (at, error, event_id),
-        )
-
-    def outbox(self, pending: bool = False) -> list[dict]:
-        where = " WHERE acked_at IS NULL" if pending else ""
-        return [
-            dict(row)
-            for row in self.db.execute(
-                f"SELECT * FROM outbox{where} ORDER BY created_at"
-            )
-        ]
-
-    def cases(self) -> list[CaseSummary]:
-        """Live (unmerged) cases, oldest first; raised_at is None until alerted."""
-        return [
-            CaseSummary(**row)
-            for row in self.db.execute(
-                "SELECT case_id, created_at, state, raised_at, (SELECT action FROM"
-                " decisions d WHERE d.case_id = cases.case_id ORDER BY decided_at DESC"
-                " LIMIT 1) AS decision FROM cases LEFT JOIN alerts USING (case_id)"
-                " WHERE merged_into IS NULL ORDER BY created_at, case_id"
+                "SELECT case_id, created_at, tier, state, bookmarked, reviewed, raised_at"
+                " FROM cases LEFT JOIN alerts USING (case_id)"
+                " WHERE merged_into IS NULL AND tier > 0"
+                " ORDER BY tier DESC, created_at, case_id"
             )
         ]

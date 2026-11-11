@@ -1,0 +1,135 @@
+[
+  {
+    "key": "0a063329aa7b066b8c35c8b360a7e766dd0316f735e8d4e46cfab048378768cf",
+    "kind": "chain",
+    "result": {
+      "chain_digest": "0a063329aa7b066b8c35c8b360a7e766dd0316f735e8d4e46cfab048378768cf",
+      "sender": "B",
+      "state": "CONFIRMED",
+      "claims": [
+        {
+          "signer": "A",
+          "recipient": "B",
+          "query_id": "60593a25-b5ba-4769-9e00-7c71e96c3249",
+          "key_version": "k1",
+          "in_ref": {},
+          "out_ref": {
+            "pair": "A-B",
+            "token": "065uC4dMUwOis5mLhUog4A=="
+          },
+          "signature": "2dwVe2XEM1356If+PWNE0jq19aQwnK7hKuci99K/jlFhfhLwGSNEqurdz/iJu/JCaRqAUbGpqsvzbaUh5u8OBw==",
+          "signing_key_version": "k1"
+        },
+        {
+          "signer": "B",
+          "recipient": "B",
+          "query_id": "ecdbe7274f9781782b7b1540d24e519c388e793157c25cc4bb32c905fb074b71",
+          "key_version": "k1",
+          "in_ref": {
+            "pair": "A-B",
+            "token": "065uC4dMUwOis5mLhUog4A=="
+          },
+          "out_ref": {
+            "pair": "B-C",
+            "token": "J4uB4jPdTxGepPl4UAEEuQ=="
+          },
+          "signature": "aqBhOThwvkBsa9wt3d7aoqNpwMcCJ+yMycbIDyzyakVo8fhPqmR9YDIAiBpPVFBsBvm9xMjFNC0dCRcZrYc3DQ==",
+          "signing_key_version": "k1"
+        },
+        {
+          "signer": "C",
+          "recipient": "B",
+          "query_id": "d77e5076-0f75-4de2-8676-497ff680cfec",
+          "key_version": "k1",
+          "in_ref": {
+            "pair": "B-C",
+            "token": "J4uB4jPdTxGepPl4UAEEuQ=="
+          },
+          "out_ref": {},
+          "signature": "qylPRQmde/CEAKvzssZYtBUknTeW1deqxHLSkB4RxqBgN4SDPd913vbKKy0D5Sch6tnpYBZfobO0Ltg1kynaCQ==",
+          "signing_key_version": "k1"
+        }
+      ]
+    },
+    "legs": [
+      {
+        "payment_id": "p06",
+        "direction": "in",
+        "account": "B-m1",
+        "amount": 10000.0,
+        "pair": "A-B",
+        "token": "d3ae6e0b874c5303a2b3998b854a20e0"
+      },
+      {
+        "payment_id": "p07",
+        "direction": "out",
+        "account": "B-m1",
+        "amount": 9500.0,
+        "pair": "B-C",
+        "token": "278b81e233dd4f119ea4f978500104b9"
+      }
+    ]
+  },
+  {
+    "key": "ecdbe7274f9781782b7b1540d24e519c388e793157c25cc4bb32c905fb074b71",
+    "kind": "pending",
+    "waiting_for": [
+      "C"
+    ],
+    "legs": [
+      {
+        "payment_id": "p06",
+        "direction": "in",
+        "account": "B-m1",
+        "amount": 10000.0,
+        "pair": "A-B",
+        "token": "d3ae6e0b874c5303a2b3998b854a20e0"
+      },
+      {
+        "payment_id": "p07",
+        "direction": "out",
+        "account": "B-m1",
+        "amount": 9500.0,
+        "pair": "B-C",
+        "token": "278b81e233dd4f119ea4f978500104b9"
+      }
+    ]
+  },
+  {
+    "key": "499dcb6187276580f7673e4e0eda89429628c0f3bcaec3908d895a1f3f14ccb8",
+    "kind": "hit",
+    "rule": "new_payee",
+    "legs": [
+      {
+        "payment_id": "p07",
+        "direction": "out",
+        "account": "B-m1",
+        "amount": 9500.0,
+        "pair": "B-C",
+        "token": "278b81e233dd4f119ea4f978500104b9"
+      }
+    ]
+  },
+  {
+    "key": "7136b40cbab016042fc448a28e27dc3674df66a20325422fd16e9be9a6643b71",
+    "kind": "local",
+    "legs": [
+      {
+        "payment_id": "p02",
+        "direction": "out",
+        "account": "B-bob",
+        "amount": 45.5,
+        "pair": "",
+        "token": ""
+      },
+      {
+        "payment_id": "p02",
+        "direction": "in",
+        "account": "B-carol",
+        "amount": 45.5,
+        "pair": "",
+        "token": ""
+      }
+    ]
+  }
+]
