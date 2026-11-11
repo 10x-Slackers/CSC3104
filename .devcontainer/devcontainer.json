@@ -1,7 +1,13 @@
 {
 	"name": "CSC3104 Cloud and Distributed Computing Project",
-	"image": "ghcr.io/commit2main/universal:latest"
-	// "features": {}
+	"image": "ghcr.io/commit2main/universal:latest",
+	"features": {
+		"ghcr.io/devcontainers/features/aws-cli:1": {},
+		"ghcr.io/devcontainers/features/terraform:1": {
+			"tflint": "none",
+			"terragrunt": "none"
+		}
+	}
 	// "forwardPorts": []
 	// "customizations": {}
 	// "remoteUser": "root"
