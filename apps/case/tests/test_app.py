@@ -35,7 +35,9 @@ def test_index_lists_alerts_first_then_low_priority(client):
         (1, "confirmed"),  # m1, only B's rule
     ]
     page = client.get("/").text
-    assert page.count("<td>ALERT") == 2 and page.count("<td>low priority") == 1
+    assert page.count("class='tag t2'>ALERT") == 2
+    assert page.count("class='tag t1'>low priority") == 1
+    assert "<meta http-equiv=refresh content=5>" in page  # refreshes during a replay
 
 
 def test_detail_shows_own_legs_and_other_banks_tokens(client):
@@ -125,3 +127,12 @@ def test_nothing_from_other_banks_in_pages_api_or_logs(client, capfd):
     assert '"event": "stored"' in out  # messages were logged, so the check is not empty
     assert leaks("\n".join(texts) + out + err, foreign("B")) == set()
     assert leaks(out + err) == set()  # logs carry no customer data at all
+
+
+def test_pending_case_shows_which_bank_it_waits_for(url):
+    client = TestClient(create_app(url, "B", keys))
+    client.post("/results", json=SAMPLE[1])  # pending, waiting for C
+    assert "Waiting for bank C" in client.get("/").text
+    assert "Waiting for bank C" in client.get(f"/cases/{SAMPLE[1]['key']}").text
+    client.post("/results", json=chain(m1(), "B"))  # the retry confirms
+    assert "Waiting for bank" not in client.get("/").text

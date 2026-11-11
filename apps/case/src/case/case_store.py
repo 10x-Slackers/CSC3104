@@ -374,7 +374,9 @@ class CaseStore:
         return [
             row | {f: bool(row[f]) for f in ("bookmarked", "reviewed")}
             for row in self.db.execute(
-                "SELECT case_id, created_at, tier, state, bookmarked, reviewed, raised_at"
+                "SELECT case_id, created_at, tier, state, bookmarked, reviewed, raised_at,"
+                " (SELECT MAX(detail) FROM messages m WHERE m.case_id = cases.case_id"
+                " AND m.kind = 'pending') AS waiting"
                 " FROM cases LEFT JOIN alerts USING (case_id)"
                 " WHERE merged_into IS NULL AND tier > 0"
                 " ORDER BY tier DESC, created_at, case_id"

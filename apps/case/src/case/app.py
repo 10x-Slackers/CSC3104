@@ -32,8 +32,21 @@ STYLE = """<style>
 body { font: 15px system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem }
 table { border-collapse: collapse; width: 100% } td, th { border-bottom: 1px solid #ccc;
 padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color: #666 }
-form { display: inline }
+form { display: inline } .tag { padding: 0 .4rem; border-radius: 3px; font-size: 13px }
+.t2 { background: #c62828; color: #fff; font-weight: 600 } .t1 { background: #eee; color: #555 }
+.wait { background: #fff3cd; color: #7a5b00 }
 </style>"""
+
+
+def tier(t: int) -> str:
+    """Alerts in red, low priority in grey."""
+    return f"<span class='tag t{t}'>{TIERS.get(t, 'no tier')}</span>"
+
+
+def state(c: dict) -> str:
+    if c["state"] == "pending" and c.get("waiting"):
+        return f"<span class='tag wait'>Waiting for bank {escape(c['waiting'])}</span>"
+    return escape(c["state"])
 
 
 def short(token: str) -> str:
@@ -48,9 +61,9 @@ def when(timestamp: float | None) -> str:
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def page(bank: str, title: str, body: str) -> HTMLResponse:
+def page(bank: str, title: str, body: str, head: str = "") -> HTMLResponse:
     return HTMLResponse(
-        f"<!doctype html><title>{escape(title)}</title>{STYLE}"
+        f"<!doctype html><title>{escape(title)}</title>{head}{STYLE}"
         f"<p class=muted><a href='/'>Bank {escape(bank)} cases</a></p>{body}"
     )
 
@@ -86,7 +99,7 @@ def create_app(
     def index():
         rows = "".join(
             f"<tr><td><a href='/cases/{c['case_id']}'><code>{c['case_id'][:16]}</code></a>"
-            f"<td>{TIERS[c['tier']]}<td>{escape(c['state'])}<td>{when(c['raised_at'])}"
+            f"<td>{tier(c['tier'])}<td>{state(c)}<td>{when(c['raised_at'])}"
             f"<td>{'★' if c['bookmarked'] else ''}<td>{'✓' if c['reviewed'] else ''}"
             for c in store().cases()
         )
@@ -102,6 +115,7 @@ def create_app(
             "<table><tr><th>Case<th>Tier<th>State<th>Alert<th>Bookmark<th>Reviewed</tr>"
             f"{rows or '<tr><td colspan=6>No cases yet'}</table>"
             f"<h2>Alerts</h2><ul>{inbox or '<li>None'}</ul>",
+            "<meta http-equiv=refresh content=5>",  # new cases appear during a replay
         )
 
     @app.get("/cases/{case_id}", response_class=HTMLResponse)
@@ -126,6 +140,9 @@ def create_app(
             for m in case["messages"]
         )
         draft = summarize(case)
+        waiting = next(
+            (m["detail"] for m in case["messages"] if m["kind"] == "pending"), ""
+        )
         merged = case["merged_into"]
         toggles = "".join(
             f"<form method=post action='/cases/{escape(case_id)}/{flag}'>"
@@ -144,7 +161,7 @@ def create_app(
                 if merged
                 else ""
             )
-            + f"<p>{TIERS.get(case['tier'], 'no tier')} · State: <b>{escape(case['state'])}</b>"
+            + f"<p>{tier(case['tier'])} · State: <b>{state(case | {'waiting': waiting})}</b>"
             f" · Alert: {when(case['raised_at'])}<p>{toggles}"
             "<p class=muted>A rule flags suspicion, not proven laundering. Each link is "
             "confirmed by the signing bank; a signature doesn't prove its records are true."
