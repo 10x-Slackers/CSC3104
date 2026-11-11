@@ -8,7 +8,7 @@ Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPoli
 > - **State through Valkey:** the chart already runs the target topology, but nothing uses Valkey yet. The scorer keeps state in memory and takes CLI flags until its `ValkeyState` and env-var config land (Cindy); the node starts empty and finds no chains until it reads Valkey (Zane).
 > - **New components:** the summary service as a container locally; the ingestor and summary service as Lambda function URLs (`AWS_IAM`) on EKS; replay as a Job in a `replay` namespace.
 > - **Hardening:** per-path and per-store NetworkPolicies; PSS `warn: restricted`; k3s secrets encryption.
-> - **EKS:** scripted cluster, VPC CNI network policy, Pod Identity, ElastiCache, a Kafka listener for the ingestor Lambda.
+> - **EKS:** the account is an AWS Academy Learner Lab, which can't create IAM roles, so everything runs as the pre-made `LabRole` and Pod Identity is dropped. Pods take `LabRole` from the node's metadata service instead (hop limit 2), which the bank namespaces' default-deny policy blocks. `deploy/terraform` creates the cluster with VPC CNI network policy and the ECR repositories; the workloads bucket is created once with `aws s3 mb` (the lab blocks a read that Terraform's bucket resource needs) and survives teardown; still to come: installing the chart, ElastiCache, the Lambdas and a Kafka listener for the ingestor Lambda.
 
 Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monitoring and the evaluation harness.
 
@@ -17,12 +17,12 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | | Local | Cloud |
 | --- | --- | --- |
 | Cluster | k3d | Amazon EKS |
-| Setup command | `deploy/k3d-up.sh` | TODO |
+| Setup command | `deploy/k3d-up.sh` | AWS resources only so far: `terraform -chdir=deploy/terraform apply` with the Learner Lab's credentials in `~/.aws/credentials`, then the `kubeconfig_command` output. Installing the chart: TODO |
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | TODO |
-| Teardown | `k3d cluster delete csc3104` | TODO |
+| Teardown | `k3d cluster delete csc3104` | `terraform -chdir=deploy/terraform destroy` |
 | Check | `deploy/check-netpol.sh` | TODO |
 | Tested on | 4 CPU, 8 GB VM, Docker 29: setup about 3 min, about 3.8 GB memory in use with no bank services yet | |
-| Cost controls | — | TODO: budget and shutdown routine |
+| Cost controls | — | The Learner Lab's fixed credit; it stops the nodes when a session ends, but the control plane keeps billing, so destroy after each run |
 
 ## Platform components
 
@@ -35,8 +35,8 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | Serverless | AWS Lambda function URLs, `AuthType: AWS_IAM` | **pending work:** Ingestor and summary service; plain containers in the namespace on k3d |
 | Certificates | cert-manager v1.21.2 | k3d: lab CA `ClusterIssuer/bank-ca`; Secret `privacy-node-tls` per bank: DNS SAN `privacy-node.bank-<x>.svc`, URI SAN `spiffe://csc3104/bank/<X>/privacy-node`, server and client auth; mounted at `/tls` without `subPath` |
 | Keys | `privacy_node.demo.prepare_demo_keys` (lab only) | `k3d-up.sh` runs it in the privacy-node image on every setup, replacing `deploy/charts/bank/keys/` (gitignored). Each release packs only `keys/<bank>/` into Secret `bank-keys`, mounted at `/keys` without `subPath`, so the node's 10 s `active.json` re-read sees a `helm upgrade` |
-| CNI enforcing NetworkPolicy | k3d: k3s's built-in network policy controller. EKS: TODO | k3d: enforced; `check-netpol.sh` passes |
-| Registry | ECR | TODO |
+| CNI enforcing NetworkPolicy | k3d: k3s's built-in network policy controller. EKS: the VPC CNI add-on with `enableNetworkPolicy` | k3d: enforced; `check-netpol.sh` passes. EKS: enabled in Terraform, not yet probed |
+| Registry | ECR | One repository per image, `<account>.dkr.ecr.us-east-1.amazonaws.com/csc3104/<package>` (Terraform output `registry`); pushing images: TODO |
 | Images | One pattern, the root `Dockerfile`: `docker build --build-arg APP=<package> -t csc3104/<package>:$(git rev-parse --short HEAD) .`; only the architectures needed. Non-root (UID 65532), and the image holds no state: durable data goes to PostgreSQL. The entrypoint is `tini`, so SIGTERM reaches the app; the chart sets each container's `args` (`[python, -m, <package>.<module>]`), never `command`, which would replace `tini`. The ingestor Lambda ships as a zip instead | Dockerfile done; `k3d-up.sh` builds the ingestor, scorer, privacy-node and dataset (replay) images and imports them with `k3d image import`. ECR **pending work** |
 | CI | GitHub Actions | TODO |
 | Monitoring | No dedicated stack: k3s metrics-server (`kubectl top`), `kubectl get hpa` for KEDA lag and replicas, `kafka-consumer-groups.sh` for lag, CloudWatch for Lambda, JSON logs to stdout | TODO |
@@ -88,5 +88,5 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 ## Open
 
-- [ ] EKS setup, teardown and check commands; budget and shutdown routine (Isaac).
+- [ ] EKS setup and check commands (Isaac); the AWS resources and teardown are in `deploy/terraform`.
 - [x] How the replay Job gets its workload: mounted (agreed on [#29](https://github.com/10x-Slackers/CSC3104/issues/29), 9 Nov).
