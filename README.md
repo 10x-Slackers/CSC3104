@@ -18,6 +18,7 @@ uv sync --all-packages --locked                                   # install ever
 uv run pytest                                                     # run all tests
 uv run python -m scorer.baseline apps/dataset/fixtures/tiny B   # local-only detections for Bank B
 deploy/k3d-up.sh && deploy/check-netpol.sh                        # local cluster, then policy check
+cp -r apps/dataset/fixtures/tiny apps/dataset/out/ && deploy/replay.sh tiny   # replay a workload from apps/dataset/out into the cluster
 ```
 
 - See each contract in `docs/contracts/` for app-specific commands.

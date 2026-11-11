@@ -57,3 +57,18 @@ spec:
           podSelector:
             matchLabels: {app: privacy-node}
       ports: [{protocol: TCP, port: 50051}]
+---
+# Replay Job (replay namespace) -> this bank's ingestor, HTTP port only (docs/contracts/deployment.md).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: replay-to-ingestor
+spec:
+  podSelector:
+    matchLabels: {app: ingestor}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: replay}
+      ports: [{protocol: TCP, port: 8080}]

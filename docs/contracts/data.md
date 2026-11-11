@@ -158,7 +158,7 @@ uv run python -m dataset.replay apps/dataset/out/slice-6h --url A=<url> --url B=
 - **Responses:** after a `200` the sender moves on. A `5xx`, `429` or network error resends the same batch, with full jitter from 1 s doubling to 30 s, until it succeeds. A `400` stops replay with exit status 1.
 - **Logs:** one JSON line per POST, e.g. `{"ts": 1793868103.47, "service": "replay", "bank": "B", "msg_id": "replay-B-000001", "status": 200, "attempt": 0, "ms": 2.5, "payments": 1, "queued": 0}`, plus the reply when it isn't a `200`, and a last line such as `{"service": "replay", "payments": 18, "seconds": 1.7}`.
 - **Measured:** all of `altman-small` at `--speed 0` (700,510 payments, 1,156,694 deliveries to banks) took about 26 s against ingestors that reply at once, using 31 MB of memory. All of `altman-medium` (4,509,233 payments) took 173 s and 29 MB: replay reads the files line by line, so its memory doesn't grow with the workload. At the default `--speed 60`, `altman-medium` takes about 11 hours, since its events run from 1 to 28 Sep.
-- **pending work:** on k3d it runs as a Job in its own `replay` namespace, sending to each bank's `ingestor` Service ([#29](https://github.com/10x-Slackers/CSC3104/issues/29)); on EKS it sends HTTPS to the function URLs and signs each request with SigV4, service `lambda`. Today it speaks plain HTTP.
+- **In the cluster:** on k3d, `deploy/replay.sh <workload> [flags]` runs it as a Job in its own `replay` namespace, reading the mounted `apps/dataset/out/<workload>` and sending to each bank's `ingestor` Service ([deployment.md](deployment.md#per-service-settings)). **pending work:** on EKS it sends HTTPS to the function URLs and signs each request with SigV4, service `lambda`. Today it speaks plain HTTP.
 
 ## Ingestor
 
@@ -238,7 +238,7 @@ Also part of: [Kafka transaction event](streaming.md#interfaces).
 
 ## Open
 
-- [ ] How the Kubernetes replay Job gets its workload: baked into the image or mounted (Macarius, with Isaac). Proposed on [#29](https://github.com/10x-Slackers/CSC3104/issues/29): mounted, so one image and one Job spec serve every workload, from `slice-6h` (24 MB) to `altman-medium-bt` (413 MB).
+- [x] How the Kubernetes replay Job gets its workload: mounted (agreed on [#29](https://github.com/10x-Slackers/CSC3104/issues/29), 9 Nov), so one image and one Job spec serve every workload, from `slice-6h` (24 MB) to `altman-medium-bt` (413 MB).
 - [x] Rule parameters and hop limit: `HOP_LIMIT = 4` stays (in the privacy node); planted chains are hand-written in the fixture, and the detection rules are in [streaming.md](streaming.md#detection-rule).
 - [x] How replay output reaches the ingestor: HTTP POST of pacs.008 batches ([Ingestor](#ingestor)).
 - [x] How Altman-labelled transfers are scored: offline, per attempt and pattern type ([evaluation.md](../evaluation.md#offline-detection-evaluation)).
