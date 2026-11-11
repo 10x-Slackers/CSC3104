@@ -94,7 +94,7 @@ def test_signed_cut_flags_remain_booleans_in_store_api_and_report(evidence, tmp_
     assert all(type(claim.truncated) is bool for claim in case["claims"])
     response = client.get(f"/api/cases/{result.chain_digest}").json()
     assert [claim["truncated"] for claim in response["claims"]] == [False, True, False]
-    assert [link["truncated"] for link in report_input(case)["links"]] == [
+    assert [link["truncated"] for link in report_input(case, "B")["links"]] == [
         False,
         True,
         False,
