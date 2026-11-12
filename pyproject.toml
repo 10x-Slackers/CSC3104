@@ -10,6 +10,7 @@ members = ["apps/*"]
 
 [dependency-groups]
 dev = [
+    "fakeredis>=2.40",
     "grpcio-tools>=1.84.1",
     "httpx2>=2.13.1,<2.14",
     "pre-commit>=4",
