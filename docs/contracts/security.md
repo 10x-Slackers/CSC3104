@@ -209,8 +209,10 @@ issued bank URI/DNS SANs, usages and mounts; demonstrate valid peer handshakes,
 wrong-bank/sender rejection and certificate renewal without restart. Local TLS tests
 are application evidence; they do not establish chart correctness or CNI enforcement.
 
-For any future summary Function URL, Isaac/Jia Rui must use AWS_IAM, scoped Pod Identity
-permissions and SigV4 requests, without public grants or static AWS credentials.
+For any future summary Function URL, Isaac/Jia Rui must use AWS_IAM and SigV4 requests,
+without public grants or static AWS credentials. The Learner Lab account can't create IAM
+roles, so the permissions are the shared `LabRole` taken from the node's metadata service,
+not a scoped Pod Identity role; the report states this as a limitation.
 No Lambda deployment/client or cloud acceptance evidence is supplied here.
 
 ## Interfaces and verification

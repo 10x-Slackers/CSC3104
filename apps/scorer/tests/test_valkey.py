@@ -9,9 +9,9 @@ import pytest
 from confluent_kafka import KafkaError, KafkaException
 
 from ingestor import read_events
-from scorer.score import Scorer
+from scorer.score import BANK_TRANSFERS, Scorer
 from scorer.state import TTL, MemoryState, ValkeyState
-from scorer.stream import key_index, reload_keys, serve, settings
+from scorer.stream import key_index, serve, settings
 from security import generate_agreement_key, private_key_pem, public_key_pem
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -74,11 +74,10 @@ def test_valkey_and_memory_agree_on_the_tiny_fixture(db, bank):
         == (expected["hits"])
     )
     for e in events:
-        for state in (live.state, offline.state):
-            assert state.links(e["payment_id"], e["direction"]) == (
-                offline.state.links(e["payment_id"], e["direction"])
-            )
-        if e["payment_format"] in ("GIRO", "MEPS+"):
+        assert live.state.links(e["payment_id"], e["direction"]) == (
+            offline.state.links(e["payment_id"], e["direction"])
+        )
+        if e["payment_format"] in BANK_TRANSFERS:
             entry = offline.state.payment(e["payment_id"], e["direction"])
             assert live.state.payment(e["payment_id"], e["direction"]) == {
                 k: str(v) for k, v in entry.items()
@@ -134,46 +133,34 @@ def test_fired_is_only_the_last_event(db):
     assert scorer.fired == []
 
 
-def add_keys(root, version, banks="AB"):
-    """Fresh X25519 keys for one version at each bank, each trusting the others."""
+def make_key_dir(root, banks="AB", version="k1"):
     keys = {bank: generate_agreement_key() for bank in banks}
     for bank, key in keys.items():
-        mine = root / bank / "private" / "x25519" / f"{version}.pem"
-        mine.parent.mkdir(parents=True, exist_ok=True)
-        mine.write_bytes(private_key_pem(key))
+        base = root / bank
+        (base / "private" / "x25519").mkdir(parents=True)
+        (base / "private" / "x25519" / f"{version}.pem").write_bytes(
+            private_key_pem(key)
+        )
+        # like the k3d keys, each bank also trusts its own public key
         for peer, peer_key in keys.items():
-            if peer != bank:
-                path = root / bank / "trusted" / "x25519" / peer / f"{version}.pem"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(public_key_pem(peer_key.public_key()))
-
-
-def activate(root, active, query, peers=None, banks="AB"):
-    for bank in banks:
-        ready = {peer: peers or active for peer in banks if peer != bank}
-        config = {"active_versions": active, "query_version": query}
-        config["peer_versions"] = ready
-        (root / bank / "active.json").write_text(json.dumps(config))
-
-
-def make_key_dir(root):
-    add_keys(root, "k1")
-    activate(root, ["k1"], "k1")
+            path = base / "trusted" / "x25519" / peer / f"{version}.pem"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(public_key_pem(peer_key.public_key()))
+        active = {"active_versions": [version], "query_version": version}
+        (base / "active.json").write_text(json.dumps(active))
     return root
-
-
-def tokens_at_a(root, e):
-    """The tokens Bank A derives for a payment between A and B, from its own side."""
-    return key_index("A", root)[0].tokens(e | {"bank": "A", "counterparty_bank": "B"})
 
 
 def test_tokens_in_valkey_are_found_by_the_other_bank(db, tmp_path):
     make_key_dir(tmp_path)
-    index, _ = key_index("B", tmp_path)
-    scorer = Scorer("B", state=ValkeyState(db), token_index=index)
+    scorer = Scorer("B", state=ValkeyState(db), token_index=key_index("B", tmp_path))
     p06 = sample_events()[2]  # A-m0 -> B-m1
     scorer.process(p06)
-    token = tokens_at_a(tmp_path, p06)["k1"].hex()
+    # Bank A derives the same token for p06 from its own side
+    token = key_index("A", tmp_path).tokens(
+        p06 | {"bank": "A", "counterparty_bank": "B"}
+    )
+    token = token["k1"].hex()
     assert scorer.state.lookup("A-B", "k1", token) == {
         "payment_id": "p06",
         "direction": "in",
@@ -182,69 +169,6 @@ def test_tokens_in_valkey_are_found_by_the_other_bank(db, tmp_path):
     }
     assert scorer.state.payment("p06", "in")["token"] == token
     assert MemoryState().lookup("A-B", "k1", token) is None
-
-
-@pytest.mark.parametrize("live", [False, True])
-def test_key_rotation_without_a_restart(db, tmp_path, live):
-    make_key_dir(tmp_path)
-    index, applied = key_index("B", tmp_path)
-    state = ValkeyState(db) if live else MemoryState()
-    scorer = Scorer("B", state=state, token_index=index)
-    p06 = sample_events()[2]
-    scorer.process(p06)
-    assert reload_keys(scorer, tmp_path, applied) is applied  # nothing changed
-
-    # 1. introduce k2 at both banks: p06 is backfilled, queries stay on k1
-    add_keys(tmp_path, "k2")
-    activate(tmp_path, ["k1", "k2"], "k1")
-    applied = reload_keys(scorer, tmp_path, applied)
-    at_a = tokens_at_a(tmp_path, p06)
-    for version in ("k1", "k2"):
-        found = state.lookup("A-B", version, at_a[version].hex())
-        assert found["payment_id"] == "p06"
-    assert state.payment("p06", "in")["token"] == at_a["k1"].hex()
-
-    # 2. switch queries to k2
-    activate(tmp_path, ["k1", "k2"], "k2")
-    applied = reload_keys(scorer, tmp_path, applied)
-    assert state.payment("p06", "in")["token"] == at_a["k2"].hex()
-
-    # 3. retire k1: new payments get k2 tokens only
-    activate(tmp_path, ["k2"], "k2")
-    reload_keys(scorer, tmp_path, applied)
-    assert index.active_versions == ("k2",)
-    new = p06 | {"payment_id": "p08", "event_time": "2022-09-05T10:00:00Z"}
-    scorer.process(new)
-    at_a = tokens_at_a(tmp_path, new)
-    assert set(at_a) == {"k2"}
-    assert state.lookup("A-B", "k2", at_a["k2"].hex())["payment_id"] == "p08"
-
-
-def test_a_bad_reload_keeps_the_old_keys(db, tmp_path):
-    make_key_dir(tmp_path)
-    index, applied = key_index("B", tmp_path)
-    scorer = Scorer("B", state=ValkeyState(db), token_index=index)
-    activate(tmp_path, ["k1", "k2"], "k1")  # k2 listed before its files exist
-    with pytest.raises(FileNotFoundError):
-        reload_keys(scorer, tmp_path, applied)
-    add_keys(tmp_path, "k2")
-    activate(tmp_path, ["k1", "k2"], "k2", peers=["k1"])  # A doesn't have k2 yet
-    with pytest.raises(ValueError, match="not ready"):
-        reload_keys(scorer, tmp_path, applied)
-    assert (index.active_versions, index.key_version) == (("k1",), "k1")
-    assert db.dbsize() == 0
-
-
-def test_serve_reloads_between_events_and_survives_a_bad_reload(db):
-    stop = threading.Event()
-    consumer = Mock()
-    consumer.poll.side_effect = stopping(stop, None, None)
-    reload = Mock(side_effect=[ValueError("half-written active.json"), None, None])
-    output = io.StringIO()
-    serve(consumer, Scorer("B", state=ValkeyState(db)), stop, output, reload, 0)
-    assert reload.call_count >= 2
-    [error] = [json.loads(x) for x in output.getvalue().splitlines()]
-    assert error["level"] == "error" and "half-written" in error["error"]
 
 
 def message(record):
@@ -330,6 +254,14 @@ def test_settings_come_from_the_environment(monkeypatch):
     )
     assert (args.valkey_url, args.key_dir) == ("valkey://valkey:6379", "/keys")
     assert settings(["A", "--group", "rebuild-1"]).group == "rebuild-1"
+
+
+def test_key_file_flags_override_key_dir_from_the_environment(monkeypatch):
+    monkeypatch.setenv("KEY_DIR", "/keys")
+    flags = ["--key-version", "k1", "--x25519-private", "/k/B.pem"]
+    args = settings(["B", *flags, "--peer-public-key", "A", "/k/A.pem"])
+    assert (args.key_dir, args.key_version) == (None, "k1")
+    assert settings(["B"]).key_dir == "/keys"
 
 
 @pytest.mark.parametrize(

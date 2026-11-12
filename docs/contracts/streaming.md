@@ -7,6 +7,7 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
 > - **Node reads Valkey:** the scorer writes its state to Valkey; the privacy node still runs its own scorer in-process until it reads Valkey instead (Zane; [Search handoff](#search-handoff)).
+> - **Key rotation:** the scorer reads `active.json` once at start; re-reading it every 10 s and backfilling `tok:` for a new version is not built (Cindy).
 > - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
@@ -52,16 +53,6 @@ Valkey; replicas share no mutable state because each account belongs to one part
 The consumer prefetches at most 16 MiB (`queued.max.messages.kbytes`). A wrongly routed
 record or a fatal Kafka error stops the scorer without storing that offset. SIGTERM
 and SIGINT stop it between events; closing the consumer commits the stored offsets.
-
-With `KEY_DIR`, the scorer re-reads `<KEY_DIR>/<bank>/active.json` every 10 s between
-events and follows the rotation steps in [security.md](security.md#versions-rotation-and-reload):
-a newly listed version is introduced and backfilled, so every `pay:` entry with another
-bank gets a `tok:` key under it; the query version (the `pay:` entry's `token`)
-switches only once every peer lists it; a version no longer listed retires, and its
-`tok:` keys expire with the TTL. Every check runs before the index changes, so a
-missing key file or a half-written `active.json` is logged as an error and the old
-keys stay in use. Each replica backfills every `pay:` entry; the writes are the same, so
-that is wasted work rather than a conflict.
 
 Each event that writes a link or a hit logs one JSON line to stdout, for latency:
 `{"ts": 1793500001.2, "service": "scorer", "bank": "B", "payment_id": "p07", "kafka_ts": 1793500000.123, "links": [["p06", "p07"]], "hits": ["chain", "new_payee"]}`.
@@ -125,30 +116,26 @@ it is not an approved peer payload.
 
 ## Token index
 
-Optional `TokenIndex` population runs on cross-bank events before
-scoring, including unflagged and scorer-too-late events. It uses the original
-`payment_id` and actual `counterparty_bank` with Role 4's `canonical_pair`,
-`derive_token` and `load_pairwise_keys`; same-bank events are skipped. See
-[security.md](security.md) for the token and secret-file contract.
+The live scorer writes a token for every cross-bank bank transfer it sees, flagged or
+not, and late or repeated ones too: a `tok:<pair>:<version>:<token>` entry for every
+active key version, and the query version's token in the payment's `pay:` entry
+([Valkey layout](#valkey-layout-draft-cindy--zane)). Same-bank events get no token.
+Tokens come from Role 4's `TokenIndex.tokens()` (`canonical_pair`, `derive_token`,
+pair keys from X25519 files); see [security.md](security.md) for the token and
+key-file contract. A peer looks a token up with `lookup(pair, version, token)`, and
+lookup never crosses versions. The entries stay in this bank's Valkey; Role 3 must not
+send them as peer responses.
 
-Enable with `--key-version k1 --x25519-private PATH` and repeated
-`--peer-public-key PEER PATH` options on `uv run python -m scorer.stream BANK`.
-Omitting those key options keeps scorer-only operation. The private PEM belongs
-only to this bank; peer public PEMs are authenticated provisioning inputs.
-`AgreementFiles(private_key, peer_public_keys)` configures `TokenIndex`.
-During rotation, introduce fresh k2 material at both banks, backfill retained refs,
-index new events under both versions, gate the query switch on trusted readiness,
-and retire k1 after old work drains. Lookup never crosses token versions; see
-[security.md](security.md) for the API and mounted key layout.
+Keys come from `KEY_DIR` (or `--key-dir`): `<KEY_DIR>/<bank>/active.json` and the
+X25519 files in the security.md layout; the bank's own public key under `trusted/` is
+skipped. The older flags `--key-version`, `--x25519-private` and repeated
+`--peer-public-key PEER PATH` load one version from explicit files, and override
+`KEY_DIR`. Without either, no tokens are written. The scorer reads `active.json` once
+at start (**pending work**: re-reading it for a rotation without a restart, #46).
 
-The in-memory index maps `(canonical bank pair, key version, token)` to unique
-local `(payment_id, direction, account)` references. `lookup(pair, version, token)`
-returns those references in deterministic order and rejects unrelated pairs.
-Duplicate replay adds no duplicate references. The index and lookup results stay
-bank-local; Role 3 must not send them as peer responses. There is currently no
-expiry, and the default size is unlimited. **pending work:** in Valkey, the index TTL is the one in [Valkey layout](#valkey-layout-draft-cindy--zane). Optional `--max-token-references` stops processing at capacity without
-evicting references or committing the failed event. Duplicate references remain
-acceptable at capacity. This is a fail-stop resource bound, not an expiry policy.
+The privacy node's in-process path still keeps its own in-memory `TokenIndex`
+(`add()`/`lookup()` with references, `--max-token-references` as a fail-stop bound);
+that goes once the node reads Valkey.
 
 ## Search handoff
 
@@ -193,7 +180,7 @@ The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`); **pending work
 - **Concurrency:** every key is per account or per payment, so partition ownership gives each one writer and replicas share no mutable state.
 - **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, within `HOP_LIMIT`. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
 - **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `last:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
-- **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group.
+- **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group into an empty Valkey. Over existing state a fresh group rewrites nothing, because every event is found in its window or is more than 72 h behind the watermark.
 
 Sample: [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json), Bank B's keys after the four records in [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json). `p06` → `p07` on `B-m1` (S$10,000 in from A, S$9,500 out to C 15 minutes later) fires fast and chain (one link, one `chain` hit) and new payee. The intra-bank GIRO payment `p02` (B-bob → B-carol) writes window, `pay:` and `last:` keys but no hit. Tokens are placeholders, since they depend on each bank's X25519 keys; `test_valkey.py` checks real tokens with generated keys, and the rest of the sample key by key.
 

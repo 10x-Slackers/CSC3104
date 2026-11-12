@@ -6,7 +6,6 @@ them in the bank's Valkey (live). Both have the same methods.
 
 import json
 from collections import defaultdict
-from collections.abc import Iterator
 from typing import TypedDict
 
 from valkey import Valkey
@@ -81,10 +80,6 @@ class MemoryState:
     def lookup(self, pair: str, version: str, token: str) -> dict | None:
         return self.tok.get((pair, version, token))
 
-    def payments(self) -> Iterator[tuple[str, Direction, dict]]:
-        for (payment_id, direction), entry in list(self.pay.items()):
-            yield payment_id, direction, entry
-
     def hits(self) -> list[Hit]:
         return list(self.hit.values())
 
@@ -93,14 +88,21 @@ class ValkeyState:
     """Reads go straight to Valkey. Writes wait in a MULTI pipeline until commit(), so a
     crash leaves an event either fully written or not at all. Each account has one
     writer (the replica that owns its partition), so reads see only committed events.
+
+    The client needs decode_responses=True. payment() and lookup() return every field
+    as a string (amount "45.5"), where MemoryState keeps the original types.
     """
 
-    def __init__(self, client: Valkey, ttl: int = TTL) -> None:
-        self.db, self.ttl = client, ttl
+    def __init__(self, client: Valkey) -> None:
+        self.db = client
         self.tx = client.pipeline(transaction=True)
 
     def _expire(self, key: str) -> None:
-        self.tx.expire(key, self.ttl)
+        self.tx.expire(key, TTL)
+
+    def _put(self, key: str, entry: dict) -> None:
+        self.tx.hset(key, mapping=entry)
+        self._expire(key)
 
     # written by the scorer
 
@@ -122,14 +124,10 @@ class ValkeyState:
         self.tx.zremrangebyscore(f"win:{account}", "-inf", f"({before}")
 
     def put_payment(self, payment_id: str, direction: Direction, entry: dict) -> None:
-        key = f"pay:{payment_id}:{direction}"
-        self.tx.hset(key, mapping={k: str(v) for k, v in entry.items()})
-        self._expire(key)
+        self._put(f"pay:{payment_id}:{direction}", entry)
 
     def put_token(self, pair: str, version: str, token: str, entry: dict) -> None:
-        key = f"tok:{pair}:{version}:{token}"
-        self.tx.hset(key, mapping={k: str(v) for k, v in entry.items()})
-        self._expire(key)
+        self._put(f"tok:{pair}:{version}:{token}", entry)
 
     def add_link(self, incoming: str, outgoing: str) -> None:
         for key, member in (
@@ -179,11 +177,6 @@ class ValkeyState:
 
     def lookup(self, pair: str, version: str, token: str) -> dict | None:
         return self.db.hgetall(f"tok:{pair}:{version}:{token}") or None
-
-    def payments(self) -> Iterator[tuple[str, Direction, dict]]:
-        for key in self.db.scan_iter("pay:*"):
-            payment_id, direction = key.removeprefix("pay:").rsplit(":", 1)
-            yield payment_id, direction, self.db.hgetall(key)
 
     def hits(self) -> list[Hit]:
         hits = []
