@@ -1,7 +1,8 @@
 """Bank-local rules, independent of Kafka. Amounts are compared as decimals.
 
 Events are trusted as they are: the ingestor validates them before Kafka. The rules
-are in streaming.md and issue #27; they only look at bank transfers.
+are in streaming.md and issue #27; they only look at bank transfers. State goes to a
+MemoryState (offline) or a ValkeyState (live); both have the same methods.
 """
 
 import hashlib
@@ -12,12 +13,24 @@ from pathlib import Path
 from typing import TypedDict
 
 from ingestor import Event, read_events
-from scorer.state import MemoryState
+from scorer.state import MemoryState, ValkeyState
+from scorer.token_index import TokenIndex
+from security import canonical_pair
 
 BANK_TRANSFERS = ("GIRO", "MEPS+")
 CHAIN_RATIO = (Decimal("0.90"), Decimal("1.10"))
 CHAIN_WINDOW = 72 * 3600  # also the allowed lateness
 REPEAT_WINDOW = 24 * 3600
+# what the rules need from an older event in the window (win: members)
+WINDOW_FIELDS = (
+    "payment_id",
+    "direction",
+    "event_time",
+    "amount",
+    "payment_format",
+    "counterparty_bank",
+    "counterparty_account",
+)
 
 
 class Link(TypedDict):
@@ -51,6 +64,8 @@ class Scorer:
         max_ratio: str | float | Decimal = "0.98",
         min_delay: float = 60,
         window: float = 1800,
+        state: MemoryState | ValkeyState | None = None,
+        token_index: TokenIndex | None = None,
     ) -> None:
         if bank not in ("A", "B", "C"):
             raise ValueError("invalid bank")
@@ -62,9 +77,12 @@ class Scorer:
         if not 0 < self.min_ratio <= self.max_ratio or not 0 <= min_delay <= window:
             raise ValueError("invalid scoring thresholds")
         self.min_delay, self.window = min_delay, window
-        self.state = MemoryState()
+        self.state = MemoryState() if state is None else state
+        self.token_index = token_index
+        self.fired: list[str] = []  # rules hit by the last event, for the log line
 
     def hit(self, rule: str, account: str, *payments: str) -> None:
+        self.fired.append(rule)
         hit_id = digest(self.bank, rule, *payments)
         self.state.put_hit(
             {
@@ -76,14 +94,31 @@ class Scorer:
         )
 
     def process(self, e: Event) -> list[Link]:
+        """Score one event. Its state writes land together (one MULTI/EXEC in Valkey)."""
+        self.fired = []
+        links = self._score(e)
+        self.state.commit()
+        return links
+
+    def _score(self, e: Event) -> list[Link]:
         if e["payment_format"] not in BANK_TRANSFERS:
             return []
         account, now = e["account"], datetime.fromisoformat(e["event_time"]).timestamp()
-        self.state.put_payment(
-            e["payment_id"],
-            e["direction"],
-            {k: e[k] for k in ("account", "amount", "event_time", "counterparty_bank")},
-        )
+        entry = {
+            k: e[k] for k in ("account", "amount", "event_time", "counterparty_bank")
+        }
+        tokens = self.token_index.tokens(e) if self.token_index else {}
+        if tokens:
+            pair = "-".join(canonical_pair(self.bank, e["counterparty_bank"]))
+            for version, token in tokens.items():
+                self.state.put_token(
+                    pair,
+                    version,
+                    token.hex(),
+                    {k: e[k] for k in ("payment_id", "direction", "account", "amount")},
+                )
+            entry["token"] = tokens[self.token_index.key_version].hex()
+        self.state.put_payment(e["payment_id"], e["direction"], entry)
         events = self.state.window(account)
         key = (e["payment_id"], e["direction"])
         latest = max([now, *(ts for ts, _ in events.values())])
@@ -152,8 +187,9 @@ class Scorer:
                 flagged = True
             elif cross and last and last[1] and 0 <= now - last[0] <= REPEAT_WINDOW:
                 self.hit("quick_repeat", account, e["payment_id"])
-            self.state.set_last_paid(account, payee, now, flagged)
-        self.state.add_event(account, key, now, e)
+            if last is None or now >= last[0]:  # a late, older payment keeps the newer
+                self.state.set_last_paid(account, payee, now, flagged)
+        self.state.add_event(account, key, now, {k: e[k] for k in WINDOW_FIELDS})
         return links
 
 
