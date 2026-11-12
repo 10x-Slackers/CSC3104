@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Checks that the cluster enforces the bank NetworkPolicies. Run after k3d-up.sh.
+# Checks that the cluster enforces the bank NetworkPolicies. Run after k3d-up.sh or eks-up.sh.
 # Each "blocked" target is first shown open from its own namespace, so a missing service can't pass.
-# Probes wait 10 s: k3s applies a new pod's egress policy a few seconds after it starts.
+# Probes wait 10 s: k3s and the VPC CNI apply a new pod's egress policy a few seconds after it starts.
 set -uo pipefail
 
 probe() { # <namespace> <host:port> <expect: open|blocked>
@@ -46,4 +46,9 @@ probe replay ingestor.bank-c:8080 open
 probe bank-b ingestor.bank-b:8080 open
 probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
 probe default ingestor.bank-b:8080 blocked
+# EKS: pods could take LabRole from the node's metadata service; bank pods must not.
+if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
+  probe default 169.254.169.254:80 open
+  probe bank-a 169.254.169.254:80 blocked
+fi
 exit $failed

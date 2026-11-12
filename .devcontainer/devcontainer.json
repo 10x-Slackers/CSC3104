@@ -3,6 +3,9 @@
 	"image": "ghcr.io/commit2main/universal:latest",
 	"features": {
 		"ghcr.io/devcontainers/features/aws-cli:1": {},
+		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+			"minikube": "none"
+		},
 		"ghcr.io/devcontainers/features/terraform:1": {
 			"tflint": "none",
 			"terragrunt": "none"
