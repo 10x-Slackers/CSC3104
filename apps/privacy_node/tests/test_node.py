@@ -534,7 +534,7 @@ def test_bounded_delayed_peer_retry(banks, tmp_path, monkeypatch, arrives):
         bank.housekeeping()
 
 
-def test_replay_rebuilds_state_and_repeated_result_alerts_once(banks, tmp_path):
+def test_replay_rebuilds_state_and_repeated_result_makes_one_case(banks, tmp_path):
     nodes, _ = banks
     old = nodes["B"]
     path = tmp_path / "protocol.db"

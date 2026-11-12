@@ -7,7 +7,6 @@ from google.protobuf.json_format import MessageToDict
 from case.app import create_app
 from case.case_store import CaseStore
 from case.evidence import check_result
-from case.report import report_input
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.claims import chain_digest, claim_bytes
 from security import generate_signing_key, sign
@@ -83,7 +82,7 @@ def test_tokens_normalize_to_hex_at_case_storage_boundary(evidence, tmp_path):
     )
 
 
-def test_signed_cut_flags_remain_booleans_in_store_api_and_report(evidence, tmp_path):
+def test_signed_cut_flags_remain_booleans_in_store_and_api(evidence, tmp_path):
     result, keys, private = evidence
     result.claims[1].truncated = True
     result.claims[1].signature = sign(claim_bytes(result.claims[1]), private["B"])
@@ -94,8 +93,3 @@ def test_signed_cut_flags_remain_booleans_in_store_api_and_report(evidence, tmp_
     assert all(type(claim.truncated) is bool for claim in case["claims"])
     response = client.get(f"/api/cases/{result.chain_digest}").json()
     assert [claim["truncated"] for claim in response["claims"]] == [False, True, False]
-    assert [link["truncated"] for link in report_input(case, "B")["links"]] == [
-        False,
-        True,
-        False,
-    ]

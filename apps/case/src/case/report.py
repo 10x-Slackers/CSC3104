@@ -13,9 +13,9 @@ from case import log
 from case.case_store import Case
 
 CASE_FIELDS = ("case_id", "tier", "state", "raised_at", "merged_into")
-LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token", "key_version", "signing_key_version", "truncated")  # fmt: skip
+LINK_FIELDS = ("signer", "in_pair", "in_token", "out_pair", "out_token")
 LEG_FIELDS = ("payment_id", "direction", "account", "amount", "pair")
-MESSAGE_FIELDS = ("key", "kind", "state", "detail")
+MESSAGE_FIELDS = ("kind", "detail")
 
 
 def report_input(case: Case, bank: str) -> dict:
@@ -31,14 +31,16 @@ def report_input(case: Case, bank: str) -> dict:
     )
 
 
-def signed(url: str, body: bytes, headers: dict, region: str) -> dict:
-    """SigV4 headers for a Lambda function URL with AuthType AWS_IAM (EKS Pod Identity)."""
+def signed(url: str, body: bytes, headers: dict, region: str, credentials) -> dict:
+    """SigV4 headers for a Lambda function URL with AuthType AWS_IAM.
+
+    On EKS the credentials are `LabRole`'s, from the node's metadata service.
+    """
     from botocore.auth import SigV4Auth
     from botocore.awsrequest import AWSRequest
-    from botocore.session import Session
 
     request = AWSRequest("POST", url, data=body, headers=headers)
-    SigV4Auth(Session().get_credentials(), "lambda", region).add_auth(request)
+    SigV4Auth(credentials, "lambda", region).add_auth(request)
     return dict(request.headers)
 
 
@@ -46,6 +48,10 @@ def summarizer(
     url: str, bank: str, timeout: float = 2.0, region: str = ""
 ) -> Callable[[Case], str | None]:
     """Call the summary service; None is "no draft". region set means sign for AWS."""
+    if region:  # resolved once; botocore refreshes them when they expire
+        from botocore.session import Session
+
+        credentials = Session().get_credentials()
 
     def summarize(case: Case) -> str | None:
         if not url:
@@ -54,7 +60,7 @@ def summarizer(
         headers = {"Content-Type": "application/json"}
         try:
             if region:
-                headers = signed(url, body, headers, region)
+                headers = signed(url, body, headers, region, credentials)
             request = urllib.request.Request(url, body, headers)
             with urllib.request.urlopen(request, timeout=timeout) as reply:
                 return json.load(reply)["draft"]

@@ -96,9 +96,11 @@ def test_every_sample_message_kind_is_stored(store):
 def test_tier_1_case_is_promoted_by_a_tier_2_chain(store):
     hit = SAMPLE[2] | {"key": "new-payee-p11", "legs": [leg("B", "p11", "out")]}
     case_id = store.record(parse(hit, public_keys(), "B"))
+    store.flag(case_id, "reviewed")
     assert store.cases()[0]["tier"] == 1 and alerts(store) == 0
     assert store.record(message(o1(), "B")) == case_id  # o1 includes p11
     assert store.get(case_id)["tier"] == 2 and store.get(case_id)["raised_at"]
+    assert not store.get(case_id)["reviewed"]  # the alert needs a fresh look
     assert [n["kind"] for n in store.notifications()] == ["alert"]
 
 
@@ -131,15 +133,45 @@ def test_redelivery_is_stored_once(store):
     assert alerts(store) == 1
 
 
+def test_hit_and_internal_chain_can_share_a_key(store):
+    # One hit ID covers the same payments, so both messages land in one case.
+    hit = parse(SAMPLE[2], public_keys(), "B")
+    local = parse(
+        SAMPLE[3] | {"key": hit.key, "legs": SAMPLE[2]["legs"]}, public_keys(), "B"
+    )
+    assert store.record(hit) == store.record(local) == hit.key
+    messages = store.get(hit.key)["messages"]
+    assert sorted((m["kind"], m["detail"]) for m in messages) == [
+        ("hit", "new_payee"),
+        ("local", ""),
+    ]
+
+
+def test_cases_rank_by_rules_fired_before_age(store):
+    hit, local = (parse(m, public_keys(), "B") for m in SAMPLE[2:])
+    older = store.record(local)  # an internal chain: no hit rule, no backed chain
+    newer = store.record(hit)  # the new_payee rule fired
+    assert [c["case_id"] for c in store.cases()] == [newer, older]
+    assert [c["rules"] for c in store.cases()] == [1, 0]
+
+
+def test_late_partial_redelivery_does_not_downgrade(store):
+    case_id = store.record(message(o1()))
+    store.record(message(as_partial(o1())))
+    assert store.get(case_id)["state"] == "confirmed"
+
+
 def test_bridging_result_merges_into_oldest_case(store):
     first, second, whole = (unchecked(r, "A") for r in bridged())
     old, new = store.record(first), store.record(second)
     assert old != new
     store.flag(new, "bookmarked")
+    store.flag(old, "reviewed")
     assert store.record(whole) == old
     assert [c["case_id"] for c in store.cases()] == [old]
     assert store.get(new)["merged_into"] == old
     assert store.get(old)["bookmarked"]  # flags move with the evidence
+    assert not store.get(old)["reviewed"]  # ... but `new` was never reviewed
     assert len(store.get(old)["claims"]) == 6
     assert alerts(store) == 1
 

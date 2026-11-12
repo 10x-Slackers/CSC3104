@@ -44,7 +44,7 @@ def tier(t: int) -> str:
 
 
 def state(c: dict) -> str:
-    if c["state"] == "pending" and c.get("waiting"):
+    if c["state"] == "pending" and c["waiting"]:
         return f"<span class='tag wait'>Waiting for bank {escape(c['waiting'])}</span>"
     return escape(c["state"])
 
@@ -140,9 +140,6 @@ def create_app(
             for m in case["messages"]
         )
         draft = summarize(case)
-        waiting = next(
-            (m["detail"] for m in case["messages"] if m["kind"] == "pending"), ""
-        )
         merged = case["merged_into"]
         toggles = "".join(
             f"<form method=post action='/cases/{escape(case_id)}/{flag}'>"
@@ -161,7 +158,7 @@ def create_app(
                 if merged
                 else ""
             )
-            + f"<p>{tier(case['tier'])} · State: <b>{state(case | {'waiting': waiting})}</b>"
+            + f"<p>{tier(case['tier'])} · State: <b>{state(case)}</b>"
             f" · Alert: {when(case['raised_at'])}<p>{toggles}"
             "<p class=muted>A rule flags suspicion, not proven laundering. Each link is "
             "confirmed by the signing bank; a signature doesn't prove its records are true."

@@ -22,7 +22,7 @@ CASE = {
         {"payment_id": "p10", "direction": "in", "account": "B-o1", "amount": 7000.0, "pair": "A-B"},
         {"payment_id": "p11", "direction": "out", "account": "B-o1", "amount": 6650.0, "pair": "B-C"},
     ],
-    "messages": [{"key": "c0ffee", "kind": "chain", "state": "confirmed", "detail": "B"}],
+    "messages": [{"kind": "chain", "detail": "B"}],
 }  # fmt: skip
 
 
@@ -57,22 +57,36 @@ def test_low_priority_cases_say_why():
     one_rule = draft(
         tier=1, raised_at=None, links=CASE["links"][:2] + CASE["links"][3:]
     )
-    assert "Low priority: only bank B's rule links these payments." in one_rule
-    pending = [{"key": "s", "kind": "pending", "state": "pending", "detail": "C"}]
+    assert "Low priority: only bank B's rule links these payments along" in one_rule
+    pending = [{"kind": "pending", "detail": "C"}]
     waiting = draft(tier=1, state="pending", raised_at=None, links=[], messages=pending)
     assert "the search is still waiting for bank C to reply." in waiting
     assert "No other bank has confirmed anything yet." in waiting
-    hit = [{"key": "h", "kind": "hit", "state": "hit", "detail": "new_payee"}]
+    hit = [{"kind": "hit", "detail": "new_payee"}]
     assert "bank B's new payee rule flagged" in draft(
         tier=1, state="hit", raised_at=None, links=[], messages=hit
     )
-    local = [{"key": "l", "kind": "local", "state": "local", "detail": ""}]
+    local = [{"kind": "local", "detail": ""}]
     intra = [CASE["legs"][0] | {"pair": "", "direction": "out", "account": "B-bob"}]
     text = draft(
         tier=1, state="local", raised_at=None, links=[], messages=local, legs=intra
     )
-    assert "between its own accounts; no other bank is involved." in text
+    assert "between its own accounts, and no other bank is involved." in text
     assert "sent from B-bob to another account at this bank." in text
+
+
+def test_tier_1_names_this_banks_hit_alongside_another_banks_chain():
+    # At A: a new_payee hit on the transfer to B, then m1 (only B's rule links it).
+    links = [
+        {"signer": "A", "in_pair": "", "in_token": "", "out_pair": "A-B", "out_token": "aa"},
+        {"signer": "B", "in_pair": "A-B", "in_token": "aa", "out_pair": "B-C", "out_token": "bb"},
+    ]  # fmt: skip
+    hit = [{"kind": "hit", "detail": "new_payee"}]
+    text = draft(bank="A", tier=1, raised_at=None, links=links, messages=hit, legs=[])
+    assert (
+        "Low priority: bank A's new payee rule flagged these payments; only bank B's"
+        " rule links these payments along the chain" in text
+    )
 
 
 def test_partial_chain_says_it_may_continue():

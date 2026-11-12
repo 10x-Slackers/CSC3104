@@ -83,6 +83,7 @@ class Case(TypedDict):
     bookmarked: bool
     reviewed: bool
     raised_at: float | None
+    waiting: str | None
     claims: list[Claim]
     messages: list[dict]
     legs: list[Leg]
@@ -104,6 +105,11 @@ def neighbours(signer: str, in_pair: str, out_pair: str) -> tuple[str, str]:
 
 
 CLAIM_COLUMNS = ", ".join(f.name for f in fields(Claim))
+# The bank a pending case waits for, as a column of `cases`.
+WAITING = (
+    "(SELECT MAX(detail) FROM messages m WHERE m.case_id = cases.case_id"
+    " AND m.kind = 'pending') AS waiting"
+)
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS cases (
     case_id TEXT PRIMARY KEY,
@@ -121,15 +127,17 @@ CREATE TABLE IF NOT EXISTS transfers (
     ref TEXT PRIMARY KEY,
     case_id TEXT NOT NULL
 );
--- The idempotent consumer: one row per node message key, upgraded in place.
+-- The idempotent consumer: one row per node message, upgraded in place. A hit and a
+-- fully internal chain can share a hit ID, so the kind is part of the key.
 CREATE TABLE IF NOT EXISTS messages (
-    key TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
     kind TEXT NOT NULL,
     tier INTEGER NOT NULL,
     state TEXT NOT NULL,
     detail TEXT NOT NULL,
     case_id TEXT NOT NULL,
-    received_at DOUBLE PRECISION NOT NULL
+    received_at DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (key, kind)
 );
 CREATE TABLE IF NOT EXISTS claims (
     {", ".join(f.name + (" INTEGER" if f.name == "truncated" else " TEXT") + " NOT NULL" for f in fields(Claim))},
@@ -162,6 +170,10 @@ CREATE TABLE IF NOT EXISTS notifications (
     case_id TEXT NOT NULL,
     created_at DOUBLE PRECISION NOT NULL
 );
+CREATE INDEX IF NOT EXISTS transfers_case ON transfers (case_id);
+CREATE INDEX IF NOT EXISTS messages_case ON messages (case_id);
+CREATE INDEX IF NOT EXISTS claims_case ON claims (case_id);
+CREATE INDEX IF NOT EXISTS own_legs_case ON own_legs (case_id);
 """
 
 
@@ -233,9 +245,10 @@ class CaseStore:
         with self.db.write() as db:
             case_id = self._case_for(db, refs, m.key, now)
             db.execute(
-                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key)"
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key, kind)"
                 " DO UPDATE SET tier = excluded.tier, state = excluded.state,"
-                " detail = excluded.detail, case_id = excluded.case_id",
+                " detail = excluded.detail, case_id = excluded.case_id"
+                " WHERE messages.state = 'partial'",
                 (m.key, m.kind, m.tier, m.state, m.detail, case_id, now),
             )
             db.executemany(
@@ -266,8 +279,9 @@ class CaseStore:
             tier = max(r["tier"] for r in rows)
             state = min((r["state"] for r in rows), key=STATES.index)
             db.execute(
-                "UPDATE cases SET tier = ?, state = ? WHERE case_id = ?",
-                (tier, state, case_id),
+                "UPDATE cases SET reviewed = CASE WHEN tier < ? THEN 0 ELSE reviewed END,"
+                " tier = ?, state = ? WHERE case_id = ?",
+                (tier, tier, state, case_id),
             )
             if tier == 2:
                 raised = db.execute(
@@ -302,7 +316,7 @@ class CaseStore:
             )
             return key
         # Merge into the oldest case: evidence and flags move to it, and it keeps its
-        # alert or adopts a merged one.
+        # alert or adopts a merged one. It stays reviewed only if both cases were.
         case_id = found[0]
         for old in found[1:]:
             if db.execute("SELECT 1 FROM alerts WHERE case_id = ?", (old,)).fetchone():
@@ -319,7 +333,7 @@ class CaseStore:
             db.execute("DELETE FROM alerts WHERE case_id = ?", (old,))
             db.execute(
                 "UPDATE cases SET bookmarked = (SELECT MAX(bookmarked) FROM cases"
-                " WHERE case_id IN (?, ?)), reviewed = (SELECT MAX(reviewed) FROM cases"
+                " WHERE case_id IN (?, ?)), reviewed = (SELECT MIN(reviewed) FROM cases"
                 " WHERE case_id IN (?, ?)) WHERE case_id = ?",
                 (case_id, old, case_id, old, case_id),
             )
@@ -330,7 +344,8 @@ class CaseStore:
 
     def get(self, case_id: str) -> Case | None:
         row = self.db.execute(
-            "SELECT * FROM cases LEFT JOIN alerts USING (case_id) WHERE case_id = ?",
+            f"SELECT *, {WAITING} FROM cases LEFT JOIN alerts USING (case_id)"
+            " WHERE case_id = ?",
             (case_id,),
         ).fetchone()
         if row is None:
@@ -370,15 +385,25 @@ class CaseStore:
         ).fetchall()
 
     def cases(self) -> list[dict]:
-        """Live cases with a tier, alerts first, then oldest first."""
+        """Live cases with a tier: alerts oldest first, then Tier 1 by rules fired,
+        amount and age (Guidelines to MAS Notice 626 B-1-1).
+
+        Rules fired are this bank's distinct rules on the case: each hit rule, and its
+        chain rule if a chain it backs is there. Amount is the sum of its own legs.
+        """
         return [
             row | {f: bool(row[f]) for f in ("bookmarked", "reviewed")}
             for row in self.db.execute(
-                "SELECT case_id, created_at, tier, state, bookmarked, reviewed, raised_at,"
-                " (SELECT MAX(detail) FROM messages m WHERE m.case_id = cases.case_id"
-                " AND m.kind = 'pending') AS waiting"
+                "SELECT * FROM (SELECT case_id, created_at, tier, state, bookmarked,"
+                f" reviewed, raised_at, {WAITING},"
+                " (SELECT COUNT(DISTINCT CASE WHEN kind = 'hit' THEN detail"
+                " WHEN kind = 'chain' AND tier > 0 THEN 'chain' END)"
+                " FROM messages m WHERE m.case_id = cases.case_id) AS rules,"
+                " (SELECT COALESCE(SUM(amount), 0) FROM own_legs l"
+                " WHERE l.case_id = cases.case_id) AS amount"
                 " FROM cases LEFT JOIN alerts USING (case_id)"
-                " WHERE merged_into IS NULL AND tier > 0"
-                " ORDER BY tier DESC, created_at, case_id"
+                " WHERE merged_into IS NULL AND tier > 0) c"
+                " ORDER BY tier DESC, CASE WHEN tier = 1 THEN rules END DESC,"
+                " CASE WHEN tier = 1 THEN amount END DESC, created_at, case_id"
             )
         ]

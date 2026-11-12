@@ -76,7 +76,7 @@ Examples: `866bab90f796f92f,1,0,FAN-OUT,,,` is in attempt 0; `0c0c5b0ee33a7df5,1
 
 | Scenario | Shape | Expected result |
 | --- | --- | --- |
-| `mule_chain` | Each hop forwards 90–98 % within 1–30 min | Confirmed; one alert at each involved bank |
+| `mule_chain` | Each hop forwards 90–98 % within 1–30 min | Confirmed; only the middle bank's rule links it, so one Tier 1 case there and no case (or alert) at the other banks ([case.md](case.md#cases-and-alerts)); **draft**, Macarius to confirm |
 | `lookalike` | Same shape, but forwards only 20–50 % | No confirmed link; no alert |
 | `loop` | 3 hops, ending back at the first account (e.g. A→B→C→A) | Search terminates on visited tokens; one alert per bank, not two at the start bank |
 | `absent_link` | 3 hops with hop 1 removed | No match at the gap; hop 2 is never linked to hop 0 |

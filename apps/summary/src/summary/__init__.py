@@ -63,25 +63,26 @@ def headline(case: dict) -> str:
             f"Alert: the rules at banks {listed(backed)} each linked these payments,"
             f" forming one chain of {len(transfers)} transfers across banks {listed(banks)}."
         )
-    if links:
-        return (
-            f"Low priority: only bank {listed(backed or [bank])}'s rule links these"
-            " payments. The other banks on the chain hold the transfers, but their rules"
-            " didn't fire."
-        )
-    if pending:
-        return (
-            f"Low priority: bank {bank}'s rule flagged these payments, and the search is"
-            f" still waiting for bank {listed(pending)} to reply."
-        )
+    # Every reason a Tier 1 case is listed: this bank's own hits, then the chains.
+    reasons = []
     if hits:
-        return (
-            f"Low priority: bank {bank}'s {listed(hits)} rule flagged these payments."
+        reasons.append(f"bank {bank}'s {listed(hits)} rule flagged these payments")
+    if pending:
+        reasons.append(
+            f"bank {bank}'s rule flagged these payments, and the search is still"
+            f" waiting for bank {listed(pending)} to reply"
         )
-    return (
-        f"Low priority: bank {bank}'s rule linked these payments between its own"
-        " accounts; no other bank is involved."
-    )
+    if links:
+        reasons.append(
+            f"only bank {listed(backed or [bank])}'s rule links these payments along"
+            " the chain: the other banks hold the transfers, but their rules didn't fire"
+        )
+    if not reasons:
+        reasons.append(
+            f"bank {bank}'s rule linked these payments between its own accounts, and"
+            " no other bank is involved"
+        )
+    return f"Low priority: {'; '.join(reasons)}."
 
 
 STATES = {
