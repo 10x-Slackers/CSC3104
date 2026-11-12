@@ -9,7 +9,7 @@ import pytest
 from confluent_kafka import KafkaError, KafkaException
 
 from ingestor import read_events
-from scorer.score import Scorer
+from scorer.score import BANK_TRANSFERS, Scorer
 from scorer.state import TTL, MemoryState, ValkeyState
 from scorer.stream import key_index, serve, settings
 from security import generate_agreement_key, private_key_pem, public_key_pem
@@ -74,11 +74,10 @@ def test_valkey_and_memory_agree_on_the_tiny_fixture(db, bank):
         == (expected["hits"])
     )
     for e in events:
-        for state in (live.state, offline.state):
-            assert state.links(e["payment_id"], e["direction"]) == (
-                offline.state.links(e["payment_id"], e["direction"])
-            )
-        if e["payment_format"] in ("GIRO", "MEPS+"):
+        assert live.state.links(e["payment_id"], e["direction"]) == (
+            offline.state.links(e["payment_id"], e["direction"])
+        )
+        if e["payment_format"] in BANK_TRANSFERS:
             entry = offline.state.payment(e["payment_id"], e["direction"])
             assert live.state.payment(e["payment_id"], e["direction"]) == {
                 k: str(v) for k, v in entry.items()
@@ -142,11 +141,11 @@ def make_key_dir(root, banks="AB", version="k1"):
         (base / "private" / "x25519" / f"{version}.pem").write_bytes(
             private_key_pem(key)
         )
+        # like the k3d keys, each bank also trusts its own public key
         for peer, peer_key in keys.items():
-            if peer != bank:
-                path = base / "trusted" / "x25519" / peer / f"{version}.pem"
-                path.parent.mkdir(parents=True)
-                path.write_bytes(public_key_pem(peer_key.public_key()))
+            path = base / "trusted" / "x25519" / peer / f"{version}.pem"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(public_key_pem(peer_key.public_key()))
         active = {"active_versions": [version], "query_version": version}
         (base / "active.json").write_text(json.dumps(active))
     return root
@@ -255,6 +254,14 @@ def test_settings_come_from_the_environment(monkeypatch):
     )
     assert (args.valkey_url, args.key_dir) == ("valkey://valkey:6379", "/keys")
     assert settings(["A", "--group", "rebuild-1"]).group == "rebuild-1"
+
+
+def test_key_file_flags_override_key_dir_from_the_environment(monkeypatch):
+    monkeypatch.setenv("KEY_DIR", "/keys")
+    flags = ["--key-version", "k1", "--x25519-private", "/k/B.pem"]
+    args = settings(["B", *flags, "--peer-public-key", "A", "/k/A.pem"])
+    assert (args.key_dir, args.key_version) == (None, "k1")
+    assert settings(["B"]).key_dir == "/keys"
 
 
 @pytest.mark.parametrize(

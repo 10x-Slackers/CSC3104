@@ -170,7 +170,8 @@ def key_index(bank: str, key_dir: str | Path) -> TokenIndex:
             {
                 peer.name: peer / f"{version}.pem"
                 for peer in trusted.glob("*")
-                if (peer / f"{version}.pem").is_file()
+                # the k3d keys also trust this bank's own public key; it isn't a peer
+                if peer.name != bank and (peer / f"{version}.pem").is_file()
             },
         )
 
@@ -201,8 +202,8 @@ def settings(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--key-dir",
-        default=env.get("KEY_DIR"),
-        help="X25519 files and <bank>/active.json; without keys no tokens are written",
+        help="default: KEY_DIR. X25519 files and <bank>/active.json; "
+        "without keys no tokens are written",
     )
     # one key version from explicit files, as the chart passes them today
     parser.add_argument("--key-version")
@@ -225,6 +226,8 @@ def settings(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.key_dir and any(files):
         parser.error("use --key-dir or the key file flags, not both")
+    if not any(files):  # key file flags override KEY_DIR, like every other setting
+        args.key_dir = args.key_dir or env.get("KEY_DIR")
     args.group = args.group or f"scorer-{args.bank}"
     return args
 
