@@ -26,7 +26,9 @@ from ingestor import Event
 from scorer.score import Link, Scorer
 from scorer.state import ValkeyState
 from scorer.token_index import TokenIndex
-from security import AgreementFiles
+from security import AgreementFiles, canonical_pair, load_pairwise_keys
+
+RELOAD_SECONDS = 10  # how often active.json is checked, as the node does
 
 
 def topic(bank: str) -> str:
@@ -118,11 +120,29 @@ def serve(
     scorer: Scorer,
     stop: threading.Event,
     output: TextIO = sys.stdout,
+    reload: Callable[[], None] | None = None,
+    reload_every: float = RELOAD_SECONDS,
 ) -> None:
-    """Score each event, then store its offset. Stops between events when stop is set."""
+    """Score each event, then store its offset. Stops between events when stop is set.
+
+    reload() runs between events every reload_every seconds. If a key file or
+    active.json is missing or bad, the scorer logs it and carries on with the keys it has.
+    """
+    next_reload = time.monotonic() + reload_every
     try:
         consumer.subscribe([topic(scorer.bank)])
         while not stop.is_set():
+            if reload and time.monotonic() >= next_reload:
+                next_reload = time.monotonic() + reload_every
+                try:
+                    reload()
+                except (OSError, ValueError, KeyError) as error:
+                    log(
+                        output,
+                        scorer.bank,
+                        level="error",
+                        error=f"key reload: {error!r}",
+                    )
             message = consumer.poll(1)
             if message is None:
                 continue
@@ -158,28 +178,97 @@ def serve(
         consumer.close()  # also commits the stored offsets
 
 
-def key_index(bank: str, key_dir: str | Path) -> TokenIndex:
-    """Token keys for every version in <key_dir>/<bank>/active.json (security.md layout)."""
+def key_files(root: Path, bank: str, version: str) -> AgreementFiles:
+    """One version's X25519 files in a bank's key directory (security.md layout)."""
+    trusted = root / "trusted" / "x25519"
+    return AgreementFiles(
+        root / "private" / "x25519" / f"{version}.pem",
+        {
+            peer.name: peer / f"{version}.pem"
+            for peer in trusted.glob("*")
+            # the k3d keys also trust this bank's own public key; it isn't a peer
+            if peer.name != bank and (peer / f"{version}.pem").is_file()
+        },
+    )
+
+
+def key_index(bank: str, key_dir: str | Path) -> tuple[TokenIndex, dict]:
+    """Token keys for every version in <key_dir>/<bank>/active.json, and that config."""
     root = Path(key_dir) / bank
-    active = json.loads((root / "active.json").read_text())
+    config = json.loads((root / "active.json").read_text())
+    query = config["query_version"]
+    index = TokenIndex(bank, query, key_files(root, bank, query))
+    for version in config["active_versions"]:
+        if version != query:
+            index.introduce_version(version, key_files(root, bank, version))
+    return index, config
 
-    def files(version: str) -> AgreementFiles:
-        trusted = root / "trusted" / "x25519"
-        return AgreementFiles(
-            root / "private" / "x25519" / f"{version}.pem",
-            {
-                peer.name: peer / f"{version}.pem"
-                for peer in trusted.glob("*")
-                # the k3d keys also trust this bank's own public key; it isn't a peer
-                if peer.name != bank and (peer / f"{version}.pem").is_file()
-            },
+
+def reload_keys(scorer: Scorer, key_dir: str | Path, applied: dict) -> dict:
+    """Apply a changed active.json between events: the rotation steps in security.md.
+
+    New versions are introduced and backfilled from the pay: entries, the query
+    version switches once every peer has it, and versions no longer listed retire;
+    their tok: keys expire with the TTL. Anything invalid raises before the index
+    changes, so the old keys stay in use. Returns the config now applied.
+    """
+    root = Path(key_dir) / scorer.bank
+    config = json.loads((root / "active.json").read_text())
+    if config == applied:
+        return applied
+    index = scorer.token_index
+    keys = {}
+    for version in config["active_versions"]:
+        files = key_files(root, scorer.bank, version)
+        keys[version] = load_pairwise_keys(
+            scorer.bank, version, files.private_key, files.peer_public_keys
         )
+        index.check_version(version, keys[version])
+    index.check_query_version(config["query_version"], config["peer_versions"], keys)
 
-    index = TokenIndex(bank, active["query_version"], files(active["query_version"]))
-    for version in active["active_versions"]:
-        if version != active["query_version"]:
-            index.introduce_version(version, files(version))
-    return index
+    # compared with what was applied, not with the index, so a retry after a
+    # backfill that stopped part-way does the whole backfill again
+    added = [
+        v for v in config["active_versions"] if v not in applied["active_versions"]
+    ]
+    switched = config["query_version"] != applied["query_version"]
+    for version in added:
+        index.apply_version(version, keys[version])
+    index.set_query_version(config["query_version"], config["peer_versions"])
+    for version in set(index.active_versions) - set(config["active_versions"]):
+        index.retire_version(version)
+    if added or switched:  # retiring alone has nothing to write
+        backfill(scorer, added)
+    return config
+
+
+def backfill(scorer: Scorer, versions: list[str]) -> None:
+    """Write tok: for new versions, and point pay: at the query version's token."""
+    index, state = scorer.token_index, scorer.state
+    for n, (payment_id, direction, entry) in enumerate(state.payments(), 1):
+        if entry["counterparty_bank"] == scorer.bank:
+            continue  # intra-bank: no token
+        pair = canonical_pair(scorer.bank, entry["counterparty_bank"])
+        ref = {"payment_id": payment_id, "direction": direction}
+        ref |= {"account": entry["account"], "amount": entry["amount"]}
+        for version in versions:
+            token = index.token_for(payment_id, pair, version).hex()
+            state.put_token("-".join(pair), version, token, ref)
+        token = index.token_for(payment_id, pair, index.key_version).hex()
+        if entry.get("token") != token:
+            state.put_payment(payment_id, direction, entry | {"token": token})
+        if n % 1000 == 0:
+            state.commit()  # keep each MULTI/EXEC small
+    state.commit()
+
+
+def resume_rotation(scorer: Scorer, applied: dict) -> None:
+    """A pod that restarts mid-rotation may have stopped during a backfill: redo it.
+
+    Only while more than one version is active, so a normal start costs nothing.
+    """
+    if len(applied.get("active_versions", ())) > 1:
+        backfill(scorer, applied["active_versions"])
 
 
 def settings(argv: list[str] | None = None) -> argparse.Namespace:
@@ -234,9 +323,14 @@ def settings(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = settings()
-    token_index = None
+    token_index, reload, applied = None, None, {}
     if args.key_dir:
-        token_index = key_index(args.bank, args.key_dir)
+        token_index, applied = key_index(args.bank, args.key_dir)
+
+        def reload() -> None:
+            nonlocal applied
+            applied = reload_keys(scorer, args.key_dir, applied)
+
     elif args.key_version:
         token_index = TokenIndex(
             args.bank,
@@ -245,6 +339,7 @@ def main() -> None:
         )
     db = Valkey.from_url(args.valkey_url, decode_responses=True)
     scorer = Scorer(args.bank, state=ValkeyState(db), token_index=token_index)
+    resume_rotation(scorer, applied)
     consumer = Consumer(
         {
             "bootstrap.servers": args.bootstrap_servers,
@@ -259,7 +354,7 @@ def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     try:
-        serve(consumer, scorer, stop)
+        serve(consumer, scorer, stop, reload=reload)
     except Exception as error:
         log(sys.stdout, args.bank, level="error", error=repr(error))
         raise
