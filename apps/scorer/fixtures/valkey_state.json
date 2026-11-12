@@ -6,20 +6,20 @@
     "win:B-m1": {
       "type": "zset",
       "members": [
-        ["{\"amount\":10000.0,\"counterparty_account\":\"A-m0\",\"counterparty_bank\":\"A\",\"direction\":\"in\",\"payment_format\":\"MEPS+\",\"payment_id\":\"p06\"}", 1662369000],
-        ["{\"amount\":9500.0,\"counterparty_account\":\"C-m2\",\"counterparty_bank\":\"C\",\"direction\":\"out\",\"payment_format\":\"MEPS+\",\"payment_id\":\"p07\"}", 1662369900]
+        ["{\"amount\":10000.0,\"counterparty_account\":\"A-m0\",\"counterparty_bank\":\"A\",\"direction\":\"in\",\"event_time\":\"2022-09-05T09:10:00Z\",\"payment_format\":\"MEPS+\",\"payment_id\":\"p06\"}", 1662369000],
+        ["{\"amount\":9500.0,\"counterparty_account\":\"C-m2\",\"counterparty_bank\":\"C\",\"direction\":\"out\",\"event_time\":\"2022-09-05T09:25:00Z\",\"payment_format\":\"MEPS+\",\"payment_id\":\"p07\"}", 1662369900]
       ]
     },
     "win:B-bob": {
       "type": "zset",
       "members": [
-        ["{\"amount\":45.5,\"counterparty_account\":\"B-carol\",\"counterparty_bank\":\"B\",\"direction\":\"out\",\"payment_format\":\"GIRO\",\"payment_id\":\"p02\"}", 1662368700]
+        ["{\"amount\":45.5,\"counterparty_account\":\"B-carol\",\"counterparty_bank\":\"B\",\"direction\":\"out\",\"event_time\":\"2022-09-05T09:05:00Z\",\"payment_format\":\"GIRO\",\"payment_id\":\"p02\"}", 1662368700]
       ]
     },
     "win:B-carol": {
       "type": "zset",
       "members": [
-        ["{\"amount\":45.5,\"counterparty_account\":\"B-bob\",\"counterparty_bank\":\"B\",\"direction\":\"in\",\"payment_format\":\"GIRO\",\"payment_id\":\"p02\"}", 1662368700]
+        ["{\"amount\":45.5,\"counterparty_account\":\"B-bob\",\"counterparty_bank\":\"B\",\"direction\":\"in\",\"event_time\":\"2022-09-05T09:05:00Z\",\"payment_format\":\"GIRO\",\"payment_id\":\"p02\"}", 1662368700]
       ]
     },
     "pay:p02:out": {"type": "hash", "value": {"account": "B-bob", "amount": "45.5", "event_time": "2022-09-05T09:05:00Z", "counterparty_bank": "B"}},

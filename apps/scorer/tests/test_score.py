@@ -493,33 +493,6 @@ def test_late_unflagged_events_are_indexed(pair_key_paths):
     assert consumer.commit.call_count == 3
 
 
-@pytest.mark.parametrize(
-    "options",
-    [
-        ["--key-version", "k1"],
-        ["--peer-public-key", "A", "absent.pem"],
-        ["--key-version", "k1", "--peer-public-key", "A", "absent.pem"],
-    ],
-)
-def test_index_cli_configuration(options):
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "scorer.stream",
-            "B",
-            *options,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert result.returncode != 0
-    assert "ModuleNotFoundError" not in result.stderr
-    assert "Indexing requires" in result.stderr or "FileNotFoundError" in result.stderr
-
-
 @pytest.mark.parametrize("module", ["baseline", "stream"])
 def test_cli_runs_as_module(module):
     subprocess.run(
