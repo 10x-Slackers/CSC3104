@@ -6,6 +6,7 @@ them in the bank's Valkey (live). Both have the same methods.
 
 import json
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import TypedDict
 
 from valkey import Valkey
@@ -79,6 +80,10 @@ class MemoryState:
 
     def lookup(self, pair: str, version: str, token: str) -> dict | None:
         return self.tok.get((pair, version, token))
+
+    def payments(self) -> Iterator[tuple[str, Direction, dict]]:
+        for (payment_id, direction), entry in list(self.pay.items()):
+            yield payment_id, direction, entry
 
     def hits(self) -> list[Hit]:
         return list(self.hit.values())
@@ -174,6 +179,11 @@ class ValkeyState:
 
     def lookup(self, pair: str, version: str, token: str) -> dict | None:
         return self.db.hgetall(f"tok:{pair}:{version}:{token}") or None
+
+    def payments(self) -> Iterator[tuple[str, Direction, dict]]:
+        for key in self.db.scan_iter("pay:*"):
+            payment_id, direction = key.removeprefix("pay:").rsplit(":", 1)
+            yield payment_id, direction, self.db.hgetall(key)
 
     def hits(self) -> list[Hit]:
         hits = []

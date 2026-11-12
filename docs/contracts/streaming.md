@@ -7,7 +7,6 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
 > - **Node reads Valkey:** the scorer writes its state to Valkey; the privacy node still runs its own scorer in-process until it reads Valkey instead (Zane; [Search handoff](#search-handoff)).
-> - **Key rotation:** the scorer reads `active.json` once at start; re-reading it every 10 s and backfilling `tok:` for a new version is not built (Cindy).
 > - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
@@ -53,6 +52,16 @@ Valkey; replicas share no mutable state because each account belongs to one part
 The consumer prefetches at most 16 MiB (`queued.max.messages.kbytes`). A wrongly routed
 record or a fatal Kafka error stops the scorer without storing that offset. SIGTERM
 and SIGINT stop it between events; closing the consumer commits the stored offsets.
+
+With `KEY_DIR`, the scorer re-reads `<KEY_DIR>/<bank>/active.json` every 10 s between
+events and follows the rotation steps in [security.md](security.md#versions-rotation-and-reload):
+a newly listed version is introduced and backfilled, so every `pay:` entry with another
+bank gets a `tok:` key under it; the query version (the `pay:` entry's `token`)
+switches only once every peer lists it; a version no longer listed retires, and its
+`tok:` keys expire with the TTL. Every check runs before the index changes, so a
+missing key file or a half-written `active.json` is logged as an error and the old
+keys stay in use. Each replica backfills every `pay:` entry; the writes are the same, so
+that is wasted work rather than a conflict.
 
 Each event that writes a link or a hit logs one JSON line to stdout, for latency:
 `{"ts": 1793500001.2, "service": "scorer", "bank": "B", "payment_id": "p07", "kafka_ts": 1793500000.123, "links": [["p06", "p07"]], "hits": ["chain", "new_payee"]}`.
