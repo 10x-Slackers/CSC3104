@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# EKS teardown. Volumes are deleted only while the cluster runs, so the bank namespaces (and their volume claims) go first.
-# Topics go before them: each bank's own topic operator removes their finalizer, and a namespace deletion would stop it first.
+# EKS teardown. EBS volumes are deleted only while the cluster runs, so the bank namespaces go first, and their topics before
+# them (each bank's own topic operator clears the topic finalizer, and deleting the namespace would stop it first).
 # Needs aws, kubectl and terraform, with the Learner Lab's credentials in ~/.aws/credentials.
 set -euo pipefail
 cd "$(dirname "$0")"

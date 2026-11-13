@@ -9,8 +9,8 @@ args=$([ $# -eq 0 ] || printf ', "%s"' "$@")
 hardening='{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}'
 volume='hostPath: {path: /workloads, type: Directory}'
 init='[]'
-if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
-  bucket=csc3104-workloads-$(aws sts get-caller-identity --query Account --output text)
+if [[ $image == *.dkr.ecr.* ]]; then  # EKS: <account>.dkr.ecr.us-east-1.amazonaws.com/csc3104/ingestor:<tag>
+  bucket=csc3104-workloads-${image%%.*}
   volume='emptyDir: {}'
   init="[{name: fetch, image: amazon/aws-cli:2.40.1, args: [s3, sync, --only-show-errors, s3://$bucket/$workload, /workloads/$workload],
          volumeMounts: [{name: workloads, mountPath: /workloads}], securityContext: $hardening}]"
@@ -31,7 +31,7 @@ spec:
       initContainers: $init
       containers:
         - name: replay
-          image: ${image%/ingestor:*}/dataset:${image##*:}
+          image: ${image/ingestor:/dataset:}
           args: [python, -m, dataset.replay, /workloads/$workload,
                  --url, "A=http://ingestor.bank-a:8080", --url, "B=http://ingestor.bank-b:8080", --url, "C=http://ingestor.bank-c:8080"$args]
           volumeMounts: [{name: workloads, mountPath: /workloads, readOnly: true}]

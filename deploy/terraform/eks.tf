@@ -57,5 +57,3 @@ resource "aws_eks_addon" "ebs_csi" {
   configuration_values = jsonencode({ defaultStorageClass = { enabled = true } })
   depends_on           = [aws_eks_node_group.nodes]
 }
-
-output "kubeconfig_command" { value = "aws eks update-kubeconfig --region us-east-1 --name ${aws_eks_cluster.csc3104.name}" }
