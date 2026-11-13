@@ -21,7 +21,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | The same command: an init container first copies `s3://csc3104-workloads-<account-id>/<workload>` into an `emptyDir`, as `LabRole`. Upload a workload once with `aws s3 sync apps/dataset/out/<workload> s3://csc3104-workloads-<account-id>/<workload>`. Plain HTTP to the ingestor Services until the ingestor Lambda lands |
 | Teardown | `k3d cluster delete csc3104` | `deploy/eks-down.sh`: deletes the bank namespaces and waits for their EBS volumes to go, then `terraform destroy` (a plain destroy leaves the volumes behind) |
 | Check | `deploy/check-netpol.sh` | The same command, plus a probe that bank pods can't reach the node's metadata service |
-| Tested on | 4 CPU, 8 GB VM, Docker 29: setup about 3 min, about 3.8 GB memory in use with no bank services yet | Learner Lab, 3 × `t3a.large`, Kubernetes 1.37: setup about 20 min, `tiny` replayed all 200, 23/23 policy probes |
+| Tested on | 4 CPU, 8 GB VM, Docker 29: setup about 3 min, about 3.8 GB memory in use with no bank services yet | Learner Lab, 3 × `t3a.large`, Kubernetes 1.37: setup about 20 min, `tiny` replayed all 200, 25/25 policy probes |
 | Cost controls | — | The Learner Lab's fixed credit; it stops the nodes when a session ends, but the control plane keeps billing, so destroy after each run |
 
 ## Platform components
@@ -63,7 +63,7 @@ Each owner sends Isaac their service's runtime contract by Wed 4 Nov: port, envi
 
 One namespace per bank: `bank-a`, `bank-b`, `bank-c`, each a release of the `deploy/charts/bank` Helm chart.
 
-Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443 to the chart's `apiServerCIDRs` only; `k3d-up.sh` pins the k3d node subnet to match; `eks-up.sh` passes the default VPC and the `kubernetes` Service address), and ingress from the `strimzi`, `cnpg-system` and `keda` operators. k3s applies a new pod's egress policy a few seconds after the pod starts, so its first connections can bypass it. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
+Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443 to the chart's `apiServerCIDRs` only; `k3d-up.sh` pins the k3d node subnet to match; `eks-up.sh` passes the control plane's addresses and the `kubernetes` Service address, since pods share the VPC; `check-netpol.sh` probes that another 443 service stays blocked), and ingress from the `strimzi`, `cnpg-system` and `keda` operators. k3s applies a new pod's egress policy a few seconds after the pod starts, so its first connections can bypass it. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
 
 **pending work** (with Caleb): keep the default-deny baseline, add one small policy per store (Kafka, PostgreSQL, Valkey) allowing only labelled clients, and one allow rule per real path, each with an open/blocked probe pair in `check-netpol.sh`:
 

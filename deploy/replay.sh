@@ -41,5 +41,5 @@ spec:
         - name: workloads
           $volume
 YAML
-kubectl logs -n replay -f job/replay --pod-running-timeout=2m
+kubectl logs -n replay -f job/replay --pod-running-timeout=10m  # on EKS, after the S3 copy
 kubectl wait -n replay --for=condition=complete job/replay --timeout=10s  # logs -f exits 0 even if replay failed

@@ -205,7 +205,7 @@ def settings(argv: list[str] | None = None) -> argparse.Namespace:
         help="default: KEY_DIR. X25519 files and <bank>/active.json; "
         "without keys no tokens are written",
     )
-    # one key version from explicit files, as the chart passes them today
+    # one key version from explicit files (the chart uses KEY_DIR)
     parser.add_argument("--key-version")
     parser.add_argument("--x25519-private", help="this bank's X25519 private PEM")
     parser.add_argument(

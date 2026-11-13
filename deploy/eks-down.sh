@@ -5,8 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-aws eks update-kubeconfig --region us-east-1 --name csc3104
-kubectl delete kafkatopics -A --all
-kubectl delete namespace bank-a bank-b bank-c --ignore-not-found
-kubectl wait --for=delete pv --all --timeout=5m
+if aws eks update-kubeconfig --region us-east-1 --name csc3104; then  # no cluster if setup failed early: just destroy
+  kubectl delete kafkatopics -A --all || true  # no such type if setup stopped before Strimzi
+  kubectl delete namespace bank-a bank-b bank-c --ignore-not-found
+  kubectl wait --for=delete pv --all --timeout=5m
+fi
 terraform -chdir=terraform destroy -auto-approve

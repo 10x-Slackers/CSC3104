@@ -19,5 +19,6 @@ for app in ingestor scorer privacy-node dataset; do
   docker push -q "$registry/$app:$tag"
 done
 
-# Bank pods reach the API server through the kubernetes Service (10.100.0.1) and the control plane's ENIs in the default VPC.
-./install.sh "$registry" "$tag" --set-json 'apiServerCIDRs=["172.31.0.0/16","10.100.0.1/32"]'
+# Bank pods reach the API server through the kubernetes Service and the control plane's ENIs; pods share the VPC, so not all of it.
+api=$(kubectl get endpointslice -l kubernetes.io/service-name=kubernetes -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}/32,{end}')
+./install.sh "$registry" "$tag" --set "apiServerCIDRs={${api}10.100.0.1/32}"

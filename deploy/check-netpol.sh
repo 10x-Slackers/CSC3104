@@ -26,6 +26,8 @@ failed=0
 probe bank-a postgres-rw.bank-a:5432 open
 probe bank-a kafka-kafka-bootstrap.bank-a:9092 open
 probe bank-a kubernetes.default:443 open
+probe default keda-operator-metrics-apiserver.keda:443 open  # API-server rule must not open other 443/6443 pods
+probe bank-a keda-operator-metrics-apiserver.keda:443 blocked
 probe bank-b postgres-rw.bank-b:5432 open
 probe bank-c kafka-kafka-bootstrap.bank-c:9092 open
 probe default 1.1.1.1:443 open
