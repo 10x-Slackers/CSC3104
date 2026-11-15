@@ -19,10 +19,11 @@ uv run pytest                                                     # run all test
 uv run python -m scorer.baseline apps/dataset/fixtures/tiny B   # local-only detections for Bank B
 deploy/k3d-up.sh && deploy/check-netpol.sh                        # local cluster, then policy check
 cp -r apps/dataset/fixtures/tiny apps/dataset/out/ && deploy/replay.sh tiny   # replay a workload from apps/dataset/out into the cluster
+deploy/eks-up.sh && deploy/check-netpol.sh                        # EKS in the Learner Lab; teardown: deploy/eks-down.sh
 ```
 
 - See each contract in `docs/contracts/` for app-specific commands.
-- `deploy/k3d-up.sh` needs Docker, k3d, kubectl and Helm. The Dev Container doesn't include them, so run it on the host.
+- `deploy/k3d-up.sh` needs Docker, k3d, kubectl and Helm; `deploy/eks-up.sh` needs Docker, the AWS CLI, Terraform, kubectl and Helm. The Dev Container includes the AWS CLI, Terraform, kubectl and Helm but not k3d, so run `k3d-up.sh` on the host.
 
 ## Getting Started
 

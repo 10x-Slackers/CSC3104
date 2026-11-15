@@ -15,19 +15,12 @@ spec:
       containers:
         - name: scorer
           image: {{ .Values.image.repository }}/scorer:{{ .Values.image.tag }}
-          args:
-            - python
-            - -m
-            - scorer.stream
-            - {{ $bank }}
-            - --bootstrap-servers=kafka-kafka-bootstrap:9092
-            - --key-version=k1
-            - --x25519-private=/keys/{{ $bank }}/private/x25519/k1.pem
-            {{- range without (list "A" "B" "C") $bank }}
-            - --peer-public-key
-            - {{ . }}
-            - /keys/{{ $bank }}/trusted/x25519/{{ . }}/k1.pem
-            {{- end }}
+          args: [python, -m, scorer.stream]
+          env:  # docs/contracts/deployment.md, Scorer row
+            - {name: SCORER_BANK, value: {{ $bank }}}
+            - {name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka-kafka-bootstrap:9092"}
+            - {name: VALKEY_URL, value: "valkey://valkey:6379"}
+            - {name: KEY_DIR, value: /keys}  # every version in <bank>/active.json
           volumeMounts:
             - {name: keys, mountPath: /keys}
           {{- include "bank.container" . | nindent 10 }}

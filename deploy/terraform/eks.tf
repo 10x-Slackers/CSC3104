@@ -50,11 +50,10 @@ resource "aws_eks_addon" "vpc_cni" {
   configuration_values        = jsonencode({ enableNetworkPolicy = "true" })
 }
 
-# Provisions the Kafka and PostgreSQL volumes.
+# Provisions the Kafka and PostgreSQL volumes, through a default gp3 StorageClass (EKS ships gp2, not default).
 resource "aws_eks_addon" "ebs_csi" {
-  cluster_name = aws_eks_cluster.csc3104.name
-  addon_name   = "aws-ebs-csi-driver"
-  depends_on   = [aws_eks_node_group.nodes]
+  cluster_name         = aws_eks_cluster.csc3104.name
+  addon_name           = "aws-ebs-csi-driver"
+  configuration_values = jsonencode({ defaultStorageClass = { enabled = true } })
+  depends_on           = [aws_eks_node_group.nodes]
 }
-
-output "kubeconfig_command" { value = "aws eks update-kubeconfig --region us-east-1 --name ${aws_eks_cluster.csc3104.name}" }
