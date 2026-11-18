@@ -60,7 +60,7 @@ Tracked here and by the `DEPENDS ON` comments in `apps/case/`.
 
 | Item | Role | Status | Role 5 file | Their file |
 | --- | --- | --- | --- | --- |
-| The privacy node posts its messages to `POST /results` | Role 3 (privacy node) | Done (Isaac, 18 Nov) | `apps/case/src/case/app.py` (`results`), `evidence.py` (`parse`) | `apps/privacy_node/src/privacy_node/store.py` (`save_chain`, outbox) |
+| The privacy node posts its messages to `POST /results` | Role 3 (privacy node) | Done (Isaac, 18 Nov); a `local` message waits out the ingestion grace in memory, so a pod restart in that window drops it ([protocol.md](protocol.md#searches-from-valkey)) | `apps/case/src/case/app.py` (`results`), `evidence.py` (`parse`) | `apps/privacy_node/src/privacy_node/store.py` (`save_chain`, outbox) |
 | Rule-backed claims and tiers | Roles 2 and 3 | **draft**: same definition as the offline evaluator | `apps/case/src/case/evidence.py` (`tier`) | `apps/evaluation/src/evaluation/run.py` (`chain_tier`) |
 | Own-leg data and the summary input fields | Role 4 (security and privacy) | **draft**, Caleb to review | `apps/case/src/case/report.py` (`report_input`) | `docs/contracts/security.md` |
 | A `cases` database, Deployments and the summary Lambda | Isaac (deployment) | Database and Deployments in the chart; **pending work**: the summary Lambda | `apps/case/src/case/app.py`, `apps/summary/src/summary/app.py` | `deploy/charts/bank/` |

@@ -501,7 +501,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
             # The money starts or stays inside this bank, or an intra-bank link on
             # another account isn't written yet: housekeeping looks again.
             until = time.monotonic() + self.ingestion_grace_seconds
-            self._unresolved[tuple(hit["payments"])] = until, hit["hit_id"]
+            link = tuple(hit["payments"])  # a redelivered hit keeps its first grace
+            self._unresolved.setdefault(link, (until, hit["hit_id"]))
 
     def resolve(self, incoming: str, outgoing: str) -> bool:
         """Search from a chain link, through intra-bank hops, if both ends cross banks."""
@@ -604,15 +605,19 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
         for link, (until, hit_id) in list(self._unresolved.items()):  # own hits
+            expired = time.monotonic() > until
             try:
-                expired = time.monotonic() > until
-                if expired or self.resolve(*link):
-                    del self._unresolved[link]
-                if expired and self.case_url:  # the money starts or stays here
+                resolved = self.resolve(*link)  # one last look after the grace too
+                if not resolved and not expired:
+                    continue
+                if not resolved and self.case_url:  # the money starts or stays here
                     legs = self.local.internal_legs(*link)
                     self.store.put_case({"key": hit_id, "kind": "local", "legs": legs})
             except Exception:  # e.g. its payments expired: try again until `until`
                 log.exception("rechecking chain hit %s -> %s", *link)
+                if not expired:
+                    continue
+            del self._unresolved[link]
         if not self.store.try_lock():
             return  # another replica is running this pass
         try:

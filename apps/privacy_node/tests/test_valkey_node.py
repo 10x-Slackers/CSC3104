@@ -164,7 +164,8 @@ def test_intra_bank_hop_is_followed(run, monkeypatch):
     assert [leg["payment_id"] for leg in message["legs"]] == ["q1", "q3"]
 
 
-def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
+@pytest.mark.parametrize("grace_over", [False, True])
+def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path, grace_over):
     # q1 -> B-x -q2-> B-y -q3-> B-z -> q4: the q2 -> q3 link is on account B-y, which
     # another scorer replica may write after both outer hits, and it raises no hit
     late = [
@@ -181,7 +182,7 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
         ],
         "C": [event("C", "q4", "in", "C-w", "B-z", 30, "9500")],
     }
-    nodes, _ = run(events)
+    nodes, posted = run(events)
     b = nodes["B"]
     b.ingestion_grace_seconds = 60
     b.consume_hits(block_ms=None)
@@ -191,8 +192,12 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
     for e in late:
         scorer.process(e)
     assert b.consume_hits(block_ms=None) == 0  # no hit for the middle link
+    if grace_over:  # the link arrived just before: one last look, not a local case
+        b._unresolved = {k: (0, h) for k, (_, h) in b._unresolved.items()}
     b.housekeeping()
     assert [c.state for c in b.store.chains()] == [pb.CONFIRMED]
+    assert "local" not in {m["kind"] for m in posted["B"]}
+    assert b._unresolved == {}
 
 
 def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path):

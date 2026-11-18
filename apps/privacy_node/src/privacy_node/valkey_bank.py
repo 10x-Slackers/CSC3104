@@ -87,9 +87,8 @@ class ValkeyBank:
         legs = {(incoming, "in"), (outgoing, "out")}
         for p, d in list(legs):
             if self.peer(p, d) == self.bank:
-                legs |= {
-                    (q, e) for q in self._walk(p, OTHER[d])[1] for e in ("in", "out")
-                }
+                passed = self._walk(p, OTHER[d])[1]
+                legs |= {(q, e) for q in passed for e in ("in", "out")}
         return [self.leg(p, d) for p, d in sorted(legs)]
 
     def leg(self, payment_id: str, direction: Direction, token: str = "") -> dict:
