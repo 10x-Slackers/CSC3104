@@ -68,6 +68,7 @@ log = logging.getLogger(__name__)
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
 BRANCH_CAP = 1  # linear chains only; extra local links make the result PARTIAL
 SEARCH_SECONDS = 10  # whole-search deadline, kept by the initiator only
+REPLY_MARGIN = 0.25  # seconds a bank keeps back to reply, so its claim isn't lost
 # Worst state wins when two results are combined.
 SEVERITY = [
     *(pb.CONFIRMED, pb.PARTIAL, pb.NO_MATCH, pb.PENDING, pb.TIMED_OUT),
@@ -81,8 +82,8 @@ UNREADABLE_TRACE = pb.TraceReply(state=pb.INVALID_CLAIM)
 def time_left(context: grpc.ServicerContext | None) -> float:
     """The caller's remaining gRPC timeout: a relative deadline, so clock skew can't
     expire it. A whole search's worth if the caller set none."""
-    left = context.time_remaining() if context else None
-    return SEARCH_SECONDS if left is None else left
+    left = context.time_remaining() if context else None  # huge if none was set
+    return SEARCH_SECONDS if left is None else min(left, SEARCH_SECONDS)
 
 
 def worst(*states: pb.State) -> pb.State:
@@ -329,7 +330,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         peer = self.local.peer(nexts[0], there)
         try:
             # what is left of the caller's timeout (gRPC deadline propagation)
-            left = time_left(context)
+            left = time_left(context) - REPLY_MARGIN
             reply = self.call(peer, "Trace", forward, left, UNREADABLE_TRACE)
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
@@ -378,10 +379,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
         fresh = bound(claims, self.bank, query_id)
         return (reply.state if fresh else pb.INVALID_CLAIM), claims
 
+    def search_id(self, incoming: str, outgoing: str) -> str:
+        return hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode()).hexdigest()
+
     def search(self, incoming: str, outgoing: str) -> pb.ChainResult:
         """Trace both ways from a local detection, assemble and store for delivery."""
-        search_id = hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode())
-        search_id = search_id.hexdigest()
+        search_id = self.search_id(incoming, outgoing)
         # from the stored first attempt, so replicas and restarts share it
         age = self.store.search_age(search_id)
         deadline = time.monotonic() + SEARCH_SECONDS
@@ -608,6 +611,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     self.search(incoming, outgoing)
                 except Exception:
                     log.exception("retrying search %s -> %s", incoming, outgoing)
+                    search_id = self.search_id(incoming, outgoing)  # back off anyway
+                    self.store.put_search(search_id, incoming, outgoing, pb.PENDING, "")
             self.deliver_pending(stop=stop)
             self.deliver_cases(stop=stop)
         finally:

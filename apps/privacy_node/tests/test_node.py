@@ -162,6 +162,8 @@ def test_unknown_token_wrong_sender_and_expired_timeout(banks):
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
     inbound = c.local.ref("p07", "in", "k1")
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
+    unset = Mock(**{"time_remaining.return_value": 9.2e18})  # what gRPC gives then
+    assert node_module.time_left(unset) == node_module.SEARCH_SECONDS
     expired = Mock(**{"time_remaining.return_value": -0.1})  # the caller's timeout
     reply = trace(c, "p07", pb.DOWNSTREAM, "B", expired, query_id="q9")
     assert reply.state == pb.TIMED_OUT

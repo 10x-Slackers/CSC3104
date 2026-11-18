@@ -252,14 +252,17 @@ def test_a_peers_valkey_outage_leaves_the_search_pending(run, monkeypatch):
     assert nodes["B"].search("p06", "p07").state == pb.PENDING  # retried, not failed
 
 
-def test_a_broken_retry_doesnt_block_delivery(run):
+def test_a_broken_retry_doesnt_block_delivery(run, monkeypatch):
     nodes, posted = run({b: [] for b in BANKS})
     node = nodes["B"]
-    node.store.put_search("s", "expired-in", "expired-out", pb.PENDING, "")
+    stuck = node.search_id("expired-in", "expired-out")
+    node.store.put_search(stuck, "expired-in", "expired-out", pb.PENDING, "")
     node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
+    monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)
     node.housekeeping()
     assert [m["key"] for m in posted["B"]] == ["h1"]
+    assert node.store.unfinished_searches() == []  # backed off, not retried every pass
 
 
 def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():

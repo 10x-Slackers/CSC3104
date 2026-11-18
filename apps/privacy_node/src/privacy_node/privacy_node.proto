@@ -43,6 +43,7 @@ message TraceRequest {
   Direction direction = 5;
   int32 hops_remaining = 6;  // further transfers this leg may add
   reserved 7;  // was an absolute deadline; gRPC's own timeout now carries the time left
+  reserved "deadline";
   repeated TokenRef visited = 8;
 }
 
