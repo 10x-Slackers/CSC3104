@@ -22,6 +22,7 @@ from security import AgreementFiles, canonical_pair
 
 MAX_INTERNAL_HOPS = 4
 GROUP = "privacy-node"  # one consumer group, so replicas share the hits between them
+CLAIM_MS = 60_000  # another consumer's hit unacknowledged this long: its pod is gone
 OTHER: dict[Direction, Direction] = {"in": "out", "out": "in"}
 
 
@@ -97,17 +98,25 @@ class ValkeyBank:
         return reply[0][1] if reply else []
 
     def new_hits(self, block_ms: int | None) -> list[tuple[str, Hit]]:
-        """This consumer's unacknowledged hits first (left by a restart or an error),
-        then new ones."""
+        """This consumer's unacknowledged hits first (left by an error), then those
+        another consumer left for CLAIM_MS (a replaced pod), then new ones."""
         try:
-            entries = self._read("0", None) or self._read(">", block_ms)
+            entries = (
+                self._read("0", None)
+                or self.db.xautoclaim(
+                    "hits", GROUP, self.consumer, CLAIM_MS, count=100
+                )[1]
+                or self._read(">", block_ms)
+            )
         except ResponseError:  # NOGROUP: Valkey restarted empty, and the scorer
             self._join()  # rebuilds it from Kafka. The caller retries.
             raise
         hits = []
         for entry_id, fields in entries:
-            h = self.db.hgetall(f"hit:{fields['hit']}")
-            h["payments"], h["hit_id"] = json.loads(h["payments"]), fields["hit"]
+            h = self.db.hgetall(f"hit:{fields['hit']}")  # {} once expired
+            h["hit_id"] = fields["hit"]
+            if h.get("payments"):
+                h["payments"] = json.loads(h["payments"])
             hits.append((entry_id, h))
         return hits
 

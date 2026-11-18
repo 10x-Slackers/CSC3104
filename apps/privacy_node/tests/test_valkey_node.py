@@ -156,12 +156,16 @@ def test_intra_bank_hop_is_followed(run):
     assert [leg["payment_id"] for leg in message["legs"]] == ["q1", "q3"]
 
 
-def test_a_failed_hit_is_retried_and_a_lost_group_recreated(run, monkeypatch, tmp_path):
+def test_hits_survive_errors_lost_pods_and_a_lost_group(run, monkeypatch, tmp_path):
     nodes, _ = run(tiny())
     node, calls = nodes["B"], []
-    first = node.local.new_hits(block_ms=None)
-    restarted = ValkeyBank(node.local.db, "B", "k1", pair_paths(tmp_path, "B"))
-    assert first and restarted.new_hits(block_ms=None) == first  # not acknowledged
+    first = node.local.new_hits(block_ms=None)  # then this pod dies
+    replaced = ValkeyBank(node.local.db, "B", "k1", pair_paths(tmp_path, "B"))
+    replaced.consumer = "privacy-node-new"
+    assert replaced.new_hits(block_ms=None) == []  # not idle for CLAIM_MS yet
+    monkeypatch.setattr("privacy_node.valkey_bank.CLAIM_MS", 0)
+    assert first and replaced.new_hits(block_ms=None) == first  # taken over
+    node.local = replaced
 
     def fail_once(hit, search):
         calls.append(hit["hit_id"])
@@ -178,9 +182,10 @@ def test_a_failed_hit_is_retried_and_a_lost_group_recreated(run, monkeypatch, tm
     with pytest.raises(ResponseError):
         node.consume_hits(block_ms=None)  # the main loop logs it and retries
     assert node.consume_hits(block_ms=None) == 0
-    node.local.db.xadd("hits", {"hit": "h1"})
-    node.local.db.hset("hit:h1", mapping={"rule": "new_payee", "payments": "[]"})
-    assert node.consume_hits(block_ms=None) == 1
+    monkeypatch.undo()
+    node.local.db.xadd("hits", {"hit": "gone"})  # its hit: hash expired
+    assert node.consume_hits(block_ms=None) == 1  # skipped, not retried forever
+    assert node.consume_hits(block_ms=None) == 0
 
 
 def test_case_service_rejection_is_dead_lettered_and_outage_retried(run, monkeypatch):

@@ -493,7 +493,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         its search and case messages are stored, so a crash redelivers it."""
         hits = self.local.new_hits(block_ms)
         for entry_id, hit in hits:
-            self.handle_hit(hit, search)
+            try:
+                self.handle_hit(hit, search)
+            except (KeyError, TypeError, ValueError):  # its data expired: can't retry
+                log.exception("skipped hit %s", entry_id)
             self.local.ack(entry_id)
         return len(hits)  # housekeeping delivers what they stored
 
@@ -639,6 +642,8 @@ def main():
         parser.error(
             "mTLS requires --tls-cert, --tls-key and --tls-ca (local tests: --insecure-demo)"
         )
+    if args.case_url and not args.valkey_url:
+        parser.error("--case-url needs --valkey-url")  # the legs come from Valkey
     config_path = Path(args.key_directory) / args.bank / "active.json"
 
     def read_config():
