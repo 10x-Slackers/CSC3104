@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from privacy_node import privacy_node_pb2 as pb
@@ -29,8 +30,6 @@ def url(request, tmp_path):
 def pg():
     if not PG:
         pytest.skip("needs NODE_TEST_DATABASE_URL")
-    import psycopg
-
     with psycopg.connect(PG, autocommit=True) as conn:
         conn.execute(
             "DROP TABLE IF EXISTS replies, searches, chains, outbox, case_outbox"
@@ -49,7 +48,7 @@ def test_round_trip(url):
     partial = pb.ChainResult(chain_digest="d", state=pb.PARTIAL)
     case = {"key": "d", "kind": "chain", "legs": []}
     store.save_chain(partial, ["A"], case)
-    store.ack("d", "A")
+    store.ack(partial, "A")
     [(_, _, sent)] = store.pending_cases()
     store.ack_case("d", "chain", sent)
     store.save_chain(partial, ["A"], case)
@@ -85,5 +84,28 @@ def test_another_replica_resumes_a_pending_search(pg, tmp_path):
     replica.housekeeping()  # the other replica finds it in the shared store
     assert [c.state for c in replica.store.chains()] == [pb.CONFIRMED]
     assert [c.state for c in nodes["C"].store.chains()] == [pb.CONFIRMED]
+    for server in servers.values():
+        server.stop(0)
+
+
+def test_an_upgrade_isnt_acknowledged_by_the_older_deliverys_ack(url):
+    store = Store(url)
+    partial = pb.ChainResult(chain_digest="d", state=pb.PARTIAL)
+    store.save_chain(partial, ["A"])
+    [(_, sent)] = store.pending_deliveries()
+    confirmed = pb.ChainResult(chain_digest="d", state=pb.CONFIRMED)
+    store.save_chain(confirmed, ["A"])  # by the other replica, mid-delivery
+    store.ack(sent, "A")
+    assert store.pending_deliveries() == [("A", confirmed)]
+
+
+def test_a_peers_postgresql_outage_leaves_the_search_pending(tmp_path, monkeypatch):
+    nodes, servers = start_banks(TINY, tmp_path)
+
+    def down(*args):
+        raise psycopg.OperationalError("the connection is lost")
+
+    monkeypatch.setattr(nodes["C"].store, "get_reply", down)
+    assert nodes["B"].search("p06", "p07").state == pb.PENDING  # retried, not failed
     for server in servers.values():
         server.stop(0)

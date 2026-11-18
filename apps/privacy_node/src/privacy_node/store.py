@@ -43,7 +43,7 @@ UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CO
 class Store:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.url = str(path)
-        self.pg = self.url.startswith("postgres")
+        self.pg = self.url.startswith(("postgresql://", "postgres://"))
         self.lock = threading.Lock()
         self.db = self._connect()
 
@@ -209,19 +209,22 @@ class Store:
         rows = self._run("SELECT bank, result FROM outbox WHERE acked=0 AND dead=0")
         return [(bank, pb.ChainResult.FromString(blob)) for bank, blob in rows]
 
-    def ack(self, chain_digest: str, bank: str) -> None:
+    # As for cases: only if another replica hasn't upgraded the row since it was sent.
+    def ack(self, result: pb.ChainResult, bank: str) -> None:
         self._run(
-            "UPDATE outbox SET acked=1 WHERE chain_digest=? AND bank=?",
-            chain_digest,
+            "UPDATE outbox SET acked=1 WHERE chain_digest=? AND bank=? AND result=?",
+            result.chain_digest,
             bank,
+            result.SerializeToString(),
         )
 
-    def dead_letter(self, chain_digest: str, bank: str) -> None:
+    def dead_letter(self, result: pb.ChainResult, bank: str) -> None:
         """Stop delivering a result the receiver rejected; kept for inspection."""
         self._run(
-            "UPDATE outbox SET dead=1 WHERE chain_digest=? AND bank=?",
-            chain_digest,
+            "UPDATE outbox SET dead=1 WHERE chain_digest=? AND bank=? AND result=?",
+            result.chain_digest,
             bank,
+            result.SerializeToString(),
         )
 
     def dead_letters(self) -> list[tuple[str, str]]:

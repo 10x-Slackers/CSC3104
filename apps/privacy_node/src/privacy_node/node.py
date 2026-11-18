@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import grpc
+import psycopg
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -265,16 +266,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 request.ref.SerializeToString(deterministic=True),
             ]
         )
-        stored = self.store.get_reply(request.query_id, slot)
-        if stored:
-            return stored  # retried query: same answer, no repeated work
         try:
+            stored = self.store.get_reply(request.query_id, slot)
+            if stored:
+                return stored  # retried query: same answer, no repeated work
             reply = self.follow(request)
-        except (ValkeyConnectionError, ValkeyTimeoutError):  # the asker retries later
+            if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # cache final answers
+                self.store.put_reply(request.query_id, slot, reply)
+            return reply
+        except (ValkeyConnectionError, ValkeyTimeoutError, psycopg.OperationalError):
             context.abort(grpc.StatusCode.UNAVAILABLE, "local state unavailable")
-        if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # only cache final answers
-            self.store.put_reply(request.query_id, slot, reply)
-        return reply
 
     def follow(self, request: pb.TraceRequest) -> pb.TraceReply:
         if now() > datetime.fromisoformat(request.deadline):
@@ -428,16 +429,20 @@ class Node(pb_grpc.PrivacyNodeServicer):
             message = self.chain_message(result)
             self.store.save_chain(result, deliver_to=sorted(others), case=message)
         # the first bank on each stuck leg; a deeper one isn't known here
-        waiting = {
-            self.local.peer(payment, side)
-            for payment, side, leg_state in (
-                (outgoing, "out", down_state),
-                (incoming, "in", up_state),
-            )
-            if leg_state in (pb.PENDING, pb.TIMED_OUT)
-        }
-        # not for the ingestion grace's NO_MATCH, nor a failed search with a stuck leg
-        if self.case_url and waiting and state in (pb.PENDING, pb.TIMED_OUT):
+        stuck = (pb.PENDING, pb.TIMED_OUT)
+        waiting = (
+            self.case_url
+            and state in stuck
+            and {
+                self.local.peer(payment, side)
+                for payment, side, leg_state in (
+                    (outgoing, "out", down_state),
+                    (incoming, "in", up_state),
+                )
+                if leg_state in stuck
+            }
+        )
+        if waiting:  # not for the ingestion grace's NO_MATCH
             legs = [self.local.leg(incoming, "in"), self.local.leg(outgoing, "out")]
             self.store.put_case(
                 {
@@ -564,12 +569,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 self.call(
                     bank, "Deliver", result, now() + timedelta(seconds=5), pb.Ack()
                 )
-                self.store.ack(result.chain_digest, bank)
+                self.store.ack(result, bank)
             except grpc.RpcError as error:
                 if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
                     continue  # stays in the outbox until the bank is back
                 # The receiver read it and said no, so resending can't help.
-                self.store.dead_letter(result.chain_digest, bank)
+                self.store.dead_letter(result, bank)
                 log.warning(
                     "dead-lettered chain_digest=%s bank=%s reason=%s",
                     result.chain_digest,
