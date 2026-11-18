@@ -109,3 +109,31 @@ def test_a_peers_postgresql_outage_leaves_the_search_pending(tmp_path, monkeypat
     assert nodes["B"].search("p06", "p07").state == pb.PENDING  # retried, not failed
     for server in servers.values():
         server.stop(0)
+
+
+def test_pending_search_backs_off_with_jitter_then_expires(url, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("privacy_node.store.time.time", lambda: clock[0])
+    monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)  # max jitter
+    store = Store(url)
+    for attempts, wait in enumerate([10, 20, 40, 80, 160, 300, 300]):
+        store.put_search("s", "p1", "p2", pb.PENDING, "")
+        clock[0] += wait - 1
+        assert store.unfinished_searches() == [], attempts
+        clock[0] += 1
+        assert store.unfinished_searches() == [("p1", "p2")], attempts
+    clock[0] = 1000 + 24 * 3600 + 1  # 24 h after the first attempt: unresolved
+    assert store.unfinished_searches() == []
+
+
+def test_stored_replies_expire(url, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("privacy_node.store.time.time", lambda: clock[0])
+    store = Store(url)
+    store.put_reply("q", b"r", pb.TraceReply(state=pb.NO_MATCH))
+    clock[0] += 600
+    store.expire_replies()
+    assert store.get_reply("q", b"r")
+    clock[0] += 1
+    store.expire_replies()
+    assert store.get_reply("q", b"r") is None

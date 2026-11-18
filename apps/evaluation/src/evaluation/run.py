@@ -3,7 +3,6 @@
 import tempfile
 from collections import Counter
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
 
 from google.protobuf.message import Message
@@ -26,12 +25,15 @@ class InProcessNode(Node):
     """A privacy node that calls its peers directly instead of over gRPC."""
 
     def call[R: Message](
-        self, bank: str, method: str, request: Message, deadline: datetime, fallback: R
+        self, bank: str, method: str, request: Message, timeout: float, fallback: R
     ) -> R:
         return getattr(self.peers[bank], method)(request, OfflineContext())
 
 
 class OfflineContext:
+    def time_remaining(self) -> None:
+        return None  # no deadline: the peer allows a whole search
+
     def abort(self, code: object, details: str):
         raise RuntimeError(f"peer rejected a call: {code} {details}")
 

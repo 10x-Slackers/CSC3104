@@ -44,7 +44,8 @@ def banks(tmp_path):
 
 # DEPENDS ON Role 3 (privacy node): a missing bank makes the search PENDING, and
 # housekeeping completes it once the bank is back.
-def test_pending_case_waits_for_bank_c_then_upgrades(banks, tmp_path):
+def test_pending_case_waits_for_bank_c_then_upgrades(banks, tmp_path, monkeypatch):
+    monkeypatch.setattr("privacy_node.store.random.random", lambda: 0.0)  # retry now
     nodes, servers = banks
     store = CaseStore(str(tmp_path / "B.db"))
     port = int(nodes["B"].peers["C"].split(":")[1])

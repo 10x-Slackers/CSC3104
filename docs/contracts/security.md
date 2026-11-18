@@ -166,8 +166,9 @@ Caleb must review schema field additions before updating that approval list.
 Zane's #17 supplies the integrated `has_unknown_fields` helper: Trace rejects unknown
 fields before cache access, and shared `check_result` rejects them for both result
 receivers. Outgoing calls reject unreadable replies, including undefined states.
-The existing absolute deadline and Zane's transient/dead-letter behaviour are retained;
-future deadline changes remain his protocol work.
+Zane's transient/dead-letter behaviour is retained. The absolute deadline was removed
+on 18 Nov (relative deadlines, [protocol.md](protocol.md#search-algorithm)): one fewer
+`TraceRequest` field in `APPROVED_FIELDS`.
 
 ## mTLS and deployment requirements
 

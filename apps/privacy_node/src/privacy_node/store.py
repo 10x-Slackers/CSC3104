@@ -2,16 +2,19 @@
 `postgresql://` URL, shared by the node's replicas), or SQLite for tests and local runs.
 The same SQL runs on both.
 
-- replies:  stored Trace replies, so a retried query_id gets the same answer
-- searches: every search this bank started and its latest state
+- replies:  stored Trace replies, so a retried query_id gets the same answer; kept for
+            REPLY_SECONDS, longer than any search, since every retry has a new query_id
+- searches: every search this bank started, its latest state and when to retry it
 - chains:   one row per chain identity; the seed for Role 5's one-alert-per-bank rule
 - outbox:   results still to deliver to other involved banks, until acknowledged
 - case_outbox: messages still to post to this bank's case service (case.md)
 """
 
 import json
+import random
 import sqlite3
 import threading
+import time
 from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,10 +25,12 @@ from privacy_node import privacy_node_pb2 as pb
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS replies (
-  query_id TEXT, ref BYTEA, reply BYTEA, PRIMARY KEY (query_id, ref));
+  query_id TEXT, ref BYTEA, reply BYTEA, at DOUBLE PRECISION,
+  PRIMARY KEY (query_id, ref));
 CREATE TABLE IF NOT EXISTS searches (
   search_id TEXT PRIMARY KEY, incoming TEXT, outgoing TEXT, state INTEGER,
-  chain_digest TEXT);
+  chain_digest TEXT, attempts INTEGER, next_at DOUBLE PRECISION,
+  started DOUBLE PRECISION);
 CREATE TABLE IF NOT EXISTS chains (
   chain_digest TEXT PRIMARY KEY, state INTEGER, result BYTEA);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -36,6 +41,11 @@ CREATE TABLE IF NOT EXISTS case_outbox (
   key TEXT, kind TEXT, message TEXT, acked INTEGER DEFAULT 0, dead INTEGER DEFAULT 0,
   PRIMARY KEY (key, kind));
 """
+# A pending search is retried after random(0, min(300 s, 10 s x 2^attempts)) seconds:
+# capped exponential backoff with full jitter, so a bank that comes back isn't hit by
+# every search at once. After 24 h it is unresolved: kept, never retried again.
+BACKOFF_BASE, BACKOFF_CAP, EXPIRY = 10, 300, 24 * 3600
+REPLY_SECONDS = 600
 HOUSEKEEPING_LOCK, SCHEMA_LOCK = 3104, 3105  # advisory lock keys
 UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CONFLICT (key, kind)"
 
@@ -100,11 +110,15 @@ class Store:
 
     def put_reply(self, query_id: str, ref: bytes, reply: pb.TraceReply) -> None:
         self._run(
-            "INSERT INTO replies VALUES (?,?,?) ON CONFLICT DO NOTHING",
+            "INSERT INTO replies VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
             query_id,
             ref,
             reply.SerializeToString(),
+            time.time(),
         )
+
+    def expire_replies(self) -> None:
+        self._run("DELETE FROM replies WHERE at < ?", time.time() - REPLY_SECONDS)
 
     def put_search(
         self,
@@ -114,21 +128,34 @@ class Store:
         state: pb.State,
         chain_digest: str,
     ) -> None:
+        """Record a search's latest attempt and when it is next due, if it's pending."""
+        now, jitter = time.time(), random.random()
         self._run(
-            "INSERT INTO searches VALUES (?,?,?,?,?) ON CONFLICT (search_id) "
-            "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest",
+            "INSERT INTO searches VALUES (?,?,?,?,?,1,?,?) ON CONFLICT (search_id) "
+            "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest, "
+            "attempts=searches.attempts+1, next_at=? + ? * CASE WHEN searches.attempts"
+            f" >= 5 THEN {BACKOFF_CAP} ELSE {BACKOFF_BASE} << searches.attempts END",
             search_id,
             incoming,
             outgoing,
             state,
             chain_digest,
+            now + jitter * BACKOFF_BASE,
+            now,
+            now,
+            jitter,
         )
 
     def unfinished_searches(self) -> list[tuple[str, str]]:
+        """Pending and timed-out searches that are due and less than 24 h old."""
+        now = time.time()
         return self._run(
-            "SELECT incoming, outgoing FROM searches WHERE state IN (?,?)",
+            "SELECT incoming, outgoing FROM searches WHERE state IN (?,?)"
+            " AND next_at <= ? AND started > ?",
             pb.PENDING,
             pb.TIMED_OUT,
+            now,
+            now - EXPIRY,
         )
 
     def save_chain(

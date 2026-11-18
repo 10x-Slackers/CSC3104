@@ -71,7 +71,6 @@ def trace(node, payment, direction, sender, **changes):
         "key_version": "k1",
         "direction": direction,
         "hops_remaining": 3,
-        "deadline": (now() + timedelta(seconds=5)).isoformat(),
     }
     return node.Trace(pb.TraceRequest(**fields | changes), None)
 
@@ -142,9 +141,7 @@ def test_tampered_or_wrongly_signed_claims_rejected(banks):
 
     tampered.chain_digest = chain_digest(tampered.claims)
     with pytest.raises(grpc.RpcError) as error:
-        nodes["A"].call(
-            "C", "Deliver", tampered, now() + timedelta(seconds=5), pb.Ack()
-        )
+        nodes["A"].call("C", "Deliver", tampered, 5, pb.Ack())
     assert error.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     assert [c.chain_digest for c in nodes["C"].store.chains()] == [result.chain_digest]
 
@@ -153,21 +150,25 @@ def test_retried_query_gets_stored_reply(banks, monkeypatch):
     nodes, _ = banks
     first = trace(nodes["C"], "p07", pb.DOWNSTREAM, "B")
     assert first.state == pb.CONFIRMED and first.claims[0].signer == "C"
-    monkeypatch.setattr(nodes["C"], "follow", lambda request: pytest.fail("redone"))
+    monkeypatch.setattr(
+        nodes["C"], "follow", lambda request, timeout: pytest.fail("redone")
+    )
     assert trace(nodes["C"], "p07", pb.DOWNSTREAM, "B") == first
 
 
-def test_unknown_token_wrong_sender_and_deadline(banks):
+def test_unknown_token_wrong_sender_and_expired_timeout(banks):
     nodes, _ = banks
     c = nodes["C"]
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
     inbound = c.local.ref("p07", "in", "k1")
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
-    late = (now() - timedelta(seconds=1)).isoformat()
-    assert (
-        trace(c, "p07", pb.DOWNSTREAM, "B", query_id="q9", deadline=late).state
-        == pb.TIMED_OUT
+    request = pb.TraceRequest(
+        query_id="q9", sender="B", key_version="k1", direction=pb.DOWNSTREAM
     )
+    request.ref.CopyFrom(c.local.ref("p07", "in", "k1"))
+    request.hops_remaining = 3
+    expired = Mock(**{"time_remaining.return_value": -0.1})  # the caller's timeout
+    assert c.Trace(request, expired).state == pb.TIMED_OUT
 
 
 def test_visited_token_closes_loop_without_forwarding(banks):
@@ -193,7 +194,7 @@ def test_delivered_state_is_checked(banks):
     nodes, _ = banks
     result = nodes["B"].search("p15", "p16")
     nodes["C"].store = Store()
-    deadline = now() + timedelta(seconds=5)
+    deadline = 5
     result.state = pb.CONFIRMED  # sender lies about a cut chain
     nodes["B"].call("C", "Deliver", result, deadline, pb.Ack())
     assert [c.state for c in nodes["C"].store.chains()] == [pb.PARTIAL]
@@ -205,7 +206,7 @@ def test_delivered_state_is_checked(banks):
 
 def test_peer_error_fails_search_without_retry(banks, monkeypatch):
     nodes, _ = banks
-    monkeypatch.setattr(nodes["C"], "follow", lambda request: 1 / 0)
+    monkeypatch.setattr(nodes["C"], "follow", lambda request, timeout: 1 / 0)
     assert nodes["B"].search("p06", "p07").state == pb.FAILED
     assert nodes["B"].store.unfinished_searches() == []
 
@@ -731,10 +732,8 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
 
     # An old in-flight search still forwards k1 even though each node now queries k2.
     ref = nodes["B"].local.ref("p10", "in", "k1")
-    deadline = now() + timedelta(seconds=5)
-    request = nodes["A"].request(
-        "old-flight", ref, pb.DOWNSTREAM, 3, deadline.isoformat(), [ref], "k1"
-    )
+    deadline = 5
+    request = nodes["A"].request("old-flight", ref, pb.DOWNSTREAM, 3, [ref], "k1")
     reply = nodes["A"].call("B", "Trace", request, deadline, pb.TraceReply())
     assert reply.state == pb.CONFIRMED
     assert {c.key_version for c in reply.claims} == {"k1"}
@@ -934,7 +933,6 @@ def test_request_with_unknown_fields_is_rejected(banks):
         ref=nodes["C"].local.ref("p07", "in", "k1"),
         direction=pb.DOWNSTREAM,
         hops_remaining=3,
-        deadline=(now() + timedelta(seconds=5)).isoformat(),
     )
     raw = request.SerializeToString() + SMUGGLED  # bytes a modified peer could send
     with grpc.insecure_channel(nodes["B"].peers["C"]) as channel:
@@ -951,8 +949,8 @@ def test_reply_with_unknown_fields_is_not_relayed(banks, monkeypatch):
     nodes, _ = banks
     real_follow = nodes["C"].follow
 
-    def smuggling_follow(request):
-        reply = real_follow(request)
+    def smuggling_follow(request, timeout):
+        reply = real_follow(request, timeout)
         tainted = reply.claims[0].SerializeToString() + SMUGGLED
         reply.claims[0].CopyFrom(pb.LinkClaim.FromString(tainted))
         return reply
@@ -966,8 +964,8 @@ def test_reply_with_undefined_state_is_invalid(banks, monkeypatch):
     nodes, _ = banks
     real_follow = nodes["C"].follow
 
-    def undefined_state_follow(request):
-        reply = real_follow(request)
+    def undefined_state_follow(request, timeout):
+        reply = real_follow(request, timeout)
         reply.state = 99  # proto3 keeps an unknown enum number as a plain int
         return reply
 

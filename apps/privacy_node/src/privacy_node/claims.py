@@ -19,7 +19,6 @@ APPROVED_FIELDS: dict[str, set[str]] = {
         "ref",
         "direction",
         "hops_remaining",
-        "deadline",
         "visited",
     },
     "LinkClaim": {

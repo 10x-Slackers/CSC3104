@@ -42,7 +42,7 @@ message TraceRequest {
   TokenRef ref = 4;
   Direction direction = 5;
   int32 hops_remaining = 6;  // further transfers this leg may add
-  string deadline = 7;       // absolute ISO 8601 UTC, never extended
+  reserved 7;  // was an absolute deadline; gRPC's own timeout now carries the time left
   repeated TokenRef visited = 8;
 }
 
