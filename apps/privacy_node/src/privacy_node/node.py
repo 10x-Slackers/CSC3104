@@ -34,6 +34,8 @@ import grpc
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
+from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node import privacy_node_pb2_grpc as pb_grpc
@@ -264,7 +266,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         stored = self.store.get_reply(request.query_id, slot)
         if stored:
             return stored  # retried query: same answer, no repeated work
-        reply = self.follow(request)
+        try:
+            reply = self.follow(request)
+        except (ValkeyConnectionError, ValkeyTimeoutError):  # the asker retries later
+            context.abort(grpc.StatusCode.UNAVAILABLE, "local state unavailable")
         if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # only cache final answers
             self.store.put_reply(request.query_id, slot, reply)
         return reply
@@ -533,10 +538,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
             )
             try:
                 urllib.request.urlopen(request, timeout=5).close()
-                self.store.ack_case(message_key, kind)
+                self.store.ack_case(message_key, kind, body)
             except urllib.error.HTTPError as error:  # other codes stay in the outbox
                 if error.code == 422:  # not evidence: don't resend
-                    self.store.dead_case(message_key, kind)
+                    self.store.dead_case(message_key, kind, body)
                     log.warning("dead-lettered case message %s %s", kind, message_key)
             except OSError:
                 break  # the case service is down: try them all again next pass
@@ -580,7 +585,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         for incoming, outgoing in self.store.unfinished_searches():
             if stop is not None and stop.is_set():
                 break
-            self.search(incoming, outgoing)
+            try:  # e.g. its payments expired: don't hold up the others or delivery
+                self.search(incoming, outgoing)
+            except Exception:
+                log.exception("retrying search %s -> %s", incoming, outgoing)
         self.deliver_pending(stop=stop)
         self.deliver_cases(stop=stop)
 

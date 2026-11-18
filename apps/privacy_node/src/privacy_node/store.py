@@ -137,11 +137,22 @@ class Store:
             "SELECT key, kind, message FROM case_outbox WHERE acked=0 AND dead=0"
         )
 
-    def ack_case(self, key: str, kind: str) -> None:
-        self._run("UPDATE case_outbox SET acked=1 WHERE key=? AND kind=?", key, kind)
+    # Only if the row still holds what was sent: an upgrade may have replaced it.
+    def ack_case(self, key: str, kind: str, message: str) -> None:
+        self._run(
+            "UPDATE case_outbox SET acked=1 WHERE key=? AND kind=? AND message=?",
+            key,
+            kind,
+            message,
+        )
 
-    def dead_case(self, key: str, kind: str) -> None:
-        self._run("UPDATE case_outbox SET dead=1 WHERE key=? AND kind=?", key, kind)
+    def dead_case(self, key: str, kind: str, message: str) -> None:
+        self._run(
+            "UPDATE case_outbox SET dead=1 WHERE key=? AND kind=? AND message=?",
+            key,
+            kind,
+            message,
+        )
 
     def chains(self) -> list[pb.ChainResult]:
         rows = self._run("SELECT result FROM chains ORDER BY chain_digest")

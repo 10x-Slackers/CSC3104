@@ -7,6 +7,7 @@ from pathlib import Path
 
 import fakeredis
 import pytest
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import ResponseError
 
 from case.case_store import CaseStore
@@ -206,3 +207,33 @@ def test_case_service_rejection_is_dead_lettered_and_outage_retried(run, monkeyp
     monkeypatch.setattr("urllib.request.urlopen", reject)
     node.deliver_cases()
     assert node.store.pending_cases() == []
+
+
+def test_a_peers_valkey_outage_leaves_the_search_pending(run, monkeypatch):
+    nodes, _ = run(tiny())
+
+    def down(*args):
+        raise ValkeyConnectionError("restarting")
+
+    monkeypatch.setattr(nodes["C"].local, "lookup", down)
+    assert nodes["B"].search("p06", "p07").state == pb.PENDING  # retried, not failed
+
+
+def test_a_broken_retry_doesnt_block_delivery(run):
+    nodes, posted = run({b: [] for b in BANKS})
+    node = nodes["B"]
+    node.store.put_search("s", "expired-in", "expired-out", pb.PENDING, "")
+    node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
+    node.housekeeping()
+    assert [m["key"] for m in posted["B"]] == ["h1"]
+
+
+def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():
+    store = Store()
+    partial = pb.ChainResult(chain_digest="d", state=pb.PARTIAL)
+    store.save_chain(partial, case={"key": "d", "kind": "chain", "legs": []})
+    [(_, _, sent)] = store.pending_cases()
+    confirmed = pb.ChainResult(chain_digest="d", state=pb.CONFIRMED)
+    store.save_chain(confirmed, case={"key": "d", "kind": "chain", "legs": [1]})
+    store.ack_case("d", "chain", sent)  # the reply to the partial's POST
+    assert [m for _, _, m in store.pending_cases()] != []
