@@ -200,14 +200,17 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path, grace
     assert b._unresolved == {}
 
 
-def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path):
-    # A-a -q1-> B-x -q2-> B-y, and B-y pays no other bank: nothing to search
+@pytest.mark.parametrize("late_leg", [False, True])
+def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path, late_leg):
+    # A-a -q1-> B-x -q2-> B-y, and B-y pays no other bank: nothing to search. B-y's
+    # leg of q2 may be on a partition not scored yet when the grace ends.
+    q2_in = event("B", "q2", "in", "B-y", "B-x", 10, "9800")
     events = {
         "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
         "B": [
             event("B", "q1", "in", "B-x", "A-a", 0, "10000"),
             event("B", "q2", "out", "B-x", "B-y", 10, "9800"),
-            event("B", "q2", "in", "B-y", "B-x", 10, "9800"),
+            *([] if late_leg else [q2_in]),
         ],
         "C": [],
     }
@@ -221,11 +224,12 @@ def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path):
     b.housekeeping()
     [local] = [m for m in posted["B"] if m["kind"] == "local"]
     assert local["key"] == posted["B"][0]["key"]  # the chain hit's ID
-    assert [(g["payment_id"], g["direction"], g["account"]) for g in local["legs"]] == [
-        ("q1", "in", "B-x"),
-        ("q2", "in", "B-y"),
-        ("q2", "out", "B-x"),
-    ]
+    legs = [("q1", "in", "B-x"), ("q2", "in", "B-y"), ("q2", "out", "B-x")]
+    if late_leg:
+        legs.remove(("q2", "in", "B-y"))
+    assert [
+        (g["payment_id"], g["direction"], g["account"]) for g in local["legs"]
+    ] == legs
     assert cases_at(b, posted["B"], tmp_path) == {("B", 1, "q1 q2")}  # joins the hit
     assert b.store.chains() == []
 

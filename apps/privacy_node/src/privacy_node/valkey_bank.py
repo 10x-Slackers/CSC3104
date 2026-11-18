@@ -83,13 +83,13 @@ class ValkeyBank:
 
     def internal_legs(self, incoming: str, outgoing: str) -> list[dict]:
         """A chain link's legs plus both legs of each intra-bank payment behind or
-        after it, for a `local` message (case.md)."""
+        after it, for a `local` message (case.md). A leg not written yet is left out."""
         legs = {(incoming, "in"), (outgoing, "out")}
         for p, d in list(legs):
             if self.peer(p, d) == self.bank:
                 passed = self._walk(p, OTHER[d])[1]
                 legs |= {(q, e) for q in passed for e in ("in", "out")}
-        return [self.leg(p, d) for p, d in sorted(legs)]
+        return [self.leg(p, d) for p, d in sorted(legs) if self.state.payment(p, d)]
 
     def leg(self, payment_id: str, direction: Direction, token: str = "") -> dict:
         """One of this bank's own payments, as the case service stores it (case.md)."""
