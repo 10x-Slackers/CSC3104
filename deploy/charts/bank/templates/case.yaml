@@ -18,13 +18,14 @@ spec:
           args: [python, -m, case.app]
           env:
             - {name: CASE_BANK, value: {{ .Values.bank }}}
-            - name: DB_USER
+            # libpq takes the credentials from PGUSER and PGPASSWORD
+            - {name: CASE_DATABASE_URL, value: "postgresql://postgres-rw:5432/cases"}
+            - name: PGUSER
               valueFrom:
                 secretKeyRef: {name: postgres-app, key: username}
-            - name: DB_PASSWORD
+            - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: {name: postgres-app, key: password}
-            - {name: CASE_DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-rw:5432/cases"}
             - {name: CASE_KEY_DIRECTORY, value: /keys}
             - {name: CASE_SUMMARY_URL, value: "http://summary:8080/"}
           ports:
