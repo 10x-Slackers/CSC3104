@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS searches (
   search_id TEXT PRIMARY KEY, incoming TEXT, outgoing TEXT, state INTEGER,
   chain_digest TEXT, attempts INTEGER, next_at DOUBLE PRECISION,
   started DOUBLE PRECISION);
+CREATE INDEX IF NOT EXISTS searches_due ON searches (state, next_at);
 CREATE TABLE IF NOT EXISTS chains (
   chain_digest TEXT PRIMARY KEY, state INTEGER, result BYTEA);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS case_outbox (
 BACKOFF_BASE, BACKOFF_CAP, EXPIRY = 10, 300, 24 * 3600
 REPLY_SECONDS = 600
 HOUSEKEEPING_LOCK, SCHEMA_LOCK = 3104, 3105  # advisory lock keys
+now = time.time  # wall clock for stored times; tests replace it, not time.time
 UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CONFLICT (key, kind)"
 
 
@@ -114,11 +116,11 @@ class Store:
             query_id,
             ref,
             reply.SerializeToString(),
-            time.time(),
+            now(),
         )
 
     def expire_replies(self) -> None:
-        self._run("DELETE FROM replies WHERE at < ?", time.time() - REPLY_SECONDS)
+        self._run("DELETE FROM replies WHERE at < ?", now() - REPLY_SECONDS)
 
     def put_search(
         self,
@@ -129,33 +131,37 @@ class Store:
         chain_digest: str,
     ) -> None:
         """Record a search's latest attempt and when it is next due, if it's pending."""
-        now, jitter = time.time(), random.random()
+        t = now()
+        rows = self._run("SELECT attempts FROM searches WHERE search_id=?", search_id)
+        wait = min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (rows[0][0] if rows else 0))
         self._run(
             "INSERT INTO searches VALUES (?,?,?,?,?,1,?,?) ON CONFLICT (search_id) "
             "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest, "
-            "attempts=searches.attempts+1, next_at=? + ? * CASE WHEN searches.attempts"
-            f" >= 5 THEN {BACKOFF_CAP} ELSE {BACKOFF_BASE} << searches.attempts END",
+            "attempts=searches.attempts+1, next_at=excluded.next_at",
             search_id,
             incoming,
             outgoing,
             state,
             chain_digest,
-            now + jitter * BACKOFF_BASE,
-            now,
-            now,
-            jitter,
+            t + random.random() * wait,
+            t,
         )
+
+    def search_age(self, search_id: str) -> float:
+        """Seconds since the search's first attempt, 0 if it has none."""
+        rows = self._run("SELECT started FROM searches WHERE search_id=?", search_id)
+        return now() - rows[0][0] if rows else 0.0
 
     def unfinished_searches(self) -> list[tuple[str, str]]:
         """Pending and timed-out searches that are due and less than 24 h old."""
-        now = time.time()
+        t = now()
         return self._run(
             "SELECT incoming, outgoing FROM searches WHERE state IN (?,?)"
             " AND next_at <= ? AND started > ?",
             pb.PENDING,
             pb.TIMED_OUT,
-            now,
-            now - EXPIRY,
+            t,
+            t - EXPIRY,
         )
 
     def save_chain(

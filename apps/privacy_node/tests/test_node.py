@@ -4,7 +4,7 @@ import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -28,7 +28,7 @@ from privacy_node.claims import (
 from privacy_node.demo import prepare_demo_keys, start_banks
 from privacy_node.keys import pair_paths, public_keys
 from privacy_node.local_state import LocalBank
-from privacy_node.node import HOP_LIMIT, Node, failure_state, now, serve
+from privacy_node.node import HOP_LIMIT, Node, failure_state, serve
 from privacy_node.store import Store
 from scorer.score import Scorer
 from scorer.stream import consume
@@ -61,7 +61,7 @@ def transfers(result):
     return {r.token for c in result.claims for r in (c.in_ref, c.out_ref) if r.token}
 
 
-def trace(node, payment, direction, sender, **changes):
+def trace(node, payment, direction, sender, context=None, **changes):
     side = "in" if direction == pb.DOWNSTREAM else "out"
     if "ref" not in changes:
         changes["ref"] = node.local.ref(payment, side, "k1")
@@ -72,7 +72,7 @@ def trace(node, payment, direction, sender, **changes):
         "direction": direction,
         "hops_remaining": 3,
     }
-    return node.Trace(pb.TraceRequest(**fields | changes), None)
+    return node.Trace(pb.TraceRequest(**fields | changes), context)
 
 
 def test_fixture_scenarios(banks):
@@ -151,7 +151,7 @@ def test_retried_query_gets_stored_reply(banks, monkeypatch):
     first = trace(nodes["C"], "p07", pb.DOWNSTREAM, "B")
     assert first.state == pb.CONFIRMED and first.claims[0].signer == "C"
     monkeypatch.setattr(
-        nodes["C"], "follow", lambda request, timeout: pytest.fail("redone")
+        nodes["C"], "follow", lambda request, context: pytest.fail("redone")
     )
     assert trace(nodes["C"], "p07", pb.DOWNSTREAM, "B") == first
 
@@ -162,13 +162,9 @@ def test_unknown_token_wrong_sender_and_expired_timeout(banks):
     assert trace(c, "p07", pb.DOWNSTREAM, "A").state == pb.NO_MATCH  # A is not on B-C
     inbound = c.local.ref("p07", "in", "k1")
     assert trace(c, "p07", pb.UPSTREAM, "B", ref=inbound).state == pb.NO_MATCH
-    request = pb.TraceRequest(
-        query_id="q9", sender="B", key_version="k1", direction=pb.DOWNSTREAM
-    )
-    request.ref.CopyFrom(c.local.ref("p07", "in", "k1"))
-    request.hops_remaining = 3
     expired = Mock(**{"time_remaining.return_value": -0.1})  # the caller's timeout
-    assert c.Trace(request, expired).state == pb.TIMED_OUT
+    reply = trace(c, "p07", pb.DOWNSTREAM, "B", expired, query_id="q9")
+    assert reply.state == pb.TIMED_OUT
 
 
 def test_visited_token_closes_loop_without_forwarding(banks):
@@ -194,19 +190,18 @@ def test_delivered_state_is_checked(banks):
     nodes, _ = banks
     result = nodes["B"].search("p15", "p16")
     nodes["C"].store = Store()
-    deadline = 5
     result.state = pb.CONFIRMED  # sender lies about a cut chain
-    nodes["B"].call("C", "Deliver", result, deadline, pb.Ack())
+    nodes["B"].call("C", "Deliver", result, 5, pb.Ack())
     assert [c.state for c in nodes["C"].store.chains()] == [pb.PARTIAL]
 
     result.state = pb.PENDING  # only final states are stored
     with pytest.raises(grpc.RpcError):
-        nodes["B"].call("C", "Deliver", result, deadline, pb.Ack())
+        nodes["B"].call("C", "Deliver", result, 5, pb.Ack())
 
 
 def test_peer_error_fails_search_without_retry(banks, monkeypatch):
     nodes, _ = banks
-    monkeypatch.setattr(nodes["C"], "follow", lambda request, timeout: 1 / 0)
+    monkeypatch.setattr(nodes["C"], "follow", lambda request, context: 1 / 0)
     assert nodes["B"].search("p06", "p07").state == pb.FAILED
     assert nodes["B"].store.unfinished_searches() == []
 
@@ -510,18 +505,23 @@ def test_bounded_delayed_peer_retry(banks, tmp_path, monkeypatch, arrives):
     delay_c(nodes, tmp_path)
     bank = nodes["B"]
     bank.ingestion_grace_seconds = 5
-    clock = [now()]
-    monkeypatch.setattr(node_module, "now", lambda: clock[0])
+    clock = [1000.0]
+    monkeypatch.setattr("privacy_node.store.now", lambda: clock[0])
     assert bank.search_new_detections()[0].state == pb.PENDING
     assert bank.store.unfinished_searches() == [("p06", "p07")]
     if arrives:
         feed(
             nodes["C"].local, [e for e in fixture_rows("C") if e["payment_id"] == "p07"]
         )
-        clock[0] += timedelta(seconds=1)
+        clock[0] += 1
     else:
-        clock[0] += timedelta(seconds=6)
-    bank.housekeeping()
+        clock[0] += 6
+    # another replica on the shared store retries it: the grace isn't restarted
+    replica = Node(
+        bank.local, bank.store, bank.signing_key, bank.public_keys, bank.peers
+    )
+    replica.ingestion_grace_seconds = 5
+    replica.housekeeping()
     assert bank.store.unfinished_searches() == []
     expected = pb.CONFIRMED if arrives else pb.NO_MATCH
     assert bank.store._run("SELECT state FROM searches") == [(expected,)]
@@ -693,9 +693,7 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
         for row in fixture_rows(bank):
             if row["payment_id"] in ("p06", "p07"):
                 row["payment_id"] = "rotation-" + row["payment_id"]
-                stamp = node_module.datetime.fromisoformat(
-                    row["event_time"].replace("Z", "+00:00")
-                )
+                stamp = datetime.fromisoformat(row["event_time"])
                 row["event_time"] = (stamp + timedelta(days=1)).isoformat()
                 node.local.process(row)
                 for version in ("k1", "k2"):
@@ -732,9 +730,8 @@ def test_live_rotation_reload_overlap_inflight_and_retirement(banks, tmp_path):
 
     # An old in-flight search still forwards k1 even though each node now queries k2.
     ref = nodes["B"].local.ref("p10", "in", "k1")
-    deadline = 5
     request = nodes["A"].request("old-flight", ref, pb.DOWNSTREAM, 3, [ref], "k1")
-    reply = nodes["A"].call("B", "Trace", request, deadline, pb.TraceReply())
+    reply = nodes["A"].call("B", "Trace", request, 5, pb.TraceReply())
     assert reply.state == pb.CONFIRMED
     assert {c.key_version for c in reply.claims} == {"k1"}
     assert valid_chain(reply.claims, nodes["B"].public_keys)
@@ -949,8 +946,8 @@ def test_reply_with_unknown_fields_is_not_relayed(banks, monkeypatch):
     nodes, _ = banks
     real_follow = nodes["C"].follow
 
-    def smuggling_follow(request, timeout):
-        reply = real_follow(request, timeout)
+    def smuggling_follow(request, context):
+        reply = real_follow(request, context)
         tainted = reply.claims[0].SerializeToString() + SMUGGLED
         reply.claims[0].CopyFrom(pb.LinkClaim.FromString(tainted))
         return reply
@@ -964,8 +961,8 @@ def test_reply_with_undefined_state_is_invalid(banks, monkeypatch):
     nodes, _ = banks
     real_follow = nodes["C"].follow
 
-    def undefined_state_follow(request, timeout):
-        reply = real_follow(request, timeout)
+    def undefined_state_follow(request, context):
+        reply = real_follow(request, context)
         reply.state = 99  # proto3 keeps an unknown enum number as a plain int
         return reply
 

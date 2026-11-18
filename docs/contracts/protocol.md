@@ -199,4 +199,4 @@ Also part of: [Token and key API](security.md#interfaces), [Valkey layout](strea
 - [x] `BRANCH_CAP = 1` and `HOP_LIMIT = 4`, checked by a 4/6/8 sweep; shared state moves to Valkey and PostgreSQL.
 - [x] `chain_digest` is the case identity; the case service merges overlapping partial chains by shared transfers.
 - [x] Retention lifetimes: see the [failure contract](#failure-contract).
-- [x] Late events: keep the ingestion grace (`--ingestion-grace-seconds`), with its default set from measured ingest lag and `retry_until` stored in the `searches` row.
+- [x] Late events: keep the ingestion grace (`--ingestion-grace-seconds`), with its default set from measured ingest lag (the chart sets 60 s until then); it runs from the search's first attempt, `started` in the `searches` row, so replicas and restarts share it.

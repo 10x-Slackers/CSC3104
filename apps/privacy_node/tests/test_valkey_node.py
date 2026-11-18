@@ -2,8 +2,8 @@
 
 import io
 import json
+import time
 import urllib.error
-from datetime import timedelta
 from pathlib import Path
 
 import fakeredis
@@ -17,7 +17,7 @@ from ingestor import read_events
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.demo import prepare_demo_keys
 from privacy_node.keys import BANKS, own_key, pair_paths, public_keys
-from privacy_node.node import Node, now, serve
+from privacy_node.node import Node, serve
 from privacy_node.store import Store
 from privacy_node.valkey_bank import ValkeyBank
 from scorer.score import Scorer
@@ -256,7 +256,7 @@ def test_a_broken_retry_doesnt_block_delivery(run):
     nodes, posted = run({b: [] for b in BANKS})
     node = nodes["B"]
     node.store.put_search("s", "expired-in", "expired-out", pb.PENDING, "")
-    node._unresolved[("expired-in", "expired-out")] = now() + timedelta(seconds=60)
+    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
     node.housekeeping()
     assert [m["key"] for m in posted["B"]] == ["h1"]

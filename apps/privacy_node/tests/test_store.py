@@ -113,7 +113,7 @@ def test_a_peers_postgresql_outage_leaves_the_search_pending(tmp_path, monkeypat
 
 def test_pending_search_backs_off_with_jitter_then_expires(url, monkeypatch):
     clock = [1000.0]
-    monkeypatch.setattr("privacy_node.store.time.time", lambda: clock[0])
+    monkeypatch.setattr("privacy_node.store.now", lambda: clock[0])
     monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)  # max jitter
     store = Store(url)
     for attempts, wait in enumerate([10, 20, 40, 80, 160, 300, 300]):
@@ -128,7 +128,7 @@ def test_pending_search_backs_off_with_jitter_then_expires(url, monkeypatch):
 
 def test_stored_replies_expire(url, monkeypatch):
     clock = [1000.0]
-    monkeypatch.setattr("privacy_node.store.time.time", lambda: clock[0])
+    monkeypatch.setattr("privacy_node.store.now", lambda: clock[0])
     store = Store(url)
     store.put_reply("q", b"r", pb.TraceReply(state=pb.NO_MATCH))
     clock[0] += 600
