@@ -1,7 +1,9 @@
-"""Replay a workload to each bank's ingestor as pacs.008 batches over HTTP.
+"""Replay a workload to each bank's ingestor as pacs.008 batches over HTTP(S).
 
 One process and one clock feed all three banks. Each GIRO or MEPS+ payment goes to
 every bank it involves (once if intra-bank); other payment types are never sent.
+An https:// URL is a Lambda function URL with AWS_IAM: each request is signed with
+SigV4 as whatever role botocore finds (on EKS, LabRole from the node).
 Contract: docs/contracts/data.md (Replay, Ingestor).
 
     uv run python -m dataset.replay apps/dataset/fixtures/tiny --url B=http://localhost:8080 --speed 0
@@ -23,9 +25,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import botocore.session
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+
 from ingestor import BICS, Event, read_events
 
 BATCH = 100  # payments per pacs.008 message, at most
+BACKLOG = 1000  # --speed 0: payments queued per bank, at most (10 batches)
 
 
 def payments(workload: Path) -> Iterator[Event]:
@@ -49,29 +56,54 @@ def tx(e: Event) -> dict:
     }
 
 
+def sigv4(url: str) -> SigV4Auth | None:
+    """A signer for an https function URL (<url-id>.lambda-url.<region>.on.aws), else None."""
+    u = urlsplit(url)
+    if u.scheme != "https":
+        return None
+    creds = botocore.session.get_session().get_credentials()
+    if creds is None:
+        raise SystemExit(f"no AWS credentials to sign requests to {url}")
+    return SigV4Auth(creds, "lambda", u.hostname.split(".")[2])
+
+
+def headers(url: str, body: bytes, auth: SigV4Auth | None) -> dict:
+    h = {"Content-Type": "application/json"}
+    if auth:  # signed per attempt: a signature is only valid for 5 minutes
+        req = AWSRequest("POST", url, data=body, headers=h)
+        auth.add_auth(req)
+        h = dict(req.headers)
+    return h
+
+
 def post(
-    conn: http.client.HTTPConnection, path: str, body: str
+    conn: http.client.HTTPConnection, url: str, body: bytes, auth: SigV4Auth | None
 ) -> tuple[int | None, str]:
-    # One POST -> (status, reply); status None on a network error, then conn reconnects.
+    # One POST -> (status, reply); status None on any error (network, signing), then
+    # conn reconnects.
     try:
-        conn.request("POST", path, body, {"Content-Type": "application/json"})
+        path = urlsplit(url).path or "/"
+        conn.request("POST", path, body, headers(url, body, auth))
         r = conn.getresponse()
         return r.status, r.read().decode()
-    except (OSError, http.client.HTTPException) as e:
+    except Exception as e:  # noqa: BLE001 - a dead sender would hang --speed 0
         conn.close()
         return None, f"{type(e).__name__}: {e}"
 
 
-def send(bank: str, url: str, q: queue.Queue, failed: threading.Event) -> None:
+def send(
+    bank: str, url: str, auth: SigV4Auth | None, q: queue.Queue, failed: threading.Event
+) -> None:
     """POST this bank's queue in batches, one at a time, so its events keep their order.
 
     A batch is whatever became due while the last one was sent, at most BATCH payments.
-    5xx, 429 and network errors resend the same batch with full jitter, 1 s doubling
-    to 30 s; a 400 can't succeed on resend, so it stops replay.
+    5xx, 429, network and signing errors resend the same batch with full jitter, 1 s
+    doubling to 30 s; a 400 can't succeed on resend, so it stops replay.
     """
     u = urlsplit(url)
-    # plain HTTP; HTTPS and SigV4 come with the EKS function URLs
-    conn = http.client.HTTPConnection(u.netloc, timeout=35)  # ingestor gives up at 25s
+    https = u.scheme == "https"
+    connect = http.client.HTTPSConnection if https else http.client.HTTPConnection
+    conn = connect(u.netloc, timeout=35)  # ingestor gives up at 25s
     for seq in itertools.count(1):
         txs = [q.get()]
         while txs[-1] and len(txs) < BATCH and not q.empty():
@@ -84,10 +116,11 @@ def send(bank: str, url: str, q: queue.Queue, failed: threading.Event) -> None:
         msg_id = f"replay-{bank}-{seq:06d}"
         hdr = {"MsgId": msg_id, "CreDtTm": txs[-1]["AccptncDtTm"]}
         hdr["NbOfTxs"] = str(len(txs))
-        body = json.dumps({"FIToFICstmrCdtTrf": {"GrpHdr": hdr, "CdtTrfTxInf": txs}})
+        batch = {"FIToFICstmrCdtTrf": {"GrpHdr": hdr, "CdtTrfTxInf": txs}}
+        body = json.dumps(batch).encode()
         for attempt in itertools.count():
             ts = time.time()
-            status, reply = post(conn, u.path or "/", body)
+            status, reply = post(conn, url, body, auth)
             ms = round((time.time() - ts) * 1000, 1)
             log = {"ts": ts, "service": "replay", "bank": bank, "msg_id": msg_id}
             log |= {"status": status, "attempt": attempt, "payments": len(txs)}
@@ -115,7 +148,8 @@ def main(argv=None):
         action="append",
         required=True,
         metavar="BANK=URL",
-        help="a bank's ingestor, e.g. B=http://localhost:8080; banks without one are skipped",
+        help="a bank's ingestor, e.g. B=http://localhost:8080 or an https function URL;"
+        " banks without one are skipped",
     )
     p.add_argument(
         "--speed", type=float, default=60, help="simulated s per real s; 0 = no pacing"
@@ -130,12 +164,13 @@ def main(argv=None):
 
     meta = json.loads((a.workload / "workload.json").read_text())
     t0 = datetime.fromisoformat(meta["t0"])
-    # one queue and sender per bank: a bank that's down delays only itself
+    # one queue and sender per bank: with --speed N or --rate, a bank that's down
+    # delays only itself
     queues = {b: queue.Queue() for b in urls}
     failed = threading.Event()
     senders = [
-        threading.Thread(target=send, args=(b, urls[b], queues[b], failed))
-        for b in urls
+        threading.Thread(target=send, args=(b, u, sigv4(u), queues[b], failed))
+        for b, u in urls.items()
     ]
     for s in senders:
         s.start()
@@ -147,7 +182,10 @@ def main(argv=None):
         elif a.speed:
             event = datetime.fromisoformat(e["event_time"])
             due = start + (event - t0).total_seconds() / a.speed
-        else:
+        else:  # --speed 0: as fast as the slowest ingestor, so memory stays flat
+            while max(q.qsize() for q in queues.values()) >= BACKLOG:
+                if failed.wait(0.01):
+                    break
             due = start
         time.sleep(max(0, due - time.time()))  # open loop: never waits for a reply
         if failed.is_set():

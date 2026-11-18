@@ -2,10 +2,6 @@
 
 Owner: Macarius · Partners: Cindy (events, rule), Isaac (evaluation, replay Job), Caleb (token input) · Code: `apps/dataset/`, `apps/ingestor/` · Status: **draft**, needs review by Cindy (events) and Isaac (labels)
 
-> [!NOTE]
-> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Fixture expectations** follow the alert tiers in [case.md](case.md).
-
 Scope: the synthetic dataset, the split into Banks A, B and C, labels, workloads, the committed fixture with its planted chains, and replay.
 
 ## Source
@@ -76,7 +72,7 @@ Examples: `866bab90f796f92f,1,0,FAN-OUT,,,` is in attempt 0; `0c0c5b0ee33a7df5,1
 
 | Scenario | Shape | Expected result |
 | --- | --- | --- |
-| `mule_chain` | Each hop forwards 90–98 % within 1–30 min | Confirmed; only the middle bank's rule links it, so one Tier 1 case there and no case (or alert) at the other banks ([case.md](case.md#cases-and-alerts)); **draft**, Macarius to confirm |
+| `mule_chain` | Each hop forwards 90–98 % within 1–30 min | Confirmed; only the middle bank's rule links it, so one Tier 1 case there; the chain makes no case (or alert) at the other banks, though a new payee hit can still make its own Tier 1 case, as at A for p06 in the fixture ([case.md](case.md#cases-and-alerts)) |
 | `lookalike` | Same shape, but forwards only 20–50 % | No confirmed link; no alert |
 | `loop` | 3 hops, ending back at the first account (e.g. A→B→C→A) | Search terminates on visited tokens; one alert per bank, not two at the start bank |
 | `absent_link` | 3 hops with hop 1 removed | No match at the gap; hop 2 is never linked to hop 0 |
@@ -117,17 +113,17 @@ cp apps/dataset/out/altman-medium/workload.json apps/dataset/out/altman-medium-b
 
 `--transfers` takes a CSV with the columns `payment_id,time,from_bank,from_account,to_bank,to_account,amount,payment_format,altman_laundering,attempt_id,altman_pattern,chain_id,hop,scenario`, as in `fixtures/tiny/transfers.csv`. `attempt_id` and `altman_pattern` are empty outside an Altman attempt, and the last three are empty for unplanted transfers.
 
-**pending work:** no fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank) and p04 (card). Each hit is at the sender's bank, each a Tier 1 case unless a chain promotes it.
+No fixture account has earlier payments, so the new payee rule fires on every cross-bank GIRO and MEPS+ payment: 17 of the 20, all but p01 (cheque), p02 (intra-bank) and p04 (card). Each hit is at the sender's bank and is a Tier 1 case there unless a Tier 2 chain through it promotes it ([case.md](case.md#cases-and-alerts)). The offline evaluator's `test_fixture_cases` checks every case below: 14 in all, 6 of them Tier 2.
 
-| Chain | Transfers | Banks | Expected (**draft**) |
+| Chain | Transfers | Banks | Expected cases |
 | --- | --- | --- | --- |
-| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary; no alert |
-| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain |
-| `m1` | p06 → p07 | A→B→C | Confirmed; alerts at A, B and C. **pending work:** not a Tier 2 alert, since only B's rule links p06 → p07; a Tier 1 case at B |
-| `l1` | p08 → p09 | A→B→C | 40 % forwarded; no alert |
-| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates; one alert each at A, B and C (still Tier 2: B's and C's rules link it). **pending work:** the alert promotes the new payee cases on p10, p11 and p12 |
-| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked |
-| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4. **pending work:** a Tier 2 alert at A, B and C (partial counts; all three banks' rules link it) |
+| — | p01–p04 | Mixed; p02 is intra-bank at B | Ordinary. p03 (C→A) is a new payee hit: a Tier 1 case at C |
+| — | p05 | B→C | `altman_laundering = 1` in a stand-in attempt `0` (`FAN-OUT`), so the labels sample shows both columns; not a planted chain. A new payee hit: a Tier 1 case at B |
+| `m1` | p06 → p07 | A→B→C | Confirmed, but only B's rule links p06 → p07, so no alert: a Tier 1 case at B (p06 and p07), and a new payee case for p06 at A |
+| `l1` | p08 → p09 | A→B→C | 40 % forwarded, so not linked. New payee Tier 1 cases for p08 at A and p09 at B |
+| `o1` | p10 → p11 → p12 | A→B→C→A | Confirmed and terminates. Tier 2 at A, B and C (B's and C's rules link it), one alert each; it promotes the new payee hits on p10, p11 and p12 |
+| `x1` | p13, (hop 1 missing), p14 | A→B, C→A | No match at B; p14 not linked. New payee Tier 1 cases for p13 at A and p14 at C |
+| `v1` | p15 → … → p20 | A→B→C→A→B→C→A | Partial, cut at hop 4, and still Tier 2 at A, B and C: partial counts, and all three banks' rules link it |
 
 Payment IDs shared by each bank pair (useful for token tests):
 
@@ -149,16 +145,17 @@ uv run python -m dataset.replay apps/dataset/out/slice-6h --url A=<url> --url B=
 
 | Option | Meaning |
 | --- | --- |
-| `--url BANK=URL` | A bank's ingestor, once per bank, e.g. `B=http://localhost:8080`. A bank without one is skipped, so one local ingestor is enough for a test |
-| `--speed` | Simulated seconds per real second, default 60. A payment is sent at `start + (event_time − t0) / speed`, so a 6-hour workload takes 6 minutes; `0` sends as fast as possible |
+| `--url BANK=URL` | A bank's ingestor, once per bank, e.g. `B=http://localhost:8080`, or its function URL, e.g. `B=https://abc123.lambda-url.us-east-1.on.aws`, which replay signs. A bank without one is skipped, so one local ingestor is enough for a test |
+| `--speed` | Simulated seconds per real second, default 60. A payment is sent at `start + (event_time − t0) / speed`, so a 6-hour workload takes 6 minutes; `0` sends as fast as the slowest ingestor takes them |
 | `--rate` | Events per second, open-loop, ignoring event times, for load tests. Each payment makes two events, so `--rate 2000` sends 1,000 payments a second |
 
-- **Batches:** each bank has its own queue and one sender, so a bank that's down delays only its own batches. Each bank gets its payments in event-time order, though payments in the same minute can arrive in a different order than in the bank file. A batch is the payments that became due while the bank's previous batch was being sent, at most 100. Its `MsgId` is `replay-<bank>-<n>` (e.g. `replay-B-000001`), and its `CreDtTm` is its last payment's time.
-- **Open loop:** the clock never waits for a reply, so a slow ingestor shows as a growing `queued` count in the log.
-- **Responses:** after a `200` the sender moves on. A `5xx`, `429` or network error resends the same batch, with full jitter from 1 s doubling to 30 s, until it succeeds. A `400` stops replay with exit status 1.
+- **Batches:** each bank has its own queue and one sender, so with `--speed N` or `--rate` a bank that's down delays only its own batches. Each bank gets its payments in event-time order, though payments in the same minute can arrive in a different order than in the bank file. A batch is the payments that became due while the bank's previous batch was being sent, at most 100. Its `MsgId` is `replay-<bank>-<n>` (e.g. `replay-B-000001`), and its `CreDtTm` is its last payment's time.
+- **Open loop:** with `--speed N` or `--rate`, the clock never waits for a reply, so a slow ingestor shows as a growing `queued` count in the log. `--speed 0` has no clock to keep, so the reader waits while any bank has 1,000 payments queued: memory stays flat, but a bank that's down holds up all three.
+- **Responses:** after a `200` the sender moves on. A `5xx`, `429`, network or signing error resends the same batch, with full jitter from 1 s doubling to 30 s, until it succeeds. A `400` stops replay with exit status 1.
 - **Logs:** one JSON line per POST, e.g. `{"ts": 1793868103.47, "service": "replay", "bank": "B", "msg_id": "replay-B-000001", "status": 200, "attempt": 0, "ms": 2.5, "payments": 1, "queued": 0}`, plus the reply when it isn't a `200`, and a last line such as `{"service": "replay", "payments": 18, "seconds": 1.7}`.
-- **Measured:** all of `altman-small` at `--speed 0` (700,510 payments, 1,156,694 deliveries to banks) took about 26 s against ingestors that reply at once, using 31 MB of memory. All of `altman-medium` (4,509,233 payments) took 173 s and 29 MB: replay reads the files line by line, so its memory doesn't grow with the workload. At the default `--speed 60`, `altman-medium` takes about 11 hours, since its events run from 1 to 28 Sep.
-- **In the cluster:** on k3d, `deploy/replay.sh <workload> [flags]` runs it as a Job in its own `replay` namespace, reading the mounted `apps/dataset/out/<workload>` and sending to each bank's `ingestor` Service ([deployment.md](deployment.md#per-service-settings)). On EKS the same script copies the workload from the workloads bucket first. **pending work:** on EKS it sends HTTPS to the function URLs and signs each request with SigV4, service `lambda`. Today it speaks plain HTTP.
+- **Measured:** all of `altman-small` at `--speed 0` (700,510 payments, 1,156,694 deliveries to banks) took about 26 s against ingestors that reply at once, using 31 MB of memory. All of `altman-medium` (4,509,233 payments) took 173 s and 29 MB: replay reads the files line by line. Against three real ingestors and one Kafka broker in Docker (Linux arm64), `altman-small` at `--speed 0` took 177 s, about 2,100 deliveries a second to each bank, and replay peaked at 59 MiB resident. Before the 1,000-payment limit it queued the workload faster than the ingestors took it and reached 1,221 MiB. At the default `--speed 60`, `altman-medium` takes about 11 hours, since its events run from 1 to 28 Sep.
+- **In the cluster:** on k3d, `deploy/replay.sh <workload> [flags]` runs it as a Job in its own `replay` namespace, reading the mounted `apps/dataset/out/<workload>` and sending to each bank's `ingestor` Service ([deployment.md](deployment.md#per-service-settings)). On EKS the same script copies the workload from the workloads bucket first, and sends plain HTTP to the ingestor Services until the ingestor Lambda lands.
+- **Function URLs (`AWS_IAM`):** an `https://` URL is sent over TLS, and each attempt is signed with SigV4 (service `lambda`, the region from the URL's host) with the credentials botocore finds: on EKS, `LabRole` from the node's metadata service ([deployment.md](deployment.md)); locally, `~/.aws/credentials`. With none, replay exits before sending. `http://` URLs are never signed.
 
 ## Ingestor
 
@@ -211,7 +208,7 @@ The events and their Kafka headers are in [streaming.md](streaming.md#kafka-even
 | Batch size | The payments due at the same moment, at most 100. At `--speed 60` one Altman minute replays in one second; on HI-Small, 1–10 Sep, a bank receives 25–28 GIRO and MEPS+ payments a second on average (p99 53–57, busiest minute 383), so usually one batch a second. 100 payments are about 40 KB, far under the function URL's [6 MB request limit](https://docs.aws.amazon.com/lambda/latest/dg/API_CreateFunctionUrlConfig.html) |
 | `200` | Kafka confirmed every event: `flush()` returned and no delivery failed. Body `{"events": <n>}` |
 | `400` | The whole batch is rejected and nothing is produced: `NbOfTxs` doesn't match the transaction count, a payment names neither agent as this bank, `Ccy` isn't `SGD`, the amount isn't positive, `AccptncDtTm` isn't UTC (`Z`), a field is missing or empty, a BIC is unknown, or a payment isn't `GIRO` or `MEPS+` (e.g. `Cheque`). Body `{"error": "<reason>"}`. Replay stops with an error, because resending the same batch can't succeed |
-| `5xx`, `429`, timeout | Replay resends the same batch (same `MsgId` and `EndToEndId`s) with exponential backoff and full jitter, from 1 s doubling to at most 30 s, until it succeeds ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)). `503` means Kafka didn't confirm every event within `message.timeout.ms`; `429` is Lambda throttling. Replay keeps one queue per bank, so a bank that's down delays only its own batches |
+| `5xx`, `429`, timeout, signing error | Replay resends the same batch (same `MsgId` and `EndToEndId`s) with exponential backoff and full jitter, from 1 s doubling to at most 30 s, until it succeeds ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)). `503` means Kafka didn't confirm every event within `message.timeout.ms`; `429` is Lambda throttling. Replay keeps one queue per bank, so with `--speed N` or `--rate` a bank that's down delays only its own batches |
 | Duplicates | A resent batch can write some events twice; consumers drop repeats by `ce_id` ([streaming.md](streaming.md#kafka-events)) |
 
 Behaviour:
