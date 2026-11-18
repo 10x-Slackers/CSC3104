@@ -1,5 +1,7 @@
 # This release's bank: A, B or C (install.sh sets it per namespace).
 bank: A
+# High availability: privacy node 2 replicas (pending: Kafka 3 with min.insync.replicas 2, PostgreSQL 3).
+ha: false
 # Images built from the root Dockerfile, one per service: <repository>/<package>:<tag>.
 image:
   repository: csc3104

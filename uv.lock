@@ -603,6 +603,19 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-health-checking"
+version = "1.84.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/35/28/dd8737ab231bff6d2d9a9515f8e35f1e89748285ecb670968699c7277dcf/grpcio_health_checking-1.84.1.tar.gz", hash = "sha256:f7bdb5d5865cf2a6651ffc1cc8375fca955557f72fac5902cb4f524d09dd64ea", size = 17068, upload-time = "2026-10-22T15:04:05.223Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/7b/a2aa8b278db821f1ee332fdbfacc0b968b85a3fbeed652e895d1d8b1b7fa/grpcio_health_checking-1.84.1-py3-none-any.whl", hash = "sha256:39833c378ef2570b9d9d6f247df16c1038a94ce1222e93740ef5daa7d62d0671", size = 19089, upload-time = "2026-10-22T15:02:36.879Z" },
+]
+
+[[package]]
 name = "grpcio-tools"
 version = "1.84.1"
 source = { registry = "https://pypi.org/simple" }
@@ -984,8 +997,10 @@ version = "0.1.0"
 source = { editable = "apps/privacy_node" }
 dependencies = [
     { name = "grpcio" },
+    { name = "grpcio-health-checking" },
     { name = "ingestor" },
     { name = "protobuf" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "scorer" },
     { name = "security" },
     { name = "valkey" },
@@ -994,8 +1009,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "grpcio", specifier = ">=1.84.1" },
+    { name = "grpcio-health-checking", specifier = ">=1.76" },
     { name = "ingestor", editable = "apps/ingestor" },
     { name = "protobuf", specifier = ">=7.35.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.8" },
     { name = "scorer", editable = "apps/scorer" },
     { name = "security", editable = "apps/security" },
     { name = "valkey", specifier = ">=6.2" },

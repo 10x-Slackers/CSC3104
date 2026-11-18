@@ -31,9 +31,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import grpc
+import psycopg
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
+from grpc_health.v1 import health, health_pb2_grpc
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
@@ -264,16 +266,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 request.ref.SerializeToString(deterministic=True),
             ]
         )
-        stored = self.store.get_reply(request.query_id, slot)
-        if stored:
-            return stored  # retried query: same answer, no repeated work
         try:
+            stored = self.store.get_reply(request.query_id, slot)
+            if stored:
+                return stored  # retried query: same answer, no repeated work
             reply = self.follow(request)
-        except (ValkeyConnectionError, ValkeyTimeoutError):  # the asker retries later
+            if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # cache final answers
+                self.store.put_reply(request.query_id, slot, reply)
+            return reply
+        except (ValkeyConnectionError, ValkeyTimeoutError, psycopg.OperationalError):
             context.abort(grpc.StatusCode.UNAVAILABLE, "local state unavailable")
-        if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # only cache final answers
-            self.store.put_reply(request.query_id, slot, reply)
-        return reply
 
     def follow(self, request: pb.TraceRequest) -> pb.TraceReply:
         if now() > datetime.fromisoformat(request.deadline):
@@ -426,16 +428,21 @@ class Node(pb_grpc.PrivacyNodeServicer):
             others = {c.signer for c in claims} - {self.bank}
             message = self.chain_message(result)
             self.store.save_chain(result, deliver_to=sorted(others), case=message)
-        if self.case_url and state in (pb.PENDING, pb.TIMED_OUT):
-            # the first bank on each stuck leg; a deeper one isn't known here
-            waiting = {
+        # the first bank on each stuck leg; a deeper one isn't known here
+        stuck = (pb.PENDING, pb.TIMED_OUT)
+        waiting = (
+            self.case_url
+            and state in stuck
+            and {
                 self.local.peer(payment, side)
                 for payment, side, leg_state in (
                     (outgoing, "out", down_state),
                     (incoming, "in", up_state),
                 )
-                if leg_state in (pb.PENDING, pb.TIMED_OUT)
+                if leg_state in stuck
             }
+        )
+        if waiting:  # not for the ingestion grace's NO_MATCH
             legs = [self.local.leg(incoming, "in"), self.local.leg(outgoing, "out")]
             self.store.put_case(
                 {
@@ -562,12 +569,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 self.call(
                     bank, "Deliver", result, now() + timedelta(seconds=5), pb.Ack()
                 )
-                self.store.ack(result.chain_digest, bank)
+                self.store.ack(result, bank)
             except grpc.RpcError as error:
                 if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
                     continue  # stays in the outbox until the bank is back
                 # The receiver read it and said no, so resending can't help.
-                self.store.dead_letter(result.chain_digest, bank)
+                self.store.dead_letter(result, bank)
                 log.warning(
                     "dead-lettered chain_digest=%s bank=%s reason=%s",
                     result.chain_digest,
@@ -590,21 +597,26 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
-        for link, until in list(self._unresolved.items()):
+        for link, until in list(self._unresolved.items()):  # this replica's own hits
             try:
                 if now() > until or self.resolve(*link):
                     del self._unresolved[link]
             except Exception:  # e.g. its payments expired: try again until `until`
                 log.exception("rechecking chain hit %s -> %s", *link)
-        for incoming, outgoing in self.store.unfinished_searches():
-            if stop is not None and stop.is_set():
-                break
-            try:  # e.g. its payments expired: don't hold up the others or delivery
-                self.search(incoming, outgoing)
-            except Exception:
-                log.exception("retrying search %s -> %s", incoming, outgoing)
-        self.deliver_pending(stop=stop)
-        self.deliver_cases(stop=stop)
+        if not self.store.try_lock():
+            return  # another replica is running this pass
+        try:
+            for incoming, outgoing in self.store.unfinished_searches():
+                if stop is not None and stop.is_set():
+                    break
+                try:  # e.g. its payments expired: don't hold up the others or delivery
+                    self.search(incoming, outgoing)
+                except Exception:
+                    log.exception("retrying search %s -> %s", incoming, outgoing)
+            self.deliver_pending(stop=stop)
+            self.deliver_cases(stop=stop)
+        finally:
+            self.store.unlock()
 
 
 def serve(node: Node, port: int = 0) -> tuple[grpc.Server, int]:
@@ -623,6 +635,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bank", required=True, choices="ABC")
     parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument(
+        "--health-port", type=int, help="plaintext gRPC health; the chart uses 50052"
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--workload", help="standalone CSV initialization")
     source.add_argument("--bootstrap-servers", help="integrated bank-local Kafka mode")
@@ -643,7 +658,9 @@ def main():
     parser.add_argument("--tls-ca")
     parser.add_argument("--insecure-demo", action="store_true")
     parser.add_argument("--peer", nargs=2, action="append", default=[])
-    parser.add_argument("--db", default=":memory:")
+    parser.add_argument(
+        "--db", default=":memory:", help="a postgresql:// URL, or a SQLite file"
+    )
     parser.add_argument(
         "--case-url", help="this bank's case service (--valkey-url only)"
     )
@@ -689,6 +706,7 @@ def main():
         from valkey import Valkey
 
         db = Valkey.from_url(args.valkey_url, decode_responses=True)
+        # fails if Valkey is down
         local = ValkeyBank(db, args.bank, query_version, keys)
     else:
         local = LocalBank(args.bank, query_version, keys, **rule)
@@ -716,6 +734,14 @@ def main():
     )
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
+    # Up once Valkey and the store are reachable (it reports SERVING from the start);
+    # plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
+    health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    if args.health_port:
+        servicer = health.HealthServicer()
+        health_pb2_grpc.add_HealthServicer_to_server(servicer, health_server)
+        health_server.add_insecure_port(f"[::]:{args.health_port}")
+        health_server.start()
     if args.search and args.workload:
         for result in node.search_detections():
             print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
@@ -770,6 +796,7 @@ def main():
     finally:
         stop.set()
         server.stop(0)
+        health_server.stop(0)
         worker.join(timeout=SEARCH_SECONDS + 5)
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
