@@ -1,10 +1,10 @@
 # Case handling contract
 
-Owner: Jia Rui · Partners: Zane (node → case messages), Cindy, Isaac (alert counts, deployment), Caleb (own-leg data, summary input) · Code: `apps/case/`, `apps/summary/` · Status: **draft**, needs review by Zane and Caleb
+Owner: Jia Rui · Partners: Isaac (node → case messages, deployment), Cindy, Caleb (own-leg data, summary input) · Code: `apps/case/`, `apps/summary/` · Status: **draft**, needs review by Isaac and Caleb
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The case service and summary service below are built; these items, owned by others, are still needed to run them end to end:
-> - **Node delivery (Zane):** the privacy node posts its messages to `POST /results` through its outbox ([protocol.md](protocol.md#result-delivery-to-the-case-service)). Nothing calls it yet; the message format and shared sample are proposed below and need Zane's approval.
+> - **Fully internal chains (Isaac):** the node sends hit, chain and pending messages through its outbox ([protocol.md](protocol.md#result-delivery-to-the-case-service)), but no `local` messages yet.
 > - **Deployment (Isaac):** a `cases` database in each bank's CloudNativePG cluster, and Deployments for the case and summary services from the runtime contract in [deployment.md](deployment.md#per-service-settings); the summary service as a Lambda function URL on EKS.
 
 Scope: the bank-local case schema, alert tiers, canonical chain identity, durable alert uniqueness, the read-only analyst UI and the summary service.
@@ -14,7 +14,7 @@ Scope: the bank-local case schema, alert tiers, canonical chain identity, durabl
 | Item | Decision |
 | --- | --- |
 | Case schema | **draft**. `case_store.py`: PostgreSQL in the cluster (a separate `cases` database in the bank's CloudNativePG cluster, `CASE_DATABASE_URL=postgresql://…`), or a SQLite file for tests and local runs; the same SQL runs on both. Tables `cases` (tier, state, bookmark and reviewed flags), `transfers`, `messages`, `claims`, `own_legs`, `alerts`, `notifications`, with an index on each `case_id`. Other banks' legs are tokens only; this bank's own legs are in `own_legs` |
-| Input | **draft, needs Zane**. One JSON message per `POST /results` from this bank's privacy node, in four kinds: `chain`, `pending`, `local`, `hit` ([format and sample](#node-messages)). A chain carries the `ChainResult` from [`privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto) as protobuf JSON; each `LinkClaim` is stored as `signer`, `recipient`, `query_id`, `key_version`, `signing_key_version`, `truncated`, `in_pair`, `in_token`, `out_pair`, `out_token`, `signature`. Tokens and signatures are normalized to hex once in `Claim.from_pb`. An empty ref marks the chain's start or end |
+| Input | **agreed** (Isaac for the node, 18 Nov). One JSON message per `POST /results` from this bank's privacy node, in four kinds: `chain`, `pending`, `local`, `hit` ([format and sample](#node-messages)). A chain carries the `ChainResult` from [`privacy_node.proto`](../../apps/privacy_node/src/privacy_node/privacy_node.proto) as protobuf JSON; each `LinkClaim` is stored as `signer`, `recipient`, `query_id`, `key_version`, `signing_key_version`, `truncated`, `in_pair`, `in_token`, `out_pair`, `out_token`, `signature`. Tokens and signatures are normalized to hex once in `Claim.from_pb`. An empty ref marks the chain's start or end |
 | Own-bank details | **draft, needs Caleb**. Every message carries this bank's own legs (`payment_id`, `direction`, `account`, `amount`, `pair`, `token`), looked up by the node in its token index. They are snapshotted into `own_legs` when the message arrives, never on a page view, because the token index expires in days while cases are kept. The disclosure boundary is between banks, not inside one: B's analyst sees B's own customers' accounts and amounts, and other banks' legs stay tokens. The case service never reads Valkey |
 | Alert tiers | **draft**. A *rule-backed* claim has both an incoming and an outgoing ref: that bank's own rule linked them. **Tier 2, alert** (pushed to the alert inbox, at every bank on the chain): a verified chain, confirmed **or** partial, with at least 2 rule-backed banks; partial counts because chains longer than the hop limit can never confirm. **Tier 1, low priority** (shown, not pushed): a chain where only this bank's rule fired, a pending search, a fully internal chain, or a rule hit. A chain where neither condition holds (e.g. `m1` at A or C, where only B's rule fired) is stored as evidence but shows no case. A case's tier is its highest message's, so a Tier 1 case is promoted when a chain through it reaches Tier 2. This follows MAS COSMIC's thresholds rising from Request to Provide to Alert, matches the offline evaluator's `chain_tier`, and stops `m1` alerting at three banks when only B's rule linked its transfers. The case list shows alerts first, then low-priority cases; alerts are oldest first; low-priority cases rank by rules fired (this bank's distinct rules on the case: each hit rule, and its chain rule if a chain it backs is there), then the amount of this bank's legs, then oldest first (Guidelines to MAS Notice 626 B-1-1). A promotion to a higher tier clears the reviewed flag |
 | Canonical chain identity across overlapping messages | **draft**. A new case's ID is the message key (Role 3's `chain_digest` for a chain). Each transfer belongs to one case: `tok:<pair>:<token>` for a cross-bank transfer and `pay:<payment_id>` for an own leg. A message sharing any transfer joins that case, and one spanning several cases merges them into the oldest, with their evidence, alert and flags (bookmarked if either was, reviewed only if both were). This joins a pending search with its later chain, a rule hit with the chain through it, and overlapping partial chains with different digests (a chain longer than the hop limit arrives as several partial results); over-limit `v1` gives one case |
@@ -27,7 +27,7 @@ Scope: the bank-local case schema, alert tiers, canonical chain identity, durabl
 
 ### Node messages
 
-**draft, proposed by Jia Rui for Zane to approve.** Shared sample: [`apps/case/fixtures/node_messages.json`](../../apps/case/fixtures/node_messages.json), one message of each kind at bank B; the case tests load it, and the node's tests should too. Its chain is signed with keys from a temporary demo directory, so it checks shape only: tests that need a signed chain build one with `sample_chains.chain()`. `POST /results` replies `{"key": …}` with 200 once stored, or 422 for a message that isn't evidence (dead-letter it; retry anything else).
+**agreed** (proposed by Jia Rui; Isaac for the node, 18 Nov). Shared sample: [`apps/case/fixtures/node_messages.json`](../../apps/case/fixtures/node_messages.json), one message of each kind at bank B; the case tests load it, and the node's tests should too. Its chain is signed with keys from a temporary demo directory, so it checks shape only: tests that need a signed chain build one with `sample_chains.chain()`. `POST /results` replies `{"key": …}` with 200 once stored, or 422 for a message that isn't evidence (dead-letter it; retry anything else).
 
 | Field | Kinds | Meaning |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ Tracked here and by the `DEPENDS ON` comments in `apps/case/`.
 
 | Item | Role | Status | Role 5 file | Their file |
 | --- | --- | --- | --- | --- |
-| The privacy node posts its messages to `POST /results` | Role 3 (privacy node) | **pending work** (Zane): format proposed in [Node messages](#node-messages) | `apps/case/src/case/app.py` (`results`), `evidence.py` (`parse`) | `apps/privacy_node/src/privacy_node/store.py` (`save_chain`, outbox) |
+| The privacy node posts its messages to `POST /results` | Role 3 (privacy node) | Done (Isaac, 18 Nov) for `chain`, `pending` and `hit`; `local` is **pending work** | `apps/case/src/case/app.py` (`results`), `evidence.py` (`parse`) | `apps/privacy_node/src/privacy_node/store.py` (`save_chain`, outbox) |
 | Rule-backed claims and tiers | Roles 2 and 3 | **draft**: same definition as the offline evaluator | `apps/case/src/case/evidence.py` (`tier`) | `apps/evaluation/src/evaluation/run.py` (`chain_tier`) |
 | Own-leg data and the summary input fields | Role 4 (security and privacy) | **draft**, Caleb to review | `apps/case/src/case/report.py` (`report_input`) | `docs/contracts/security.md` |
 | A `cases` database, Deployments and the summary Lambda | Isaac (deployment) | **pending work**: runtime contract sent in [deployment.md](deployment.md#per-service-settings) | `apps/case/src/case/app.py`, `apps/summary/src/summary/app.py` | `deploy/charts/bank/` |
@@ -79,7 +79,7 @@ Also part of: [Node → case service](protocol.md#interfaces), [`check_result`](
 
 ## Open
 
-- [ ] Zane approves the node message format and sample, and the node posts through its outbox (Zane).
+- [x] The node message format and sample are agreed, and the node posts through its outbox (`local` messages pending, Isaac).
 - [ ] Caleb reviews the own-leg snapshot and the summary input fields (Caleb).
 - [x] Rank Tier 1 cases by the number of rules fired, then amount (Guidelines to MAS Notice 626 B-1-1).
 - [ ] Page the list: about 2,400 flagged payments per bank per day on HI-Small's eval days (Jia Rui).

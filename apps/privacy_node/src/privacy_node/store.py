@@ -4,8 +4,10 @@
 - searches: every search this bank started and its latest state
 - chains:   one row per chain identity; the seed for Role 5's one-alert-per-bank rule
 - outbox:   results still to deliver to other involved banks, until acknowledged
+- case_outbox: messages still to post to this bank's case service (case.md)
 """
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -25,7 +27,11 @@ CREATE TABLE IF NOT EXISTS outbox (
   chain_digest TEXT, bank TEXT, result BLOB, acked INTEGER DEFAULT 0,
   dead INTEGER DEFAULT 0,
   PRIMARY KEY (chain_digest, bank));
+CREATE TABLE IF NOT EXISTS case_outbox (
+  key TEXT, kind TEXT, message TEXT, acked INTEGER DEFAULT 0, dead INTEGER DEFAULT 0,
+  PRIMARY KEY (key, kind));
 """
+UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CONFLICT (key, kind)"
 
 
 class Store:
@@ -78,12 +84,15 @@ class Store:
         )
 
     def save_chain(
-        self, result: pb.ChainResult, deliver_to: Iterable[str] = ()
+        self,
+        result: pb.ChainResult,
+        deliver_to: Iterable[str] = (),
+        case: dict | None = None,
     ) -> None:
         """Insert a chain once; a later CONFIRMED result upgrades a PARTIAL one.
 
-        The chain row and its outbox rows are written in one transaction, so a
-        crash can't leave a stored result that is never delivered.
+        The chain row, its outbox rows and its case message are written in one
+        transaction, so a crash can't leave a stored result that is never delivered.
         """
         blob = result.SerializeToString()
         with self.lock, self.db:
@@ -107,6 +116,32 @@ class Store:
                     " DO UPDATE SET result=excluded.result, acked=0, dead=0",
                     (result.chain_digest, bank, blob),
                 )
+            if changed and case:
+                self.db.execute(
+                    UPSERT_CASE
+                    + " DO UPDATE SET message=excluded.message, acked=0, dead=0",
+                    (case["key"], case["kind"], json.dumps(case)),
+                )
+
+    def put_case(self, message: dict) -> None:
+        """Queue a hit or pending message once; a repeat changes nothing."""
+        self._run(
+            UPSERT_CASE + " DO NOTHING",
+            message["key"],
+            message["kind"],
+            json.dumps(message),
+        )
+
+    def pending_cases(self) -> list[tuple[str, str, str]]:
+        return self._run(
+            "SELECT key, kind, message FROM case_outbox WHERE acked=0 AND dead=0"
+        )
+
+    def ack_case(self, key: str, kind: str) -> None:
+        self._run("UPDATE case_outbox SET acked=1 WHERE key=? AND kind=?", key, kind)
+
+    def dead_case(self, key: str, kind: str) -> None:
+        self._run("UPDATE case_outbox SET dead=1 WHERE key=? AND kind=?", key, kind)
 
     def chains(self) -> list[pb.ChainResult]:
         rows = self._run("SELECT result FROM chains ORDER BY chain_digest")

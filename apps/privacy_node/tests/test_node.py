@@ -8,6 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
+import fakeredis
 import grpc
 import pytest
 from google.protobuf.json_format import MessageToDict
@@ -626,19 +627,26 @@ def test_kafka_cli_sigterm_closes_consumer(tmp_path, monkeypatch):
     server.stop.assert_called_once_with(0)
 
 
-def test_valkey_cli_starts_empty_without_kafka_or_workload(tmp_path, monkeypatch):
+def test_valkey_cli_reads_hits_without_kafka_or_workload(tmp_path, monkeypatch):
     prepare_demo_keys(tmp_path)
     monkeypatch.setattr("confluent_kafka.Consumer", Mock(side_effect=AssertionError))
     monkeypatch.setattr(LocalBank, "from_workload", Mock(side_effect=AssertionError))
+    db = fakeredis.FakeValkey(decode_responses=True)
+    monkeypatch.setattr("valkey.Valkey.from_url", Mock(return_value=db))
+    consume_hits = Mock(side_effect=KeyboardInterrupt)  # stop after the first read
+    monkeypatch.setattr(Node, "consume_hits", consume_hits)
     server = Mock()
-    server.wait_for_termination.return_value = False
     serve = Mock(return_value=(server, 0))
     monkeypatch.setattr(node_module, "serve", serve)
-    args = ["node", "--bank", "B", "--valkey-url", "valkey://valkey:6379"]
+    args = ["node", "--bank", "B", "--valkey-url", "valkey://valkey:6379", "--search"]
     args += ["--key-directory", str(tmp_path), "--insecure-demo"]
+    args += ["--case-url", "http://case:8000"]
     monkeypatch.setattr(sys, "argv", args)
-    node_module.main()
-    assert serve.call_args.args[0].local.detections == []
+    with pytest.raises(KeyboardInterrupt):
+        node_module.main()
+    node = serve.call_args.args[0]
+    assert node.local.db is db and node.case_url == "http://case:8000"
+    consume_hits.assert_called_once_with(search=True)
     server.stop.assert_called_once_with(0)
 
 
