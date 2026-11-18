@@ -591,8 +591,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
         for link, until in list(self._unresolved.items()):
-            if self.resolve(*link) or now() > until:
-                del self._unresolved[link]
+            try:
+                if now() > until or self.resolve(*link):
+                    del self._unresolved[link]
+            except Exception:  # e.g. its payments expired: try again until `until`
+                log.exception("rechecking chain hit %s -> %s", *link)
         for incoming, outgoing in self.store.unfinished_searches():
             if stop is not None and stop.is_set():
                 break
