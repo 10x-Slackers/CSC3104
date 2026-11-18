@@ -7,7 +7,6 @@ Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (token
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
 > - **Node reads Valkey:** the scorer writes its state to Valkey; the privacy node still runs its own scorer in-process until it reads Valkey instead (Zane; [Search handoff](#search-handoff)).
-> - **Key rotation:** the scorer reads `active.json` once at start; re-reading it every 10 s and backfilling `tok:` for a new version is not built (Cindy).
 > - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
@@ -130,8 +129,38 @@ Keys come from `KEY_DIR` (or `--key-dir`): `<KEY_DIR>/<bank>/active.json` and th
 X25519 files in the security.md layout; the bank's own public key under `trusted/` is
 skipped. The older flags `--key-version`, `--x25519-private` and repeated
 `--peer-public-key PEER PATH` load one version from explicit files, and override
-`KEY_DIR`. Without either, no tokens are written. The scorer reads `active.json` once
-at start (**pending work**: re-reading it for a rotation without a restart, #46).
+`KEY_DIR`. Without either, no tokens are written.
+
+With `KEY_DIR`, the scorer re-reads `active.json` every 10 s between events and follows
+the rotation steps in [security.md](security.md#versions-rotation-and-reload):
+
+- **Introduce:** a newly listed version is backfilled, so every `pay:` entry with
+  another bank gets a `tok:` key under it.
+- **Switch:** the query version (the `pay:` entry's `token`) changes only once every
+  peer lists it, and every `pay:` entry is rewritten to it.
+- **Retire:** a version no longer listed retires, and its `tok:` keys expire with the
+  TTL. This step writes nothing, so it does no backfill pass. Switch and retire in
+  separate steps, as security.md requires.
+
+Every check runs before the index changes, so a missing key file or a half-written
+`active.json` is logged as an error and the old keys stay in use. What counts as new is
+worked out from the config last applied, so a reload retried after a backfill stopped
+part-way does the whole backfill again. A pod that restarts while more than one
+version is active redoes the backfill at start, in case the last one didn't finish; a
+normal start with one version costs nothing.
+
+Every replica runs each backfill pass over every `pay:` entry, and this is needed, not
+just repeated work: each replica's pass covers the payments other replicas wrote under
+the old config in the up to 10 s before they reloaded, which would otherwise miss the
+new version's token or keep the old one. Don't trim the backfill down to one replica.
+
+A pass pauses scoring on that replica while it runs. Reads go 1,000 `HGETALL`s per round
+trip and writes 1,000 entries per `MULTI`/`EXEC`. A bank holds roughly 350,000–420,000
+`pay:` entries after replaying all of `altman-small` (1,156,694 events over three banks,
+[data.md](data.md#replay-replaypy)), and a pass over 100,000 entries took 2.5 s to introduce k2 and 2.4 s to switch
+(Valkey 9.1.3 in Docker on a laptop, loopback; retiring took no time). That is about
+10 s per pass for a whole bank, which will show as lag in experiment 12 and stays well
+under librdkafka's `max.poll.interval.ms` (300 s).
 
 The privacy node's in-process path still keeps its own in-memory `TokenIndex`
 (`add()`/`lookup()` with references, `--max-token-references` as a fail-stop bound);
