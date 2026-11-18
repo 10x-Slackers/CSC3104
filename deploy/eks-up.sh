@@ -14,7 +14,7 @@ aws eks update-kubeconfig --region us-east-1 --name csc3104
 # Service images from the root Dockerfile, for the nodes' x86-64.
 tag=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
 aws ecr get-login-password --region us-east-1 | docker login -u AWS --password-stdin "${registry%%/*}"
-for app in ingestor scorer privacy-node dataset; do
+for app in ingestor scorer privacy-node case summary dataset; do
   docker build -q --platform linux/amd64 --build-arg APP=$app -t "$registry/$app:$tag" .. >/dev/null
   docker push -q "$registry/$app:$tag"
 done

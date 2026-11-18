@@ -51,7 +51,7 @@ spec:
             - {name: tls, mountPath: /tls}
           {{- include "bank.container" . | nindent 10 }}
       volumes:
-        - {{- include "bank.keyVolume" . | nindent 10 }}
+        - {{- include "bank.keyVolume" (list . "**") | nindent 10 }}
         - name: tls
           secret: {secretName: privacy-node-tls}
 ---

@@ -25,7 +25,7 @@ spec:
             - {name: keys, mountPath: /keys}
           {{- include "bank.container" . | nindent 10 }}
       volumes:
-        - {{- include "bank.keyVolume" . | nindent 10 }}
+        - {{- include "bank.keyVolume" (list . "{active.json,private/x25519/**,trusted/x25519/**}") | nindent 10 }}
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject

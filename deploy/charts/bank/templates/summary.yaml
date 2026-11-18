@@ -1,0 +1,32 @@
+# Draft case summaries for the case service (docs/contracts/deployment.md, Summary service row).
+# A container in the bank on both clusters until the EKS Lambda lands.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: summary
+spec:
+  selector:
+    matchLabels: {app: summary}
+  template:
+    metadata:
+      labels: {app: summary}
+    spec:
+      {{- include "bank.pod" . | nindent 6 }}
+      containers:
+        - name: summary
+          image: {{ .Values.image.repository }}/summary:{{ .Values.image.tag }}
+          args: [python, -m, summary.app]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+          {{- include "bank.container" . | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: summary
+spec:
+  selector: {app: summary}
+  ports:
+    - port: 8080
