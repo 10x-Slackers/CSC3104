@@ -20,6 +20,7 @@ import json
 import logging
 import signal
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -27,7 +28,6 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping
 from concurrent import futures
 from copy import copy
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import grpc
@@ -41,6 +41,7 @@ from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node import privacy_node_pb2_grpc as pb_grpc
+from privacy_node import store as protocol_store
 from privacy_node.claims import (
     bound,
     chain_digest,
@@ -67,7 +68,8 @@ log = logging.getLogger(__name__)
 
 HOP_LIMIT = 4  # transfers are hops 0..HOP_LIMIT, so a chain holds at most 5
 BRANCH_CAP = 1  # linear chains only; extra local links make the result PARTIAL
-SEARCH_SECONDS = 10  # whole-search deadline, carried unchanged by every hop
+SEARCH_SECONDS = 10  # whole-search deadline, kept by the initiator only
+REPLY_MARGIN = 0.25  # seconds a bank keeps back to reply, so its claim isn't lost
 # Worst state wins when two results are combined.
 SEVERITY = [
     *(pb.CONFIRMED, pb.PARTIAL, pb.NO_MATCH, pb.PENDING, pb.TIMED_OUT),
@@ -75,11 +77,14 @@ SEVERITY = [
 ]
 
 
-def now() -> datetime:
-    return datetime.now(UTC)
-
-
 UNREADABLE_TRACE = pb.TraceReply(state=pb.INVALID_CLAIM)
+
+
+def time_left(context: grpc.ServicerContext | None) -> float:
+    """The caller's remaining gRPC timeout: a relative deadline, so clock skew can't
+    expire it. A whole search's worth if the caller set none."""
+    left = context.time_remaining() if context else None  # huge if none was set
+    return SEARCH_SECONDS if left is None else min(left, SEARCH_SECONDS)
 
 
 def worst(*states: pb.State) -> pb.State:
@@ -141,7 +146,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if ingestion_grace_seconds < 0:
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
-        self._ingestion_deadlines = {}
         self._unresolved = {}  # chain hits not yet reaching cross-bank payments
 
     # ---- outgoing calls -------------------------------------------------
@@ -151,7 +155,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         return self.local.index.key_version
 
     def call[R: Message](
-        self, bank: str, method: str, request: Message, deadline: datetime, fallback: R
+        self, bank: str, method: str, request: Message, timeout: float, fallback: R
     ) -> R:
         """Open one channel per call so Service balancing can select a replica.
 
@@ -162,7 +166,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self.tls.channel(target) if self.tls else grpc.insecure_channel(target)
         ) as channel:
             stub = pb_grpc.PrivacyNodeStub(channel)
-            timeout = (deadline - now()).total_seconds()
             reply = getattr(stub, method)(request, timeout=timeout)
         if not unreadable(reply):
             return reply
@@ -175,7 +178,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
         ref: pb.TokenRef,
         direction: pb.Direction,
         hops_remaining: int,
-        deadline: str,
         visited: Iterable[pb.TokenRef],
         key_version: str,
     ) -> pb.TraceRequest:
@@ -186,7 +188,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
             ref=ref,
             direction=direction,
             hops_remaining=hops_remaining,
-            deadline=deadline,
             visited=visited,
         )
 
@@ -270,15 +271,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
             stored = self.store.get_reply(request.query_id, slot)
             if stored:
                 return stored  # retried query: same answer, no repeated work
-            reply = self.follow(request)
+            reply = self.follow(request, context)
             if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # cache final answers
                 self.store.put_reply(request.query_id, slot, reply)
             return reply
         except (ValkeyConnectionError, ValkeyTimeoutError, psycopg.OperationalError):
             context.abort(grpc.StatusCode.UNAVAILABLE, "local state unavailable")
 
-    def follow(self, request: pb.TraceRequest) -> pb.TraceReply:
-        if now() > datetime.fromisoformat(request.deadline):
+    def follow(self, request: pb.TraceRequest, context) -> pb.TraceReply:
+        if time_left(context) <= 0:
             return pb.TraceReply(state=pb.TIMED_OUT)
         down = request.direction == pb.DOWNSTREAM
         here = "in" if down else "out"
@@ -287,10 +288,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         if not payment:
             return pb.TraceReply(state=pb.NO_MATCH)
-        return self.extend(request, payment, down)
+        return self.extend(request, payment, down, context)
 
     def extend(
-        self, request: pb.TraceRequest, payment: str, down: bool
+        self, request: pb.TraceRequest, payment: str, down: bool, context
     ) -> pb.TraceReply:
         """Sign this bank's link for the transfer and follow it one more hop."""
         here, there = ("in", "out") if down else ("out", "in")
@@ -324,14 +325,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
             next_ref,
             request.direction,
             request.hops_remaining - 1,
-            request.deadline,
             [*request.visited, next_ref],
             request.key_version,
         )
         peer = self.local.peer(nexts[0], there)
         try:
-            deadline = datetime.fromisoformat(request.deadline)
-            reply = self.call(peer, "Trace", forward, deadline, UNREADABLE_TRACE)
+            # what is left of the caller's timeout (gRPC deadline propagation)
+            left = time_left(context) - REPLY_MARGIN
+            reply = self.call(peer, "Trace", forward, left, UNREADABLE_TRACE)
         except grpc.RpcError as error:
             return pb.TraceReply(state=failure_state(error), claims=[claim(next_ref)])
         return pb.TraceReply(
@@ -357,22 +358,20 @@ class Node(pb_grpc.PrivacyNodeServicer):
         payment: str,
         ref: pb.TokenRef,
         budget: int,
-        deadline: datetime,
+        deadline: float,  # time.monotonic()
         visited: Iterable[pb.TokenRef],
         key_version: str,
     ) -> tuple[pb.State, list[pb.LinkClaim]]:
         """Query the next bank in one direction and check the claims that come back."""
         query_id = str(uuid.uuid4())
         side = "out" if direction == pb.DOWNSTREAM else "in"
-        request = self.request(
-            query_id, ref, direction, budget, deadline.isoformat(), visited, key_version
-        )
+        request = self.request(query_id, ref, direction, budget, visited, key_version)
         try:
             reply = self.call(
                 self.local.peer(payment, side),
                 "Trace",
                 request,
-                deadline,
+                deadline - time.monotonic(),
                 UNREADABLE_TRACE,
             )
         except grpc.RpcError as error:
@@ -381,14 +380,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
         fresh = bound(claims, self.bank, query_id)
         return (reply.state if fresh else pb.INVALID_CLAIM), claims
 
+    def search_id(self, incoming: str, outgoing: str) -> str:
+        return hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode()).hexdigest()
+
     def search(self, incoming: str, outgoing: str) -> pb.ChainResult:
         """Trace both ways from a local detection, assemble and store for delivery."""
-        search_id = hashlib.sha256(f"{self.bank}:{incoming}:{outgoing}".encode())
-        search_id = search_id.hexdigest()
-        retry_until = self._ingestion_deadlines.setdefault(
-            search_id, now() + timedelta(seconds=self.ingestion_grace_seconds)
-        )
-        deadline = now() + timedelta(seconds=SEARCH_SECONDS)
+        search_id = self.search_id(incoming, outgoing)
+        # the grace runs from the stored first attempt: replicas and restarts share it
+        first = self.store.search_started(search_id) or protocol_store.now()
+        deadline = time.monotonic() + SEARCH_SECONDS
         with self.local.lock:
             key_version = self.key_version
             in_ref = self.local.ref(incoming, "in", key_version)
@@ -415,7 +415,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         valid = valid_chain(claims, self.public_keys)
         cut = pb.CONFIRMED if complete(claims) else pb.PARTIAL
         state = worst(down_state, up_state, cut) if valid else pb.INVALID_CLAIM
-        if state == pb.NO_MATCH and now() < retry_until:
+        late = protocol_store.now() - first >= self.ingestion_grace_seconds
+        if state == pb.NO_MATCH and not late:
             # Fresh query IDs let delayed ingestion be checked again.
             state = pb.PENDING
         result = pb.ChainResult(
@@ -452,7 +453,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     "legs": legs,
                 }
             )
-        self.store.put_search(search_id, incoming, outgoing, state, result.chain_digest)
+        self.store.put_search(
+            search_id, incoming, outgoing, state, result.chain_digest, first
+        )
         return result
 
     def search_detections(self) -> list[pb.ChainResult]:
@@ -497,14 +500,19 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if search and hit["rule"] == "chain" and not self.resolve(*hit["payments"]):
             # The money starts or stays inside this bank, or an intra-bank link on
             # another account isn't written yet: housekeeping looks again.
-            grace = timedelta(seconds=self.ingestion_grace_seconds)
-            self._unresolved[tuple(hit["payments"])] = now() + grace
+            until = time.monotonic() + self.ingestion_grace_seconds
+            self._unresolved[tuple(hit["payments"])] = until
 
     def resolve(self, incoming: str, outgoing: str) -> bool:
         """Search from a chain link, through intra-bank hops, if both ends cross banks."""
         starts = self.local.ends(incoming, "in")
         ends = self.local.ends(outgoing, "out")
-        if starts and ends:
+        new = (
+            starts
+            and ends
+            and not self.store.search_started(self.search_id(starts[0], ends[0]))
+        )  # a stored search is housekeeping's to retry, on its backoff
+        if new:
             self.search(starts[0], ends[0])  # BRANCH_CAP: linear chains only
         return bool(starts and ends)
 
@@ -566,9 +574,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             if stop is not None and stop.is_set():
                 break
             try:
-                self.call(
-                    bank, "Deliver", result, now() + timedelta(seconds=5), pb.Ack()
-                )
+                self.call(bank, "Deliver", result, 5, pb.Ack())
                 self.store.ack(result, bank)
             except grpc.RpcError as error:
                 if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
@@ -599,13 +605,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self._key_reload.start()
         for link, until in list(self._unresolved.items()):  # this replica's own hits
             try:
-                if now() > until or self.resolve(*link):
+                if time.monotonic() > until or self.resolve(*link):
                     del self._unresolved[link]
             except Exception:  # e.g. its payments expired: try again until `until`
                 log.exception("rechecking chain hit %s -> %s", *link)
         if not self.store.try_lock():
             return  # another replica is running this pass
         try:
+            self.store.expire_replies()
             for incoming, outgoing in self.store.unfinished_searches():
                 if stop is not None and stop.is_set():
                     break
@@ -613,6 +620,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     self.search(incoming, outgoing)
                 except Exception:
                     log.exception("retrying search %s -> %s", incoming, outgoing)
+                    search_id = self.search_id(incoming, outgoing)  # back off anyway
+                    self.store.put_search(search_id, incoming, outgoing, pb.PENDING, "")
             self.deliver_pending(stop=stop)
             self.deliver_cases(stop=stop)
         finally:

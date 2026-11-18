@@ -2,9 +2,10 @@
 
 import io
 import json
+import time
 import urllib.error
-from datetime import timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import fakeredis
 import pytest
@@ -17,7 +18,7 @@ from ingestor import read_events
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node.demo import prepare_demo_keys
 from privacy_node.keys import BANKS, own_key, pair_paths, public_keys
-from privacy_node.node import Node, now, serve
+from privacy_node.node import Node, serve
 from privacy_node.store import Store
 from privacy_node.valkey_bank import ValkeyBank
 from scorer.score import Scorer
@@ -135,7 +136,7 @@ def event(bank, pid, direction, account, other, minute, amount):
     }
 
 
-def test_intra_bank_hop_is_followed(run):
+def test_intra_bank_hop_is_followed(run, monkeypatch):
     events = {
         "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
         "B": [
@@ -149,7 +150,11 @@ def test_intra_bank_hop_is_followed(run):
     nodes, posted = run(events)
     assert nodes["B"].local.links("q1", "in") == ["q3"]
     assert nodes["B"].local.links("q3", "out") == ["q1"]
+    search = Mock(wraps=nodes["B"].search)
+    monkeypatch.setattr(nodes["B"], "search", search)
     nodes["B"].consume_hits(block_ms=None)
+    # both chain hits (q1 -> q2, q2 -> q3) lead to q1 -> q3: one search, not two
+    search.assert_called_once_with("q1", "q3")
     nodes["B"].housekeeping()  # delivers to A and C
     for node in nodes.values():
         [chain] = node.store.chains()
@@ -252,14 +257,17 @@ def test_a_peers_valkey_outage_leaves_the_search_pending(run, monkeypatch):
     assert nodes["B"].search("p06", "p07").state == pb.PENDING  # retried, not failed
 
 
-def test_a_broken_retry_doesnt_block_delivery(run):
+def test_a_broken_retry_doesnt_block_delivery(run, monkeypatch):
     nodes, posted = run({b: [] for b in BANKS})
     node = nodes["B"]
-    node.store.put_search("s", "expired-in", "expired-out", pb.PENDING, "")
-    node._unresolved[("expired-in", "expired-out")] = now() + timedelta(seconds=60)
+    stuck = node.search_id("expired-in", "expired-out")
+    node.store.put_search(stuck, "expired-in", "expired-out", pb.PENDING, "")
+    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
+    monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)
     node.housekeeping()
     assert [m["key"] for m in posted["B"]] == ["h1"]
+    assert node.store.unfinished_searches() == []  # backed off, not retried every pass
 
 
 def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():

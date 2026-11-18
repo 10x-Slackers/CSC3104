@@ -4,11 +4,8 @@ Owner: Isaac (taken over from Zane, 18 Nov 2026) · Partners: Caleb (security), 
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Relative deadlines:** drop the absolute `deadline` field and pass `timeout=context.time_remaining()` on nested calls, so clock skew can't time out every search. `SEARCH_SECONDS` and the `Deliver` timeout come from measured p99.9.
-> - **Retries:** only at the initiator, with capped exponential backoff and full jitter (`random(0, min(300 s, 10 s × 2^attempts))`, stored as `attempts` and `next_at`), and expiry: after 24 h a search becomes **unresolved**. Fresh `query_id` per retry stays.
-> - **Messages:** tokens become 16-byte `bytes` ([security.md](security.md)); a schema test replaces the per-message allowlist walk.
+> - **Timeouts:** `SEARCH_SECONDS` and the `Deliver` timeout come from measured p99.9.
 > - **Fully internal chains** posted to the case service as `local` messages ([Result delivery to the case service](#result-delivery-to-the-case-service)).
-> - **mTLS** with the authenticated bank matched to `sender`.
 
 Scope: protobuf messages, gRPC service, onward matching, hop and deadline bounds, visited state, stored replies, retries, result delivery and failure handling.
 
@@ -45,7 +42,7 @@ Source: [`apps/privacy_node/src/privacy_node/privacy_node.proto`](../../apps/pri
 | Message | Fields | Notes |
 | --- | --- | --- |
 | `TokenRef` | `pair`, `token` | A pair-scoped token of exactly 16 raw bytes, e.g. pair `A-B`. Lookups use `(pair, key_version, token)` ([security.md](security.md)) |
-| `TraceRequest` | `query_id`, `sender`, `key_version`, `ref`, `direction`, `hops_remaining`, `deadline`, `visited` | `hops_remaining`, not `hop`: `hop` is a forbidden evaluation label. **pending work:** `deadline` removed |
+| `TraceRequest` | `query_id`, `sender`, `key_version`, `ref`, `direction`, `hops_remaining`, `visited` | `hops_remaining`, not `hop`: `hop` is a forbidden evaluation label. Field 7, the old absolute `deadline`, is reserved |
 | `LinkClaim` | `signer`, `recipient`, `query_id`, `key_version`, `in_ref`, `out_ref`, `signature`, `signing_key_version`, `truncated` | "I hold `in_ref` and `out_ref` and my local rule links them." An empty ref means the chain starts or ends here. At the hop limit the bank still names its onward transfer, so a cut is visible in the signed claims |
 | `TraceReply` | `state`, `claims` | Claims in path order, nearest bank first |
 | `ChainResult` (result delivery) | `chain_digest`, `sender`, `state`, `claims` | `chain_digest`, not `chain_id`: `chain_id` is a forbidden evaluation label |
@@ -82,10 +79,10 @@ signed truncation force PARTIAL. Full security interfaces: [security.md](securit
 | Query ID and idempotency | `query_id` is a UUID per leg. Each bank stores its reply under `(query_id, sender, ref)` and returns the stored reply to a retry. Only final states are stored; `PENDING` and `TIMED_OUT` are recomputed |
 | Search ID | `sha256("<bank>:<incoming payment>:<outgoing payment>")`, bank-local only. The same detection always maps to the same search row |
 | Hop accounting and limit | `HOP_LIMIT = 4`: a chain holds hops 0–4, so at most 5 transfers. The initiator already knows 2, so the legs share a budget of 3 extra transfers. The downstream leg runs first; the upstream leg gets what is left. `hops_remaining` drops by one each time a bank adds a transfer |
-| Deadline | `SEARCH_SECONDS = 10`. One absolute UTC deadline, set by the initiator and passed on unchanged. Each gRPC call's timeout is the time left until it. **pending work:** relative; only the initiator keeps a local deadline, and each nested call gets the time remaining |
+| Deadline | `SEARCH_SECONDS = 10`, relative. Only the initiator keeps a deadline, on its own monotonic clock. Each gRPC call's timeout is the time left, and a bank answering a `Trace` gives its onward call what is left of its caller's timeout (`context.time_remaining()`, at most `SEARCH_SECONDS`), less 0.25 s to send its own reply, so a slow bank further on costs only its own claims. No timestamp crosses banks, so clock skew can't expire a search. This is gRPC's own [deadline propagation](https://grpc.io/docs/guides/deadlines/#deadline-propagation): the timeout travels as the relative `grpc-timeout` header ([gRPC over HTTP/2](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests)), as in [Google SRE, ch. 22](https://sre.google/sre-book/addressing-cascading-failures/#xref_cascading-failure_latency-and-deadlines). A request that arrives with no time left gets `TIMED_OUT` |
 | Visited-token handling (loop prevention) | The request carries every token already in the search, including those found by the other leg. A bank whose next token is already visited signs the closing link and stops |
 | Branching cap | `BRANCH_CAP = 1`: linear chains only. If a bank's rule finds more than one onward link, it follows the first (lowest payment ID) and the result becomes `PARTIAL` |
-| Retries | One attempt per peer call. `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `ABORTED` → pending and `DEADLINE_EXCEEDED` → timed-out, all re-run by housekeeping; any other peer error → failed, not retried. **pending work:** backoff with jitter and 24 h expiry |
+| Retries | One attempt per peer call, and only the initiator retries. `UNAVAILABLE`, `RESOURCE_EXHAUSTED` and `ABORTED` → pending and `DEADLINE_EXCEEDED` → timed-out; any other peer error → failed, not retried. Housekeeping re-runs a pending or timed-out search, with a fresh `query_id`, once it is due: capped exponential backoff with full jitter, `random(0, min(300 s, 10 s × 2^attempts))` after each attempt, stored as `attempts` and `next_at` in `searches`; a retry that raises (say, its payments expired) backs off the same way ([AWS](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/), as replay does in [data.md](data.md)). After 24 h from its first attempt a search is **unresolved**: kept, never retried again |
 | Which bank assembles the result | The initiator of that search: up-leg claims reversed, then its own claim, then down-leg claims |
 | Delivery to all involved banks without a global coordinator | Each initiator delivers its own results. The result row and one outbox row per other signer are written in one transaction; `Deliver` is sent once after a batch of searches and retried until acknowledged (housekeeping). The receiver re-verifies every claim, the digest, and that each leg's claims were signed for one query and the bank that asked; it accepts only confirmed or partial results, and stores a chain whose end is a cut as partial whatever the sender says. Any bank can be an initiator, so no single bank is a dependency for the whole system |
 | Chain identity | `chain_digest` = SHA-256 of sorted distinct `(pair, raw token)` identities, framing each UTF-8 pair and token with its four-byte big-endian length, including a transfer named at a cut. Searches started at different banks over the same transfers produce the same digest (tested on loop `o1`, started from B and C). Adopted as the case identity ([case.md](case.md)) |
@@ -121,10 +118,10 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 ## Failure contract
 
 - A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps the claims other banks gave, and no chain row is created. Searches that don't need that bank keep going.
-- **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search, then redelivers every unacknowledged outbox row. An error in one search is logged and the pass carries on with the rest and with delivery. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
+- **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search that is due (see Retries), then redelivers every unacknowledged outbox row. An error in one search is logged and the pass carries on with the rest and with delivery. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
 - **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, since they are in PostgreSQL (`--db`).
 - **Dead letter:** a delivery the receiver rejects with `INVALID_ARGUMENT` is marked `dead` in the outbox and logged, instead of being resent every pass. Other errors stay in the outbox and are retried. A later upgrade of the same chain clears the mark, since it is a new message.
-- **Retained-state lifetimes (**pending work**):** stored replies expire after the search deadline plus a margin; pending searches expire after 24 h as unresolved; outbox rows are kept until acknowledged or dead-lettered.
+- **Retained-state lifetimes:** stored replies are deleted by housekeeping 10 minutes after they were stored, well past any search's deadline (each retry uses a new `query_id`); pending searches stop being retried after 24 h (unresolved); outbox rows are kept until acknowledged or dead-lettered.
 - **"Exactly one alert"** holds for eventual recovery with intact storage, not permanent data loss. The protocol side gives one `chains` row per digest at each bank, tested under repeated searches and redelivery.
 - **Replicas:** with the chart's `ha` flag a bank runs 2 node replicas behind one Service, sharing the store in PostgreSQL (`INSERT ... ON CONFLICT`) and splitting the scorer's hits through the `privacy-node` consumer group. Each housekeeping pass takes a session-level `pg_try_advisory_lock`, so one replica retries and redelivers at a time, and PostgreSQL releases the lock if that replica's session dies. Each replica still reloads its own keys and rechecks its own deferred chain hits. Receivers are idempotent, so a result sent twice (say, after a PostgreSQL restart drops the lock mid-pass) is harmless.
 - **Health:** a gRPC health service on a separate plaintext port (`--health-port`, 50052), since the kubelet's gRPC probe can't present a client certificate. It starts only once the node has connected to its state (Valkey and the store) and started its server, so until then the probe fails.
@@ -189,7 +186,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| `.proto` v1 ([protocol.md](protocol.md#messages)) | Isaac ↔ Caleb | `bytes` token, no absolute deadline, unknown fields rejected, the schema test's allow and forbid lists | **draft**, sample TODO | Wed 4 Nov |
+| `.proto` v1 ([protocol.md](protocol.md#messages)) | Isaac ↔ Caleb | `bytes` token, no absolute deadline (removed 18 Nov), unknown fields rejected, the schema test's allow and forbid lists | **draft**, Caleb to review the field removal; sample TODO | Wed 4 Nov |
 | Node → case service ([protocol.md](protocol.md#result-delivery-to-the-case-service)) | Isaac → Jia Rui | Payloads (chains with own legs, Tier 1 hits, pending and internal cases), keys, retry and dead letter | **agreed** (Isaac, 18 Nov), sample [`node_messages.json`](../../apps/case/fixtures/node_messages.json); internal chains pending | Wed 4 Nov |
 
 Also part of: [Token and key API](security.md#interfaces), [Valkey layout](streaming.md#interfaces), [Alert tiers](case.md#interfaces), [`check_result`](security.md#interfaces).
@@ -197,9 +194,9 @@ Also part of: [Token and key API](security.md#interfaces), [Valkey layout](strea
 ## Open
 
 - [ ] Review the claim bytes, `ALLOWED_FIELDS` and the `chain_id` → `chain_digest` rename (Caleb).
-- [ ] mTLS: use `privacy-node-tls`, map the client certificate's SAN to a bank, and reject requests whose `sender` doesn't match; today `sender` is trusted from the message (Isaac, with Caleb; **pending work**).
+- [x] mTLS: `privacy-node-tls`; `transport.authenticated_bank` maps the client certificate's URI SAN to a bank and rejects a `Trace` or `Deliver` whose `sender` doesn't match (`PERMISSION_DENIED`), since #26.
 - [x] Move `store.py` to PostgreSQL, then test two replicas per bank (`test_store.py`).
 - [x] `BRANCH_CAP = 1` and `HOP_LIMIT = 4`, checked by a 4/6/8 sweep; shared state moves to Valkey and PostgreSQL.
 - [x] `chain_digest` is the case identity; the case service merges overlapping partial chains by shared transfers.
 - [x] Retention lifetimes: see the [failure contract](#failure-contract).
-- [x] Late events: keep the ingestion grace (`--ingestion-grace-seconds`), with its default set from measured ingest lag and `retry_until` stored in the `searches` row.
+- [x] Late events: keep the ingestion grace (`--ingestion-grace-seconds`), with its default set from measured ingest lag (the chart sets 60 s until then); it runs from the search's first attempt, `started` in the `searches` row, so replicas and restarts share it.

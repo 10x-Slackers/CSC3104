@@ -217,9 +217,10 @@ Optional `--ingestion-grace-seconds N` treats a valid origin-side `NO_MATCH` as
 fresh query IDs; peer replies, claim verification and message schemas are
 unchanged. After the deadline, an absent record becomes final `NO_MATCH` and
 missing-record retries stop. Default `0` preserves existing behavior; enabling
-it and choosing a duration still require team agreement. Grace deadlines are
-in memory and restart on a new process. Existing unavailable-peer retries are
-separate and unchanged. This does not resolve a peer mistaking an ingested
+it and choosing a duration still require team agreement. The grace runs from
+the first attempt's `started` time in the `searches` table, so it survives
+restarts and is shared by replicas. Unavailable-peer retries follow
+[protocol.md](protocol.md)'s retry policy. This does not resolve a peer mistaking an ingested
 incoming transfer for an endpoint before its outgoing leg arrives.
 
 ## Scaling

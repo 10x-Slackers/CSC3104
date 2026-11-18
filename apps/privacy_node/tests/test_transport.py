@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from privacy_node import privacy_node_pb2 as pb
-from privacy_node.node import Node, now, serve
+from privacy_node.node import Node, serve
 from privacy_node.transport import TlsFiles, authenticated_bank
 
 
@@ -201,10 +201,7 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
     request = pb.TraceRequest(sender="A", query_id="cached-query")
     try:
         assert (
-            sender.call(
-                "B", "Trace", request, now() + timedelta(seconds=3), pb.TraceReply()
-            ).state
-            == pb.NO_MATCH
+            sender.call("B", "Trace", request, 3, pb.TraceReply()).state == pb.NO_MATCH
         )
         store.get_reply.assert_called_once()
         store.reset_mock()
@@ -214,9 +211,7 @@ def test_node_transport_binds_both_methods_before_reading_state(tmp_path):
             ("Deliver", pb.ChainResult(sender="A")),
         ]:
             with pytest.raises(grpc.RpcError) as error:
-                sender.call(
-                    "B", method, message, now() + timedelta(seconds=3), pb.Ack()
-                )
+                sender.call("B", method, message, 3, pb.Ack())
             assert error.value.code() == grpc.StatusCode.PERMISSION_DENIED
         store.get_reply.assert_not_called()
         store.save_chain.assert_not_called()
@@ -248,9 +243,7 @@ def test_node_opens_channel_per_call_and_reads_renewed_material(
     request = pb.TraceRequest(sender="A", query_id="cached-query")
 
     def trace():
-        return sender.call(
-            "B", "Trace", request, now() + timedelta(seconds=3), pb.TraceReply()
-        )
+        return sender.call("B", "Trace", request, 3, pb.TraceReply())
 
     try:
         assert trace().state == trace().state == pb.NO_MATCH
@@ -298,7 +291,7 @@ def test_tls_renewal_preserves_inflight_call(tmp_path):
             "B",
             "Trace",
             pb.TraceRequest(sender="A", query_id=query_id),
-            now() + timedelta(seconds=5),
+            5,
             pb.TraceReply(),
         )
 
