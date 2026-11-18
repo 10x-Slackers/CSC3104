@@ -71,8 +71,8 @@ Current baseline (`bank-baseline` policy): deny all, then allow traffic within t
 | Privacy node ↔ other banks' privacy nodes | Ingress from the other two bank namespaces **and** `app: privacy-node` pods, gRPC port only, with matching egress. **Done** (`privacy-node-peers`), probed in `check-netpol.sh` |
 | Replay → ingestor (k3d) | Ingress from the `replay` namespace to `app: ingestor` on its HTTP port. **Done** (`replay-to-ingestor`), probed in `check-netpol.sh` |
 | Ingestor Lambda → Kafka (EKS) | Ingress from the Lambda's VPC subnets to the broker port |
-| Case service → summary Lambda (EKS) | Egress to AWS on 443, and to the node's metadata service (`169.254.169.254:80`) from `app: case-service` only, so it can sign the call as `LabRole`. This hands that pod the whole role: an accepted limitation of the lab account. Locally the summary container sits in the namespace |
-| Privacy node → case service → summary service | Inside the bank, so the baseline allows it; `check-netpol.sh` probes that other banks and `replay` can't reach either |
+| Case service → summary Lambda (EKS) | Egress to AWS on 443, and to the node's metadata service (`169.254.169.254:80`) from `app: case` only, so it can sign the call as `LabRole`. This hands that pod the whole role: an accepted limitation of the lab account. Locally the summary container sits in the namespace |
+| Privacy node → case service → summary service | Inside the bank, so the baseline allows it; `check-netpol.sh` probes the node → case path |
 | Analyst → web UI | `kubectl port-forward -n bank-a svc/case 8000` only, no Ingress; access control is cluster RBAC |
 
 The API-server rule should be narrowed from the whole k3d node subnet. On EKS the VPC CNI enforces the same policies and `check-netpol.sh` runs the same probes.

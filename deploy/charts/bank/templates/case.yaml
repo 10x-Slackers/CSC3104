@@ -6,10 +6,10 @@ metadata:
   name: case
 spec:
   selector:
-    matchLabels: {app: case-service}
+    matchLabels: {app: case}
   template:
     metadata:
-      labels: {app: case-service}
+      labels: {app: case}
     spec:
       {{- include "bank.pod" . | nindent 6 }}
       containers:
@@ -42,7 +42,7 @@ kind: Service
 metadata:
   name: case
 spec:
-  selector: {app: case-service}
+  selector: {app: case}
   ports:
     - port: 8000
 ---
