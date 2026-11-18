@@ -7,7 +7,6 @@ Owner: Isaac (taken over from Zane, 18 Nov 2026) · Partners: Caleb (security), 
 > - **Relative deadlines:** drop the absolute `deadline` field and pass `timeout=context.time_remaining()` on nested calls, so clock skew can't time out every search. `SEARCH_SECONDS` and the `Deliver` timeout come from measured p99.9.
 > - **Retries:** only at the initiator, with capped exponential backoff and full jitter (`random(0, min(300 s, 10 s × 2^attempts))`, stored as `attempts` and `next_at`), and expiry: after 24 h a search becomes **unresolved**. Fresh `query_id` per retry stays.
 > - **Messages:** tokens become 16-byte `bytes` ([security.md](security.md)); a schema test replaces the per-message allowlist walk.
-> - **State and replicas:** `store.py` moves to PostgreSQL; 2 replicas, with housekeeping under a PostgreSQL advisory lock; a gRPC health service (not serving until state is ready).
 > - **Fully internal chains** posted to the case service as `local` messages ([Result delivery to the case service](#result-delivery-to-the-case-service)).
 > - **mTLS** with the authenticated bank matched to `sender`.
 
@@ -109,7 +108,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 ## Durable state (per bank)
 
-`apps/privacy_node/src/privacy_node/store.py`, SQLite for M2. The same SQL moves to the bank's PostgreSQL for M3.
+`apps/privacy_node/src/privacy_node/store.py`: the bank's PostgreSQL in the cluster (`--db postgresql://…`, the chart's `postgres-app` Secret), shared by the node's replicas; a SQLite file, or memory by default, for tests and local runs. The same SQL runs on both. After PostgreSQL restarts, the call that finds the connection broken fails and the next one reconnects.
 
 | Table | Key | Purpose |
 | --- | --- | --- |
@@ -117,16 +116,18 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 | `searches` | `search_id` | Every search this bank started and its latest state |
 | `chains` | `chain_digest` | One row per chain at each bank; the seed for one alert per bank ([case.md](case.md)) |
 | `outbox` | `(chain_digest, bank)` | Results not yet acknowledged by an involved bank |
+| `case_outbox` | `(key, kind)` | Messages not yet stored by this bank's case service |
 
 ## Failure contract
 
 - A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps the claims other banks gave, and no chain row is created. Searches that don't need that bank keep going.
 - **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search, then redelivers every unacknowledged outbox row. An error in one search is logged and the pass carries on with the rest and with delivery. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
-- **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, provided the store file survives (`--db`); M3 moves it to PostgreSQL.
+- **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, since they are in PostgreSQL (`--db`).
 - **Dead letter:** a delivery the receiver rejects with `INVALID_ARGUMENT` is marked `dead` in the outbox and logged, instead of being resent every pass. Other errors stay in the outbox and are retried. A later upgrade of the same chain clears the mark, since it is a new message.
 - **Retained-state lifetimes (**pending work**):** stored replies expire after the search deadline plus a margin; pending searches expire after 24 h as unresolved; outbox rows are kept until acknowledged or dead-lettered.
 - **"Exactly one alert"** holds for eventual recovery with intact storage, not permanent data loss. The protocol side gives one `chains` row per digest at each bank, tested under repeated searches and redelivery.
-- Concurrent replicas will share query state in PostgreSQL (`INSERT ... ON CONFLICT DO NOTHING`). Until then, run one replica per bank. **pending work:** 2 replicas; each housekeeping pass takes a session-level `pg_try_advisory_lock`, so one replica works at a time and the lock is released if its session dies. Duplicates are harmless because receivers are idempotent.
+- **Replicas:** with the chart's `ha` flag a bank runs 2 node replicas behind one Service, sharing the store in PostgreSQL (`INSERT ... ON CONFLICT`) and splitting the scorer's hits through the `privacy-node` consumer group. Each housekeeping pass takes a session-level `pg_try_advisory_lock`, so one replica retries and redelivers at a time, and PostgreSQL releases the lock if that replica's session dies. Each replica still reloads its own keys. A batch of hits delivers straight away from either replica, so a result can be sent twice; that's harmless, because receivers are idempotent.
+- **Health:** a gRPC health service on a separate plaintext port (`--health-port`, 50052), since the kubelet's gRPC probe can't present a client certificate. It reports `NOT_SERVING` until the node has connected to its state (Valkey and the store) and started its server, and again while shutting down.
 
 ## Result delivery to the case service
 
@@ -160,7 +161,7 @@ connection-level Service balancing across replicas; extra handshakes are accepte
 
 
 ```sh
-uv run pytest apps/privacy_node             # 40 protocol tests
+uv run pytest apps/privacy_node             # protocol tests; set NODE_TEST_DATABASE_URL=postgresql://… to run the store tests on PostgreSQL too
 uv run python -m privacy_node.demo          # three banks on localhost, prints each trace
 uv run python -m privacy_node.keys .secrets A --key-version k1 # one bank; exchange public files only
 ```
@@ -197,7 +198,7 @@ Also part of: [Token and key API](security.md#interfaces), [Valkey layout](strea
 
 - [ ] Review the claim bytes, `ALLOWED_FIELDS` and the `chain_id` → `chain_digest` rename (Caleb).
 - [ ] mTLS: use `privacy-node-tls`, map the client certificate's SAN to a bank, and reject requests whose `sender` doesn't match; today `sender` is trusted from the message (Isaac, with Caleb; **pending work**).
-- [ ] Move `store.py` to PostgreSQL, then test two replicas per bank (Isaac; **pending work**).
+- [x] Move `store.py` to PostgreSQL, then test two replicas per bank (`test_store.py`).
 - [x] `BRANCH_CAP = 1` and `HOP_LIMIT = 4`, checked by a 4/6/8 sweep; shared state moves to Valkey and PostgreSQL.
 - [x] `chain_digest` is the case identity; the case service merges overlapping partial chains by shared transfers.
 - [x] Retention lifetimes: see the [failure contract](#failure-contract).

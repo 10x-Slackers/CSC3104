@@ -1,4 +1,6 @@
-"""Durable bank-local protocol state (SQLite for M2; same SQL moves to PostgreSQL for M3).
+"""Durable bank-local protocol state: the bank's PostgreSQL in the cluster (a
+`postgresql://` URL, shared by the node's replicas), or SQLite for tests and local runs.
+The same SQL runs on both.
 
 - replies:  stored Trace replies, so a retried query_id gets the same answer
 - searches: every search this bank started and its latest state
@@ -11,38 +13,85 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 from privacy_node import privacy_node_pb2 as pb
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS replies (
-  query_id TEXT, ref TEXT, reply BLOB, PRIMARY KEY (query_id, ref));
+  query_id TEXT, ref BYTEA, reply BYTEA, PRIMARY KEY (query_id, ref));
 CREATE TABLE IF NOT EXISTS searches (
   search_id TEXT PRIMARY KEY, incoming TEXT, outgoing TEXT, state INTEGER,
   chain_digest TEXT);
 CREATE TABLE IF NOT EXISTS chains (
-  chain_digest TEXT PRIMARY KEY, state INTEGER, result BLOB);
+  chain_digest TEXT PRIMARY KEY, state INTEGER, result BYTEA);
 CREATE TABLE IF NOT EXISTS outbox (
-  chain_digest TEXT, bank TEXT, result BLOB, acked INTEGER DEFAULT 0,
+  chain_digest TEXT, bank TEXT, result BYTEA, acked INTEGER DEFAULT 0,
   dead INTEGER DEFAULT 0,
   PRIMARY KEY (chain_digest, bank));
 CREATE TABLE IF NOT EXISTS case_outbox (
   key TEXT, kind TEXT, message TEXT, acked INTEGER DEFAULT 0, dead INTEGER DEFAULT 0,
   PRIMARY KEY (key, kind));
 """
+HOUSEKEEPING_LOCK = 3104  # pg_try_advisory_lock key
 UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CONFLICT (key, kind)"
 
 
 class Store:
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self.db.executescript(SCHEMA)
+        self.url, self.pg = str(path), str(path).startswith("postgres")
         self.lock = threading.Lock()
+        self.db = self._connect()
+
+    def _connect(self):
+        if not self.pg:
+            db = sqlite3.connect(
+                self.url, check_same_thread=False, isolation_level=None
+            )
+            db.executescript(SCHEMA)
+            return db
+        import psycopg
+
+        db = psycopg.connect(self.url, autocommit=True)
+        db.execute(SCHEMA)
+        return db
+
+    def _execute(self, sql, args=()):
+        if self.pg and self.db.broken:  # PostgreSQL restarted: the next call reconnects
+            self.db = self._connect()
+        return self.db.execute(sql.replace("?", "%s") if self.pg else sql, args)
 
     def _run(self, sql, *args):
         with self.lock:
-            return self.db.execute(sql, args).fetchall()
+            cursor = self._execute(sql, args)
+            return cursor.fetchall() if cursor.description else []
+
+    @contextmanager
+    def _transaction(self):
+        with self.lock:
+            if self.pg:
+                if self.db.broken:
+                    self.db = self._connect()
+                with self.db.transaction():
+                    yield
+            else:
+                with self.db:
+                    self.db.execute("BEGIN")
+                    yield
+
+    def try_lock(self) -> bool:
+        """Take the housekeeping lock, so one replica retries and redelivers at a time.
+
+        A session-level advisory lock: PostgreSQL releases it if the replica dies.
+        """
+        if not self.pg:
+            return True
+        return self._run("SELECT pg_try_advisory_lock(?)", HOUSEKEEPING_LOCK)[0][0]
+
+    def unlock(self) -> None:
+        if self.pg:
+            self._run("SELECT pg_advisory_unlock(?)", HOUSEKEEPING_LOCK)
 
     def get_reply(self, query_id: str, ref: bytes) -> pb.TraceReply | None:
         rows = self._run(
@@ -52,7 +101,7 @@ class Store:
 
     def put_reply(self, query_id: str, ref: bytes, reply: pb.TraceReply) -> None:
         self._run(
-            "INSERT OR IGNORE INTO replies VALUES (?,?,?)",
+            "INSERT INTO replies VALUES (?,?,?) ON CONFLICT DO NOTHING",
             query_id,
             ref,
             reply.SerializeToString(),
@@ -95,9 +144,8 @@ class Store:
         transaction, so a crash can't leave a stored result that is never delivered.
         """
         blob = result.SerializeToString()
-        with self.lock, self.db:
-            self.db.execute("BEGIN")
-            changed = self.db.execute(
+        with self._transaction():
+            changed = self._execute(
                 "INSERT INTO chains VALUES (?,?,?) ON CONFLICT (chain_digest) DO "
                 "UPDATE SET state=excluded.state, result=excluded.result "
                 "WHERE chains.state != ? AND excluded.state = ?",
@@ -110,14 +158,14 @@ class Store:
                 ),
             ).rowcount
             for bank in deliver_to if changed else ():
-                self.db.execute(
+                self._execute(
                     "INSERT INTO outbox (chain_digest, bank, result) VALUES (?,?,?)"
                     " ON CONFLICT (chain_digest, bank)"
                     " DO UPDATE SET result=excluded.result, acked=0, dead=0",
                     (result.chain_digest, bank, blob),
                 )
             if changed and case:
-                self.db.execute(
+                self._execute(
                     UPSERT_CASE
                     + " DO UPDATE SET message=excluded.message, acked=0, dead=0",
                     (case["key"], case["kind"], json.dumps(case)),

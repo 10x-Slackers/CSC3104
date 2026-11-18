@@ -1,9 +1,11 @@
 # Peer-to-peer chain tracing over mTLS (docs/contracts/security.md), reading the scorer's state from Valkey.
+# Replicas share the protocol store in the bank's PostgreSQL and split the scorer's hits (docs/contracts/protocol.md).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: privacy-node
 spec:
+  replicas: {{ if .Values.ha }}2{{ else }}1{{ end }}
   selector:
     matchLabels: {app: privacy-node}
   template:
@@ -25,15 +27,24 @@ spec:
             - --tls-key=/tls/tls.key
             - --tls-ca=/tls/ca.crt
             - --search
+            - --db=$(NODE_DB)
+            - --case-url=http://case:8000
+            # a peer may ingest its leg of a transfer seconds after this bank does
+            - --ingestion-grace-seconds=60
             {{- range without (list "A" "B" "C") .Values.bank }}
             - --peer
             - {{ . }}
             - privacy-node.bank-{{ lower . }}.svc:50051
             {{- end }}
+          env:
+            - name: NODE_DB
+              valueFrom:
+                secretKeyRef: {name: postgres-app, key: uri}
           ports:
             - containerPort: 50051
+            - containerPort: 50052
           readinessProbe:
-            tcpSocket: {port: 50051}
+            grpc: {port: 50052}
           volumeMounts:
             - {name: keys, mountPath: /keys}
             - {name: tls, mountPath: /tls}

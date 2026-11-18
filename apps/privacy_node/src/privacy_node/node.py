@@ -34,6 +34,7 @@ import grpc
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
@@ -426,16 +427,16 @@ class Node(pb_grpc.PrivacyNodeServicer):
             others = {c.signer for c in claims} - {self.bank}
             message = self.chain_message(result)
             self.store.save_chain(result, deliver_to=sorted(others), case=message)
-        if self.case_url and state in (pb.PENDING, pb.TIMED_OUT):
-            # the first bank on each stuck leg; a deeper one isn't known here
-            waiting = {
-                self.local.peer(payment, side)
-                for payment, side, leg_state in (
-                    (outgoing, "out", down_state),
-                    (incoming, "in", up_state),
-                )
-                if leg_state in (pb.PENDING, pb.TIMED_OUT)
-            }
+        # the first bank on each stuck leg; a deeper one isn't known here
+        waiting = {
+            self.local.peer(payment, side)
+            for payment, side, leg_state in (
+                (outgoing, "out", down_state),
+                (incoming, "in", up_state),
+            )
+            if leg_state in (pb.PENDING, pb.TIMED_OUT)
+        }
+        if self.case_url and waiting:  # not for the ingestion grace's NO_MATCH
             legs = [self.local.leg(incoming, "in"), self.local.leg(outgoing, "out")]
             self.store.put_case(
                 {
@@ -590,21 +591,26 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
-        for link, until in list(self._unresolved.items()):
+        for link, until in list(self._unresolved.items()):  # this replica's own hits
             try:
                 if now() > until or self.resolve(*link):
                     del self._unresolved[link]
             except Exception:  # e.g. its payments expired: try again until `until`
                 log.exception("rechecking chain hit %s -> %s", *link)
-        for incoming, outgoing in self.store.unfinished_searches():
-            if stop is not None and stop.is_set():
-                break
-            try:  # e.g. its payments expired: don't hold up the others or delivery
-                self.search(incoming, outgoing)
-            except Exception:
-                log.exception("retrying search %s -> %s", incoming, outgoing)
-        self.deliver_pending(stop=stop)
-        self.deliver_cases(stop=stop)
+        if not self.store.try_lock():
+            return  # another replica is running this pass
+        try:
+            for incoming, outgoing in self.store.unfinished_searches():
+                if stop is not None and stop.is_set():
+                    break
+                try:  # e.g. its payments expired: don't hold up the others or delivery
+                    self.search(incoming, outgoing)
+                except Exception:
+                    log.exception("retrying search %s -> %s", incoming, outgoing)
+            self.deliver_pending(stop=stop)
+            self.deliver_cases(stop=stop)
+        finally:
+            self.store.unlock()
 
 
 def serve(node: Node, port: int = 0) -> tuple[grpc.Server, int]:
@@ -623,6 +629,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bank", required=True, choices="ABC")
     parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument(
+        "--health-port", type=int, default=50052, help="plaintext gRPC health only"
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--workload", help="standalone CSV initialization")
     source.add_argument("--bootstrap-servers", help="integrated bank-local Kafka mode")
@@ -643,7 +652,9 @@ def main():
     parser.add_argument("--tls-ca")
     parser.add_argument("--insecure-demo", action="store_true")
     parser.add_argument("--peer", nargs=2, action="append", default=[])
-    parser.add_argument("--db", default=":memory:")
+    parser.add_argument(
+        "--db", default=":memory:", help="a postgresql:// URL, or a SQLite file"
+    )
     parser.add_argument(
         "--case-url", help="this bank's case service (--valkey-url only)"
     )
@@ -666,6 +677,13 @@ def main():
         )
     if args.case_url and not args.valkey_url:
         parser.error("--case-url needs --valkey-url")  # the legs come from Valkey
+    # Plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
+    status = health.HealthServicer()
+    status.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+    health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    health_pb2_grpc.add_HealthServicer_to_server(status, health_server)
+    health_server.add_insecure_port(f"[::]:{args.health_port}")
+    health_server.start()
     config_path = Path(args.key_directory) / args.bank / "active.json"
 
     def read_config():
@@ -689,7 +707,9 @@ def main():
         from valkey import Valkey
 
         db = Valkey.from_url(args.valkey_url, decode_responses=True)
-        local = ValkeyBank(db, args.bank, query_version, keys)
+        local = ValkeyBank(
+            db, args.bank, query_version, keys
+        )  # fails if Valkey is down
     else:
         local = LocalBank(args.bank, query_version, keys, **rule)
     for version in config["active_versions"]:
@@ -716,6 +736,7 @@ def main():
     )
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
+    status.set("", health_pb2.HealthCheckResponse.SERVING)  # its state is reachable
     if args.search and args.workload:
         for result in node.search_detections():
             print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
@@ -769,7 +790,9 @@ def main():
                     break
     finally:
         stop.set()
+        status.enter_graceful_shutdown()
         server.stop(0)
+        health_server.stop(0)
         worker.join(timeout=SEARCH_SECONDS + 5)
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
