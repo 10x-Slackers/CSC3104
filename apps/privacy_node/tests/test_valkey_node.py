@@ -195,6 +195,40 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
     assert [c.state for c in b.store.chains()] == [pb.CONFIRMED]
 
 
+def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path):
+    # A-a -q1-> B-x -q2-> B-y, and B-y pays no other bank: nothing to search
+    events = {
+        "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
+        "B": [
+            event("B", "q1", "in", "B-x", "A-a", 0, "10000"),
+            event("B", "q2", "out", "B-x", "B-y", 10, "9800"),
+            event("B", "q2", "in", "B-y", "B-x", 10, "9800"),
+        ],
+        "C": [],
+    }
+    nodes, posted = run(events)
+    b = nodes["B"]
+    b.ingestion_grace_seconds = 60
+    b.consume_hits(block_ms=None)
+    b.housekeeping()
+    assert [m["kind"] for m in posted["B"]] == ["hit"]  # still within the grace
+    b._unresolved = {k: (0, h) for k, (_, h) in b._unresolved.items()}  # grace over
+    b.housekeeping()
+    [local] = [m for m in posted["B"] if m["kind"] == "local"]
+    assert local["key"] == posted["B"][0]["key"]  # the chain hit's ID
+    assert [(g["payment_id"], g["direction"], g["account"]) for g in local["legs"]] == [
+        ("q1", "in", "B-x"),
+        ("q2", "in", "B-y"),
+        ("q2", "out", "B-x"),
+    ]
+    store = CaseStore(str(tmp_path / "cases-B.db"))
+    for m in posted["B"]:
+        store.record(parse(m, b.public_keys, "B"))
+    [case] = store.cases()  # joined with the hit on q1
+    assert (case["tier"], case["state"]) == (1, "local")
+    assert b.store.chains() == []
+
+
 def test_hits_survive_errors_lost_pods_and_a_lost_group(run, monkeypatch, tmp_path):
     nodes, _ = run(tiny())
     node, calls = nodes["B"], []
@@ -262,7 +296,7 @@ def test_a_broken_retry_doesnt_block_delivery(run, monkeypatch):
     node = nodes["B"]
     stuck = node.search_id("expired-in", "expired-out")
     node.store.put_search(stuck, "expired-in", "expired-out", pb.PENDING, "")
-    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60
+    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60, "h0"
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
     monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)
     node.housekeeping()

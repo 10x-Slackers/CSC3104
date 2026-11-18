@@ -146,7 +146,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if ingestion_grace_seconds < 0:
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
-        self._unresolved = {}  # chain hits not yet reaching cross-bank payments
+        self._unresolved = {}  # chain hits not reaching cross-bank payments yet
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -501,7 +501,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             # The money starts or stays inside this bank, or an intra-bank link on
             # another account isn't written yet: housekeeping looks again.
             until = time.monotonic() + self.ingestion_grace_seconds
-            self._unresolved[tuple(hit["payments"])] = until
+            self._unresolved[tuple(hit["payments"])] = until, hit["hit_id"]
 
     def resolve(self, incoming: str, outgoing: str) -> bool:
         """Search from a chain link, through intra-bank hops, if both ends cross banks."""
@@ -603,10 +603,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
-        for link, until in list(self._unresolved.items()):  # this replica's own hits
+        for link, (until, hit_id) in list(self._unresolved.items()):  # own hits
             try:
-                if time.monotonic() > until or self.resolve(*link):
-                    del self._unresolved[link]
+                expired = time.monotonic() > until
+                if not expired and not self.resolve(*link):
+                    continue
+                del self._unresolved[link]
+                if expired and self.case_url:  # the money starts or stays here
+                    legs = self.local.internal_legs(*link)
+                    self.store.put_case({"key": hit_id, "kind": "local", "legs": legs})
             except Exception:  # e.g. its payments expired: try again until `until`
                 log.exception("rechecking chain hit %s -> %s", *link)
         if not self.store.try_lock():

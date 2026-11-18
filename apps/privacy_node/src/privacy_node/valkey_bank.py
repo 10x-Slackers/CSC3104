@@ -55,9 +55,12 @@ class ValkeyBank:
         entry = self.state.lookup(pair, key_version, token.hex()) or {}
         return entry["payment_id"] if entry.get("direction") == direction else None
 
-    def links(self, payment_id: str, direction: Direction) -> list[str]:
+    def links(
+        self, payment_id: str, direction: Direction, passed: set | None = None
+    ) -> list[str]:
         """Cross-bank payments a local rule links onward from an incoming payment ("in")
-        or into an outgoing one ("out"), through any intra-bank hops."""
+        or into an outgoing one ("out"), through any intra-bank hops, which are added
+        to `passed`."""
         found, todo = set(), [(payment_id, 0)]
         while todo:
             pid, hops = todo.pop()
@@ -66,14 +69,30 @@ class ValkeyBank:
                     found.add(other)
                 elif hops < MAX_INTERNAL_HOPS:
                     todo.append((other, hops + 1))  # the same payment's other leg
+                    if passed is not None:
+                        passed.add(other)
         return sorted(found)
 
-    def ends(self, payment_id: str, direction: Direction) -> list[str]:
+    def ends(
+        self, payment_id: str, direction: Direction, passed: set | None = None
+    ) -> list[str]:
         """The payment itself if it crosses banks, else the cross-bank ones behind
         (incoming) or after (outgoing) its intra-bank hops."""
         if self.peer(payment_id, direction) != self.bank:
             return [payment_id]
-        return self.links(payment_id, OTHER[direction])
+        if passed is not None:
+            passed.add(payment_id)
+        return self.links(payment_id, OTHER[direction], passed)
+
+    def internal_legs(self, incoming: str, outgoing: str) -> list[dict]:
+        """A chain link's legs plus both legs of each intra-bank payment around it,
+        for a `local` message (case.md)."""
+        passed = set()
+        self.ends(incoming, "in", passed)
+        self.ends(outgoing, "out", passed)
+        legs = {(incoming, "in"), (outgoing, "out")}
+        legs |= {(p, d) for p in passed for d in ("out", "in")}
+        return [self.leg(p, d) for p, d in sorted(legs)]
 
     def leg(self, payment_id: str, direction: Direction, token: str = "") -> dict:
         """One of this bank's own payments, as the case service stores it (case.md)."""
