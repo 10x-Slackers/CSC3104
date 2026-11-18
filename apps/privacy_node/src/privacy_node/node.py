@@ -9,7 +9,9 @@ Run one per bank, e.g.:
 
 For live Kafka state, replace --workload with --bootstrap-servers <brokers>
 and use a fresh --group to rebuild state. --search starts live candidates.
---valkey-url reads the scorer's state from Valkey, as deployed by the chart.
+--valkey-url reads the scorer's state from Valkey, as deployed by the chart: searches
+start from the scorer's chain hits, and with --case-url every hit, chain and pending
+search is posted to this bank's case service through the outbox.
 """
 
 import argparse
@@ -19,6 +21,8 @@ import logging
 import signal
 import threading
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from concurrent import futures
@@ -28,7 +32,10 @@ from pathlib import Path
 
 import grpc
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
+from valkey.exceptions import ConnectionError as ValkeyConnectionError
+from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node import privacy_node_pb2_grpc as pb_grpc
@@ -49,6 +56,8 @@ from privacy_node.keys import public_keys as trusted_public_keys
 from privacy_node.local_state import LocalBank
 from privacy_node.store import Store
 from privacy_node.transport import TlsFiles, authenticated_bank
+from privacy_node.valkey_bank import ValkeyBank
+from scorer.state import Hit
 from scorer.stream import consume
 from security import PublicKeys, load_pairwise_keys, sign
 
@@ -108,7 +117,7 @@ def failure_state(error: grpc.RpcError) -> pb.State:
 class Node(pb_grpc.PrivacyNodeServicer):
     def __init__(
         self,
-        local: LocalBank,
+        local: LocalBank | ValkeyBank,
         store: Store,
         signing_key: Ed25519PrivateKey,
         public_keys: PublicKeys,
@@ -116,12 +125,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
         ingestion_grace_seconds: float = 0,
         signing_key_version: str = "k1",
         tls: TlsFiles | None = None,
+        case_url: str | None = None,
     ) -> None:
         self.bank = local.bank
         self.local, self.store = local, store
         self.signing_key, self.public_keys = signing_key, public_keys
         self.peers = peers
         self.signing_key_version, self.tls = signing_key_version, tls
+        self.case_url = case_url  # needs a ValkeyBank, for the own legs
         self.reload_keys: Callable[[], None] | None = None
         self._key_reload = None
         self._started_detections = set()
@@ -129,6 +140,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
         self._ingestion_deadlines = {}
+        self._unresolved = {}  # chain hits not yet reaching cross-bank payments
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -255,7 +267,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         stored = self.store.get_reply(request.query_id, slot)
         if stored:
             return stored  # retried query: same answer, no repeated work
-        reply = self.follow(request)
+        try:
+            reply = self.follow(request)
+        except (ValkeyConnectionError, ValkeyTimeoutError):  # the asker retries later
+            context.abort(grpc.StatusCode.UNAVAILABLE, "local state unavailable")
         if reply.state not in (pb.PENDING, pb.TIMED_OUT):  # only cache final answers
             self.store.put_reply(request.query_id, slot, reply)
         return reply
@@ -311,7 +326,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             [*request.visited, next_ref],
             request.key_version,
         )
-        peer = self.local.counterparty[nexts[0], there]
+        peer = self.local.peer(nexts[0], there)
         try:
             deadline = datetime.fromisoformat(request.deadline)
             reply = self.call(peer, "Trace", forward, deadline, UNREADABLE_TRACE)
@@ -329,7 +344,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             checked = check_result(request, self.public_keys, self.bank)
         except ValueError as error:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-        self.store.save_chain(checked)
+        self.store.save_chain(checked, case=self.chain_message(checked))
         return pb.Ack(chain_digest=checked.chain_digest)
 
     # ---- starting a search ----------------------------------------------
@@ -352,7 +367,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         try:
             reply = self.call(
-                self.local.counterparty[payment, side],
+                self.local.peer(payment, side),
                 "Trace",
                 request,
                 deadline,
@@ -409,7 +424,27 @@ class Node(pb_grpc.PrivacyNodeServicer):
         )
         if state in (pb.CONFIRMED, pb.PARTIAL):
             others = {c.signer for c in claims} - {self.bank}
-            self.store.save_chain(result, deliver_to=sorted(others))
+            message = self.chain_message(result)
+            self.store.save_chain(result, deliver_to=sorted(others), case=message)
+        if self.case_url and state in (pb.PENDING, pb.TIMED_OUT):
+            # the first bank on each stuck leg; a deeper one isn't known here
+            waiting = {
+                self.local.peer(payment, side)
+                for payment, side, leg_state in (
+                    (outgoing, "out", down_state),
+                    (incoming, "in", up_state),
+                )
+                if leg_state in (pb.PENDING, pb.TIMED_OUT)
+            }
+            legs = [self.local.leg(incoming, "in"), self.local.leg(outgoing, "out")]
+            self.store.put_case(
+                {
+                    "key": search_id,
+                    "kind": "pending",
+                    "waiting_for": sorted(waiting),
+                    "legs": legs,
+                }
+            )
         self.store.put_search(search_id, incoming, outgoing, state, result.chain_digest)
         return result
 
@@ -441,7 +476,83 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.deliver_pending(stop=stop)
         return results
 
+    def handle_hit(self, hit: Hit, search: bool = True) -> None:
+        """Post a scorer hit to the case service, and search from a chain hit's link."""
+        directions = ("in", "out") if hit["rule"] == "chain" else ("out",)
+        if self.case_url:
+            legs = [
+                self.local.leg(p, d)
+                for p, d in zip(hit["payments"], directions, strict=True)
+            ]
+            self.store.put_case(
+                {"key": hit["hit_id"], "kind": "hit", "rule": hit["rule"], "legs": legs}
+            )
+        if search and hit["rule"] == "chain" and not self.resolve(*hit["payments"]):
+            # The money starts or stays inside this bank, or an intra-bank link on
+            # another account isn't written yet: housekeeping looks again.
+            grace = timedelta(seconds=self.ingestion_grace_seconds)
+            self._unresolved[tuple(hit["payments"])] = now() + grace
+
+    def resolve(self, incoming: str, outgoing: str) -> bool:
+        """Search from a chain link, through intra-bank hops, if both ends cross banks."""
+        starts = self.local.ends(incoming, "in")
+        ends = self.local.ends(outgoing, "out")
+        if starts and ends:
+            self.search(starts[0], ends[0])  # BRANCH_CAP: linear chains only
+        return bool(starts and ends)
+
+    def consume_hits(self, search: bool = True, block_ms: int = 1000) -> int:
+        """Handle the scorer's new hits (ValkeyBank only); each is acknowledged after
+        its search and case messages are stored, so a crash redelivers it."""
+        hits = self.local.new_hits(block_ms)
+        for entry_id, hit in hits:
+            try:
+                self.handle_hit(hit, search)
+            except (KeyError, TypeError, ValueError):  # its data expired: can't retry
+                log.exception("skipped hit %s", entry_id)
+            self.local.ack(entry_id)
+        return len(hits)  # housekeeping delivers what they stored
+
     # ---- housekeeping ---------------------------------------------------
+
+    def chain_message(self, result: pb.ChainResult) -> dict | None:
+        """The case service's chain message, with this bank's own legs (case.md)."""
+        if not self.case_url:
+            return None
+        legs = []
+        for c in (c for c in result.claims if c.signer == self.bank):
+            for ref, direction in ((c.in_ref, "in"), (c.out_ref, "out")):
+                if ref.token:
+                    payment = self.local.lookup(
+                        ref.pair, c.key_version, ref.token, direction
+                    )
+                    legs.append(self.local.leg(payment, direction, ref.token.hex()))
+        return {
+            "key": result.chain_digest,
+            "kind": "chain",
+            "result": MessageToDict(result, preserving_proto_field_name=True),
+            "legs": legs,
+        }
+
+    def deliver_cases(self, stop: threading.Event | None = None) -> None:
+        """POST each stored case message to this bank's case service until it's stored."""
+        for message_key, kind, body in self.store.pending_cases():
+            if stop is not None and stop.is_set():
+                break
+            request = urllib.request.Request(
+                f"{self.case_url}/results",
+                data=body.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(request, timeout=5).close()
+                self.store.ack_case(message_key, kind, body)
+            except urllib.error.HTTPError as error:  # other codes stay in the outbox
+                if error.code == 422:  # not evidence: don't resend
+                    self.store.dead_case(message_key, kind, body)
+                    log.warning("dead-lettered case message %s %s", kind, message_key)
+            except OSError:
+                break  # the case service is down: try them all again next pass
 
     def deliver_pending(self, stop: threading.Event | None = None) -> None:
         for bank, result in self.store.pending_deliveries():
@@ -479,11 +590,21 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
+        for link, until in list(self._unresolved.items()):
+            try:
+                if now() > until or self.resolve(*link):
+                    del self._unresolved[link]
+            except Exception:  # e.g. its payments expired: try again until `until`
+                log.exception("rechecking chain hit %s -> %s", *link)
         for incoming, outgoing in self.store.unfinished_searches():
             if stop is not None and stop.is_set():
                 break
-            self.search(incoming, outgoing)
+            try:  # e.g. its payments expired: don't hold up the others or delivery
+                self.search(incoming, outgoing)
+            except Exception:
+                log.exception("retrying search %s -> %s", incoming, outgoing)
         self.deliver_pending(stop=stop)
+        self.deliver_cases(stop=stop)
 
 
 def serve(node: Node, port: int = 0) -> tuple[grpc.Server, int]:
@@ -505,7 +626,7 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--workload", help="standalone CSV initialization")
     source.add_argument("--bootstrap-servers", help="integrated bank-local Kafka mode")
-    source.add_argument("--valkey-url", help="scorer state in Valkey (reads pending)")
+    source.add_argument("--valkey-url", help="the scorer's state in this bank's Valkey")
     parser.add_argument(
         "--group", help="Kafka group; use a fresh group to rebuild state"
     )
@@ -523,6 +644,9 @@ def main():
     parser.add_argument("--insecure-demo", action="store_true")
     parser.add_argument("--peer", nargs=2, action="append", default=[])
     parser.add_argument("--db", default=":memory:")
+    parser.add_argument(
+        "--case-url", help="this bank's case service (--valkey-url only)"
+    )
     parser.add_argument("--search", action="store_true", help="trace local detections")
     parser.add_argument("--housekeeping-seconds", type=float, default=10)
     parser.add_argument(
@@ -540,6 +664,8 @@ def main():
         parser.error(
             "mTLS requires --tls-cert, --tls-key and --tls-ca (local tests: --insecure-demo)"
         )
+    if args.case_url and not args.valkey_url:
+        parser.error("--case-url needs --valkey-url")  # the legs come from Valkey
     config_path = Path(args.key_directory) / args.bank / "active.json"
 
     def read_config():
@@ -559,6 +685,11 @@ def main():
         local = LocalBank.from_workload(
             args.workload, args.bank, query_version, keys, **rule
         )
+    elif args.valkey_url:
+        from valkey import Valkey
+
+        db = Valkey.from_url(args.valkey_url, decode_responses=True)
+        local = ValkeyBank(db, args.bank, query_version, keys)
     else:
         local = LocalBank(args.bank, query_version, keys, **rule)
     for version in config["active_versions"]:
@@ -578,6 +709,7 @@ def main():
         tls=None
         if args.insecure_demo
         else TlsFiles(args.tls_cert, args.tls_key, args.tls_ca),
+        case_url=args.case_url,
     )
     node.reload_keys = lambda: node.reload_key_directory(
         args.key_directory, read_config()
@@ -597,7 +729,7 @@ def main():
     def loop():
         while not stop.wait(args.housekeeping_seconds):
             try:
-                if args.search and not args.workload:
+                if args.search and args.bootstrap_servers:
                     node.search_new_detections(stop=stop)
                 node.housekeeping(stop=stop)
             except Exception:  # noqa: BLE001 - log and retry on the next pass
@@ -624,6 +756,13 @@ def main():
                 stop_event=stop,
                 require_replay=True,
             )
+        elif args.valkey_url:
+            while not stop.is_set():
+                try:
+                    node.consume_hits(search=args.search)
+                except Exception:  # noqa: BLE001 - e.g. Valkey restarting: retry
+                    traceback.print_exc()
+                    stop.wait(1)
         else:
             while not stop.is_set():
                 if not server.wait_for_termination(timeout=1):

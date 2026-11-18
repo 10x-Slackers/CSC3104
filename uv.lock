@@ -988,6 +988,7 @@ dependencies = [
     { name = "protobuf" },
     { name = "scorer" },
     { name = "security" },
+    { name = "valkey" },
 ]
 
 [package.metadata]
@@ -997,6 +998,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=7.35.1" },
     { name = "scorer", editable = "apps/scorer" },
     { name = "security", editable = "apps/security" },
+    { name = "valkey", specifier = ">=6.2" },
 ]
 
 [[package]]

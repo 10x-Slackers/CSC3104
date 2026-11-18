@@ -75,11 +75,14 @@ class LocalBank:
         events = read_events(Path(workload) / f"bank_{bank}.csv")
         return cls(bank, key_version, key_paths, events, **rule)
 
+    def peer(self, payment_id: str, direction: Direction) -> str:
+        return self.counterparty[payment_id, direction]
+
     def ref(
         self, payment_id: str, direction: Direction, key_version: str
     ) -> pb.TokenRef:
         """Read a reference in the search's version, including during overlap."""
-        banks = canonical_pair(self.bank, self.counterparty[payment_id, direction])
+        banks = canonical_pair(self.bank, self.peer(payment_id, direction))
         pair = "-".join(banks)
         token = self.index.token_for(payment_id, banks, key_version)
         return pb.TokenRef(pair=pair, token=token)

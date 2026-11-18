@@ -1,13 +1,12 @@
 # Streaming and scoring contract
 
-Owner: Cindy · Partners: Macarius (events), Zane (search handoff), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, needs review by Macarius and Zane
+Owner: Cindy · Partners: Macarius (events), Isaac (search handoff, privacy node), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, needs review by Macarius and Zane
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
 > - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
-> - **Node reads Valkey:** the scorer writes its state to Valkey; the privacy node still runs its own scorer in-process until it reads Valkey instead (Zane; [Search handoff](#search-handoff)).
-> - **Intra-bank hops** are followed by the node when it reads (**draft**, with Zane; [Valkey layout](#valkey-layout-draft-cindy--zane)); KEDA scaling as in [Scaling](#scaling).
+> - KEDA scaling as in [Scaling](#scaling).
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
 
@@ -93,7 +92,7 @@ Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` 
   - **Quick repeat:** 85% of the 126 repeat laundering payments to a just-flagged payee came within 24 h (67% in the same minute). Dev's five days start with no history, so its ordinary repeats can't include weekly ones: 63% came within 24 h, falling from 55% on 2 Sep to 26% on 5 Sep. It added 1.1 points of recall (16 of 1,471) for 4,836 ordinary flags a day, 99% of them on 1–2 Sep, when every payee is new; on 3–5 Sep it added about 105 a day.
   - **Amount floor:** a S$1,500 floor on both payments of a link caught the same CYCLE and RANDOM attempts (42 of 42) and lost 2 laundering payments (1,439 of 1,471), while removing 352 of the chain rule's 796 ordinary flags a day (6.33% to 6.28% of payments flagged). The starting point stays no floor; experiment 3 tunes it ([evaluation.md](../evaluation.md#experiments)).
   - **Together:** 98.0% of dev's cross-bank laundering bank transfers (1,441 of 1,471) with 6.33% of all payments flagged as ordinary, 93.7% on eval (963 of 1,028, 1.54% flagged), and 92.6% on HI-Medium (16,461 of 17,777, 2.98% flagged) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
-- **Intra-bank hops (draft, with Zane):** the scorer writes a link for each account as usual, internal legs included, and the node follows them through the bank until it reaches a cross-bank payment, so it still signs one claim ([Valkey layout](#valkey-layout-draft-cindy--zane)). Fully internal chains are posted by the node as Tier 1 cases.
+- **Intra-bank hops:** the scorer writes a link for each account as usual, internal legs included, and the node follows them through the bank until it reaches a cross-bank payment, so it still signs one claim ([protocol.md](protocol.md#searches-from-valkey)). **pending work:** fully internal chains posted by the node as Tier 1 cases.
 
 The scorer reports every qualifying incoming/outgoing pair for the same local
 account; it does not allocate incoming funds across payments or perform graph
@@ -172,7 +171,7 @@ Integrated mode runs Role 2's consumer inside the privacy-node process. Use
 `uv run python -m privacy_node.node --bank B --bootstrap-servers <brokers>
 --group <fresh-group> --search` with `--key-directory ROOT` and the TLS
 and peer options from [protocol.md](protocol.md). `--workload` selects the existing
-standalone CSV mode instead. `--valkey-url` is the deployed shape: the node reads the scorer's state from Valkey and never consumes Kafka. The three input modes are mutually exclusive.
+standalone CSV mode instead. `--valkey-url` is the deployed shape: the node reads the scorer's state from Valkey and never consumes Kafka ([protocol.md](protocol.md#searches-from-valkey)). The three input modes are mutually exclusive. The rest of this section is about integrated mode.
 
 The consumer calls `LocalBank.process(event)`, which uses the existing `Scorer`
 and `TokenIndex` under one local lock and publishes token references and local
@@ -190,7 +189,7 @@ are unchanged.
 
 ### Valkey layout (**draft**, Cindy → Zane)
 
-The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`); **pending work (Zane):** the privacy node reads from it, so they run in separate pods. One Valkey per bank, so keys carry no bank prefix. Only the scorer and the privacy node connect ([security.md](security.md#mtls-and-networkpolicy)). Client: [valkey-py](https://github.com/valkey-io/valkey-py).
+The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`) and the privacy node reads from it (`privacy_node/valkey_bank.py`), so they run in separate pods. One Valkey per bank, so keys carry no bank prefix. Only the scorer and the privacy node connect ([security.md](security.md#mtls-and-networkpolicy)). Client: [valkey-py](https://github.com/valkey-io/valkey-py).
 
 | Key | Type | Value | Read by |
 | --- | --- | --- | --- |
@@ -275,14 +274,14 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
 | Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **agreed** (Cindy, 3 Nov), sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json) | Mon 2 Nov |
-| Valkey layout ([streaming.md](streaming.md#valkey-layout-draft-cindy--zane)) | Cindy → Zane | Key names, token-index value, local links (including intra-bank legs), `hit:` keys, windows, TTL and trim | **draft**, sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json); Zane to approve | Wed 4 Nov |
+| Valkey layout ([streaming.md](streaming.md#valkey-layout-draft-cindy--zane)) | Cindy → Isaac (privacy node) | Key names, token-index value, local links (including intra-bank legs), `hit:` keys, windows, TTL and trim | **agreed** (Isaac, 18 Nov; the node reads it), sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json) | Wed 4 Nov |
 | Scorer as a library ([streaming.md](streaming.md#scorer-as-a-library-draft-cindy--isaac)) | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json); Isaac to approve | Wed 4 Nov |
 
 Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md#interfaces).
 
 ## Open
 
-- [ ] Intra-bank hops: followed by the node when it reads, rather than collapsed by the scorer (Cindy, with Zane).
+- [x] Intra-bank hops: followed by the node when it reads, rather than collapsed by the scorer.
 - [ ] TTL for `tok:` and `pay:`: a peer's query can arrive up to 72 h after the event under the chain rule, longer than the 24 h pending-search expiry in [protocol.md](protocol.md) (Cindy, with Caleb for PDPA retention).
 - [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
