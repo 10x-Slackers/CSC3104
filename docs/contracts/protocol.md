@@ -127,7 +127,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 - **Retained-state lifetimes (**pending work**):** stored replies expire after the search deadline plus a margin; pending searches expire after 24 h as unresolved; outbox rows are kept until acknowledged or dead-lettered.
 - **"Exactly one alert"** holds for eventual recovery with intact storage, not permanent data loss. The protocol side gives one `chains` row per digest at each bank, tested under repeated searches and redelivery.
 - **Replicas:** with the chart's `ha` flag a bank runs 2 node replicas behind one Service, sharing the store in PostgreSQL (`INSERT ... ON CONFLICT`) and splitting the scorer's hits through the `privacy-node` consumer group. Each housekeeping pass takes a session-level `pg_try_advisory_lock`, so one replica retries and redelivers at a time, and PostgreSQL releases the lock if that replica's session dies. Each replica still reloads its own keys. A batch of hits delivers straight away from either replica, so a result can be sent twice; that's harmless, because receivers are idempotent.
-- **Health:** a gRPC health service on a separate plaintext port (`--health-port`, 50052), since the kubelet's gRPC probe can't present a client certificate. It reports `NOT_SERVING` until the node has connected to its state (Valkey and the store) and started its server, and again while shutting down.
+- **Health:** a gRPC health service on a separate plaintext port (`--health-port`, 50052), since the kubelet's gRPC probe can't present a client certificate. It starts only once the node has connected to its state (Valkey and the store) and started its server, so until then the probe fails.
 
 ## Result delivery to the case service
 

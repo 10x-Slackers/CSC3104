@@ -34,7 +34,7 @@ import grpc
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
-from grpc_health.v1 import health, health_pb2, health_pb2_grpc
+from grpc_health.v1 import health, health_pb2_grpc
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
@@ -677,13 +677,6 @@ def main():
         )
     if args.case_url and not args.valkey_url:
         parser.error("--case-url needs --valkey-url")  # the legs come from Valkey
-    # Plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
-    status = health.HealthServicer()
-    status.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
-    health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    health_pb2_grpc.add_HealthServicer_to_server(status, health_server)
-    health_server.add_insecure_port(f"[::]:{args.health_port}")
-    health_server.start()
     config_path = Path(args.key_directory) / args.bank / "active.json"
 
     def read_config():
@@ -707,9 +700,8 @@ def main():
         from valkey import Valkey
 
         db = Valkey.from_url(args.valkey_url, decode_responses=True)
-        local = ValkeyBank(
-            db, args.bank, query_version, keys
-        )  # fails if Valkey is down
+        # fails if Valkey is down
+        local = ValkeyBank(db, args.bank, query_version, keys)
     else:
         local = LocalBank(args.bank, query_version, keys, **rule)
     for version in config["active_versions"]:
@@ -736,7 +728,12 @@ def main():
     )
     server, port = serve(node, args.port)
     print(f"bank {args.bank} privacy node on port {port}", flush=True)
-    status.set("", health_pb2.HealthCheckResponse.SERVING)  # its state is reachable
+    # Up once Valkey and the store are reachable (it reports SERVING from the start);
+    # plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
+    health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    health_pb2_grpc.add_HealthServicer_to_server(health.HealthServicer(), health_server)
+    health_server.add_insecure_port(f"[::]:{args.health_port}")
+    health_server.start()
     if args.search and args.workload:
         for result in node.search_detections():
             print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
@@ -790,7 +787,6 @@ def main():
                     break
     finally:
         stop.set()
-        status.enter_graceful_shutdown()
         server.stop(0)
         health_server.stop(0)
         worker.join(timeout=SEARCH_SECONDS + 5)

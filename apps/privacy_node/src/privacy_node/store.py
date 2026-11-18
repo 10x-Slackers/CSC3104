@@ -16,6 +16,8 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 
+import psycopg
+
 from privacy_node import privacy_node_pb2 as pb
 
 SCHEMA = """
@@ -40,21 +42,20 @@ UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CO
 
 class Store:
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.url, self.pg = str(path), str(path).startswith("postgres")
+        self.url = str(path)
+        self.pg = self.url.startswith("postgres")
         self.lock = threading.Lock()
         self.db = self._connect()
 
     def _connect(self):
-        if not self.pg:
+        if self.pg:
+            db = psycopg.connect(self.url, autocommit=True, connect_timeout=5)
+            db.execute(SCHEMA)
+        else:
             db = sqlite3.connect(
                 self.url, check_same_thread=False, isolation_level=None
             )
             db.executescript(SCHEMA)
-            return db
-        import psycopg
-
-        db = psycopg.connect(self.url, autocommit=True)
-        db.execute(SCHEMA)
         return db
 
     def _execute(self, sql, args=()):
@@ -70,24 +71,21 @@ class Store:
     @contextmanager
     def _transaction(self):
         with self.lock:
-            if self.pg:
-                if self.db.broken:
-                    self.db = self._connect()
-                with self.db.transaction():
-                    yield
-            else:
-                with self.db:
-                    self.db.execute("BEGIN")
-                    yield
+            self._execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self._execute("ROLLBACK")
+                raise
+            self._execute("COMMIT")
 
     def try_lock(self) -> bool:
         """Take the housekeeping lock, so one replica retries and redelivers at a time.
 
         A session-level advisory lock: PostgreSQL releases it if the replica dies.
         """
-        if not self.pg:
-            return True
-        return self._run("SELECT pg_try_advisory_lock(?)", HOUSEKEEPING_LOCK)[0][0]
+        lock = "SELECT pg_try_advisory_lock(?)"
+        return not self.pg or self._run(lock, HOUSEKEEPING_LOCK)[0][0]
 
     def unlock(self) -> None:
         if self.pg:

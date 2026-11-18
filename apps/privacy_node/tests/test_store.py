@@ -47,11 +47,12 @@ def test_round_trip(url):
     store.put_search("s", "p1", "p2", pb.PENDING, "")
     assert store.unfinished_searches() == [("p1", "p2")]
     partial = pb.ChainResult(chain_digest="d", state=pb.PARTIAL)
-    store.save_chain(partial, ["A"], {"key": "d", "kind": "chain", "legs": []})
+    case = {"key": "d", "kind": "chain", "legs": []}
+    store.save_chain(partial, ["A"], case)
     store.ack("d", "A")
     [(_, _, sent)] = store.pending_cases()
     store.ack_case("d", "chain", sent)
-    store.save_chain(partial, ["A"], {"key": "d", "kind": "chain", "legs": []})
+    store.save_chain(partial, ["A"], case)
     assert store.pending_deliveries() == [] and store.pending_cases() == []
     confirmed = pb.ChainResult(chain_digest="d", state=pb.CONFIRMED)
     store.save_chain(confirmed, ["A"], {"key": "d", "kind": "chain", "legs": [1]})
