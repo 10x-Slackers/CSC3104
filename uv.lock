@@ -470,6 +470,7 @@ name = "dataset"
 version = "0.1.0"
 source = { editable = "apps/dataset" }
 dependencies = [
+    { name = "botocore" },
     { name = "ingestor" },
     { name = "kagglehub" },
     { name = "pandas" },
@@ -477,6 +478,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "botocore", specifier = ">=1.44.0" },
     { name = "ingestor", editable = "apps/ingestor" },
     { name = "kagglehub", specifier = ">=1.0.2" },
     { name = "pandas", specifier = ">=3.0.6" },
