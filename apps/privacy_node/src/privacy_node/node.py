@@ -613,9 +613,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 if not resolved and self.case_url:  # the money starts or stays here
                     legs = self.local.internal_legs(*link)
                     self.store.put_case({"key": hit_id, "kind": "local", "legs": legs})
-            except Exception:  # e.g. Valkey or the store is down: try again next pass
+            except Exception as error:
                 log.exception("rechecking chain hit %s -> %s", *link)
-                continue
+                gone = isinstance(error, (KeyError, TypeError, ValueError))
+                if not (expired and gone):  # Valkey or the store is down: try again
+                    continue  # its data expired after the grace: drop it
             del self._unresolved[link]
         if not self.store.try_lock():
             return  # another replica is running this pass

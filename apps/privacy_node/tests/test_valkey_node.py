@@ -307,6 +307,9 @@ def test_a_broken_retry_doesnt_block_delivery(run, monkeypatch):
     node.housekeeping()
     assert [m["key"] for m in posted["B"]] == ["h1"]
     assert node.store.unfinished_searches() == []  # backed off, not retried every pass
+    node._unresolved[("gone-in", "gone-out")] = 0, "h0"  # never searched, grace over
+    node.housekeeping()
+    assert node._unresolved == {}  # its data is gone: not retried forever
 
 
 def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():
