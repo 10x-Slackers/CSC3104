@@ -501,6 +501,23 @@ def test_delayed_peer_without_grace_stays_final(banks, tmp_path):
     assert nodes["B"].search("p06", "p07").state == pb.CONFIRMED
 
 
+def test_the_grace_counts_the_first_attempts_own_time(banks, tmp_path, monkeypatch):
+    nodes, _ = banks
+    delay_c(nodes, tmp_path)
+    bank = nodes["B"]
+    bank.ingestion_grace_seconds = 1
+    clock = [1000.0]
+    monkeypatch.setattr("privacy_node.store.now", lambda: clock[0])
+    real_leg = bank.leg
+
+    def slow_leg(*args):
+        clock[0] += 1
+        return real_leg(*args)
+
+    monkeypatch.setattr(bank, "leg", slow_leg)
+    assert bank.search("p06", "p07").state == pb.NO_MATCH  # 2 s > the 1 s grace
+
+
 @pytest.mark.parametrize("arrives", [False, True])
 def test_bounded_delayed_peer_retry(banks, tmp_path, monkeypatch, arrives):
     nodes, _ = banks

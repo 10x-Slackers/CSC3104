@@ -41,6 +41,7 @@ from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from privacy_node import privacy_node_pb2 as pb
 from privacy_node import privacy_node_pb2_grpc as pb_grpc
+from privacy_node import store as protocol_store
 from privacy_node.claims import (
     bound,
     chain_digest,
@@ -385,8 +386,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
     def search(self, incoming: str, outgoing: str) -> pb.ChainResult:
         """Trace both ways from a local detection, assemble and store for delivery."""
         search_id = self.search_id(incoming, outgoing)
-        # from the stored first attempt, so replicas and restarts share it
-        age = self.store.search_age(search_id)
+        # the grace runs from the stored first attempt: replicas and restarts share it
+        first = self.store.search_started(search_id) or protocol_store.now()
         deadline = time.monotonic() + SEARCH_SECONDS
         with self.local.lock:
             key_version = self.key_version
@@ -414,7 +415,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         valid = valid_chain(claims, self.public_keys)
         cut = pb.CONFIRMED if complete(claims) else pb.PARTIAL
         state = worst(down_state, up_state, cut) if valid else pb.INVALID_CLAIM
-        if state == pb.NO_MATCH and age < self.ingestion_grace_seconds:
+        late = protocol_store.now() - first >= self.ingestion_grace_seconds
+        if state == pb.NO_MATCH and not late:
             # Fresh query IDs let delayed ingestion be checked again.
             state = pb.PENDING
         result = pb.ChainResult(
@@ -451,7 +453,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     "legs": legs,
                 }
             )
-        self.store.put_search(search_id, incoming, outgoing, state, result.chain_digest)
+        self.store.put_search(
+            search_id, incoming, outgoing, state, result.chain_digest, first
+        )
         return result
 
     def search_detections(self) -> list[pb.ChainResult]:
@@ -503,7 +507,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """Search from a chain link, through intra-bank hops, if both ends cross banks."""
         starts = self.local.ends(incoming, "in")
         ends = self.local.ends(outgoing, "out")
-        if starts and ends:
+        new = (
+            starts
+            and ends
+            and not self.store.search_started(self.search_id(starts[0], ends[0]))
+        )  # a stored search is housekeeping's to retry, on its backoff
+        if new:
             self.search(starts[0], ends[0])  # BRANCH_CAP: linear chains only
         return bool(starts and ends)
 

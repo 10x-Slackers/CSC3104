@@ -129,6 +129,7 @@ class Store:
         outgoing: str,
         state: pb.State,
         chain_digest: str,
+        started: float | None = None,
     ) -> None:
         """Record a search's latest attempt and when it is next due, if it's pending."""
         t = now()
@@ -144,13 +145,13 @@ class Store:
             state,
             chain_digest,
             t + random.random() * wait,
-            t,
+            t if started is None else started,  # kept from the first attempt
         )
 
-    def search_age(self, search_id: str) -> float:
-        """Seconds since the search's first attempt, 0 if it has none."""
+    def search_started(self, search_id: str) -> float | None:
+        """When the search's first attempt began, or None if it never ran."""
         rows = self._run("SELECT started FROM searches WHERE search_id=?", search_id)
-        return now() - rows[0][0] if rows else 0.0
+        return rows[0][0] if rows else None
 
     def unfinished_searches(self) -> list[tuple[str, str]]:
         """Pending and timed-out searches that are due and less than 24 h old."""

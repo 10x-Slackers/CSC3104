@@ -5,6 +5,7 @@ import json
 import time
 import urllib.error
 from pathlib import Path
+from unittest.mock import Mock
 
 import fakeredis
 import pytest
@@ -135,7 +136,7 @@ def event(bank, pid, direction, account, other, minute, amount):
     }
 
 
-def test_intra_bank_hop_is_followed(run):
+def test_intra_bank_hop_is_followed(run, monkeypatch):
     events = {
         "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
         "B": [
@@ -149,7 +150,11 @@ def test_intra_bank_hop_is_followed(run):
     nodes, posted = run(events)
     assert nodes["B"].local.links("q1", "in") == ["q3"]
     assert nodes["B"].local.links("q3", "out") == ["q1"]
+    search = Mock(wraps=nodes["B"].search)
+    monkeypatch.setattr(nodes["B"], "search", search)
     nodes["B"].consume_hits(block_ms=None)
+    # both chain hits (q1 -> q2, q2 -> q3) lead to q1 -> q3: one search, not two
+    search.assert_called_once_with("q1", "q3")
     nodes["B"].housekeeping()  # delivers to A and C
     for node in nodes.values():
         [chain] = node.store.chains()
