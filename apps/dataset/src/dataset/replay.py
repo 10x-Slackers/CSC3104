@@ -79,13 +79,14 @@ def headers(url: str, body: bytes, auth: SigV4Auth | None) -> dict:
 def post(
     conn: http.client.HTTPConnection, url: str, body: bytes, auth: SigV4Auth | None
 ) -> tuple[int | None, str]:
-    # One POST -> (status, reply); status None on a network error, then conn reconnects.
+    # One POST -> (status, reply); status None on any error (network, signing), then
+    # conn reconnects.
     try:
         path = urlsplit(url).path or "/"
         conn.request("POST", path, body, headers(url, body, auth))
         r = conn.getresponse()
         return r.status, r.read().decode()
-    except (OSError, http.client.HTTPException) as e:
+    except Exception as e:  # noqa: BLE001 - a dead sender would hang --speed 0
         conn.close()
         return None, f"{type(e).__name__}: {e}"
 
@@ -96,8 +97,8 @@ def send(
     """POST this bank's queue in batches, one at a time, so its events keep their order.
 
     A batch is whatever became due while the last one was sent, at most BATCH payments.
-    5xx, 429 and network errors resend the same batch with full jitter, 1 s doubling
-    to 30 s; a 400 can't succeed on resend, so it stops replay.
+    5xx, 429, network and signing errors resend the same batch with full jitter, 1 s
+    doubling to 30 s; a 400 can't succeed on resend, so it stops replay.
     """
     u = urlsplit(url)
     https = u.scheme == "https"
@@ -163,7 +164,8 @@ def main(argv=None):
 
     meta = json.loads((a.workload / "workload.json").read_text())
     t0 = datetime.fromisoformat(meta["t0"])
-    # one queue and sender per bank: a bank that's down delays only itself
+    # one queue and sender per bank: with --speed N or --rate, a bank that's down
+    # delays only itself
     queues = {b: queue.Queue() for b in urls}
     failed = threading.Event()
     senders = [

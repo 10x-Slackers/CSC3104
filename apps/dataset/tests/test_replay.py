@@ -93,3 +93,21 @@ def test_speed_0_waits_for_the_slowest_ingestor(monkeypatch):
     sizes = [len(batch["FIToFICstmrCdtTrf"]["CdtTrfTxInf"]) for _, batch, _ in got]
     # all 13 of B's payments, but never more than one waiting while a batch is sent
     assert sum(sizes) == 13 and max(sizes) <= 2
+
+
+def test_a_signing_error_is_retried_not_fatal(monkeypatch):
+    # a sender that died here would leave --speed 0 waiting on its queue forever
+    monkeypatch.setattr(replay.random, "uniform", lambda a, b: 0)
+    headers, calls = replay.headers, []
+
+    def flaky(*a):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("credential refresh failed")
+        return headers(*a)
+
+    monkeypatch.setattr(replay, "headers", flaky)
+    monkeypatch.setattr(replay, "BACKLOG", 1)
+    url, got = ingestor("B")
+    replay.main([str(TINY), "--speed", "0", f"--url=B={url}"])
+    assert sum(len(b["FIToFICstmrCdtTrf"]["CdtTrfTxInf"]) for _, b, _ in got) == 13
