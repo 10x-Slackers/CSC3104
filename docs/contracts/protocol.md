@@ -141,7 +141,7 @@ With `--valkey-url` and `--case-url`, the node is the **only writer** to its own
 
 Own-leg details travel only inside the bank, never in a peer message. The case service never reads Valkey.
 
-**agreed** (Isaac for the node, 18 Nov): the JSON format of each message and a shared sample, [`apps/case/fixtures/node_messages.json`](../../apps/case/fixtures/node_messages.json), are in [case.md](case.md#node-messages). Housekeeping and each batch of hits post every unacknowledged row to `<case-url>/results`; a 200 acknowledges it, a 422 (not evidence) dead-letters it, and anything else, including the service being down, leaves it for the next pass. `test_valkey_node.py` runs the tiny fixture through the scorer, Valkey, three nodes and three case stores, and gets the offline evaluator's cases and tiers at every bank.
+**agreed** (Isaac for the node, 18 Nov): the JSON format of each message and a shared sample, [`apps/case/fixtures/node_messages.json`](../../apps/case/fixtures/node_messages.json), are in [case.md](case.md#node-messages). Housekeeping (every 10 s, as for `Deliver` in Valkey mode) posts every unacknowledged row to `<case-url>/results`; a 200 acknowledges it, a 422 (not evidence) dead-letters it, and any other status leaves it for the next pass. If the service can't be reached, the pass stops there and the next one starts again. `test_valkey_node.py` runs the tiny fixture through the scorer, Valkey, three nodes and three case stores, and gets the offline evaluator's cases and tiers at every bank.
 
 ### Searches from Valkey
 

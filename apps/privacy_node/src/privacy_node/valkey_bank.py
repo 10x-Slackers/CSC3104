@@ -15,8 +15,8 @@ from valkey import Valkey
 from valkey.exceptions import ResponseError
 
 from ingestor import Direction
-from privacy_node import privacy_node_pb2 as pb
-from scorer.state import Hit
+from privacy_node.local_state import LocalBank
+from scorer.state import Hit, ValkeyState
 from scorer.token_index import TokenIndex
 from security import AgreementFiles, canonical_pair
 
@@ -30,7 +30,7 @@ class ValkeyBank:
         self, db: Valkey, bank: str, key_version: str, key_paths: AgreementFiles
     ) -> None:
         """db needs decode_responses=True, as the scorer's client does."""
-        self.db, self.bank = db, bank
+        self.db, self.bank, self.state = db, bank, ValkeyState(db)  # its readers only
         self.index = TokenIndex(bank, key_version, key_paths)  # keys only, no entries
         self.lock = threading.RLock()
         self.consumer = socket.gethostname()  # the pod name
@@ -45,18 +45,13 @@ class ValkeyBank:
     def peer(self, payment_id: str, direction: Direction) -> str:
         return self.db.hget(f"pay:{payment_id}:{direction}", "counterparty_bank")
 
-    def ref(
-        self, payment_id: str, direction: Direction, key_version: str
-    ) -> pb.TokenRef:
-        banks = canonical_pair(self.bank, self.peer(payment_id, direction))
-        token = self.index.token_for(payment_id, banks, key_version)
-        return pb.TokenRef(pair="-".join(banks), token=token)
+    ref = LocalBank.ref  # uses only bank, peer and index
 
     def lookup(
         self, pair: str, key_version: str, token: bytes, direction: Direction
     ) -> str | None:
         """Return this bank's payment_id for a peer token, or None."""
-        entry = self.db.hgetall(f"tok:{pair}:{key_version}:{token.hex()}")
+        entry = self.state.lookup(pair, key_version, token.hex()) or {}
         return entry["payment_id"] if entry.get("direction") == direction else None
 
     def links(self, payment_id: str, direction: Direction) -> list[str]:
@@ -65,7 +60,7 @@ class ValkeyBank:
         found, todo = set(), [(payment_id, 0)]
         while todo:
             pid, hops = todo.pop()
-            for other in self.db.smembers(f"link:{direction}:{pid}"):
+            for other in self.state.links(pid, direction):
                 if self.peer(other, OTHER[direction]) != self.bank:
                     found.add(other)
                 elif hops < MAX_INTERNAL_HOPS:
@@ -81,7 +76,7 @@ class ValkeyBank:
 
     def leg(self, payment_id: str, direction: Direction, token: str = "") -> dict:
         """One of this bank's own payments, as the case service stores it (case.md)."""
-        p = self.db.hgetall(f"pay:{payment_id}:{direction}")
+        p = self.state.payment(payment_id, direction)
         leg = {
             "payment_id": payment_id,
             "direction": direction,
@@ -101,7 +96,7 @@ class ValkeyBank:
         )
         return reply[0][1] if reply else []
 
-    def new_hits(self, block_ms: int | None = 1000) -> list[tuple[str, Hit]]:
+    def new_hits(self, block_ms: int | None) -> list[tuple[str, Hit]]:
         """This consumer's unacknowledged hits first (left by a restart or an error),
         then new ones."""
         try:

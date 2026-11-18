@@ -94,7 +94,7 @@ def test_fixture_reaches_the_case_store_as_the_offline_evaluator_expects(run, tm
     got = set()
     for node in nodes.values():
         node.consume_hits(block_ms=None)
-    for node in nodes.values():  # deliveries that arrived after a bank's own pass
+    for node in [*nodes.values()] * 2:  # twice: results delivered after a bank's pass
         node.housekeeping()
     for bank, node in nodes.items():
         got |= cases_at(node, posted[bank], tmp_path)
@@ -147,6 +147,7 @@ def test_intra_bank_hop_is_followed(run):
     assert nodes["B"].local.links("q1", "in") == ["q3"]
     assert nodes["B"].local.links("q3", "out") == ["q1"]
     nodes["B"].consume_hits(block_ms=None)
+    nodes["B"].housekeeping()  # delivers to A and C
     for node in nodes.values():
         [chain] = node.store.chains()
         assert chain.state == pb.CONFIRMED
@@ -155,18 +156,12 @@ def test_intra_bank_hop_is_followed(run):
     assert [leg["payment_id"] for leg in message["legs"]] == ["q1", "q3"]
 
 
-def test_unacknowledged_hits_are_read_again_after_a_restart(run, tmp_path):
-    nodes, _ = run(tiny())
-    local = nodes["B"].local
-    first = local.new_hits(block_ms=None)
-    assert first and local.new_hits(block_ms=None) == first  # not acknowledged
-    restarted = ValkeyBank(local.db, "B", "k1", pair_paths(tmp_path, "B"))
-    assert restarted.new_hits(block_ms=None) == first
-
-
-def test_a_failed_hit_is_retried_and_a_lost_group_recreated(run, monkeypatch):
+def test_a_failed_hit_is_retried_and_a_lost_group_recreated(run, monkeypatch, tmp_path):
     nodes, _ = run(tiny())
     node, calls = nodes["B"], []
+    first = node.local.new_hits(block_ms=None)
+    restarted = ValkeyBank(node.local.db, "B", "k1", pair_paths(tmp_path, "B"))
+    assert first and restarted.new_hits(block_ms=None) == first  # not acknowledged
 
     def fail_once(hit, search):
         calls.append(hit["hit_id"])
@@ -189,7 +184,7 @@ def test_a_failed_hit_is_retried_and_a_lost_group_recreated(run, monkeypatch):
 
 
 def test_case_service_rejection_is_dead_lettered_and_outage_retried(run, monkeypatch):
-    nodes, _ = run(tiny())
+    nodes, _ = run({b: [] for b in BANKS})
     node = nodes["B"]
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
 

@@ -8,7 +8,6 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
-import fakeredis
 import grpc
 import pytest
 from google.protobuf.json_format import MessageToDict
@@ -631,7 +630,7 @@ def test_valkey_cli_reads_hits_without_kafka_or_workload(tmp_path, monkeypatch):
     prepare_demo_keys(tmp_path)
     monkeypatch.setattr("confluent_kafka.Consumer", Mock(side_effect=AssertionError))
     monkeypatch.setattr(LocalBank, "from_workload", Mock(side_effect=AssertionError))
-    db = fakeredis.FakeValkey(decode_responses=True)
+    db = Mock()
     monkeypatch.setattr("valkey.Valkey.from_url", Mock(return_value=db))
     consume_hits = Mock(side_effect=KeyboardInterrupt)  # stop after the first read
     monkeypatch.setattr(Node, "consume_hits", consume_hits)

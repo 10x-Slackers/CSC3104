@@ -495,10 +495,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         for entry_id, hit in hits:
             self.handle_hit(hit, search)
             self.local.ack(entry_id)
-        if hits:
-            self.deliver_pending()
-            self.deliver_cases()
-        return len(hits)
+        return len(hits)  # housekeeping delivers what they stored
 
     # ---- housekeeping ---------------------------------------------------
 
@@ -507,9 +504,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if not self.case_url:
             return None
         legs = []
-        for c in result.claims:
+        for c in (c for c in result.claims if c.signer == self.bank):
             for ref, direction in ((c.in_ref, "in"), (c.out_ref, "out")):
-                if c.signer == self.bank and ref.token:
+                if ref.token:
                     payment = self.local.lookup(
                         ref.pair, c.key_version, ref.token, direction
                     )
@@ -534,13 +531,12 @@ class Node(pb_grpc.PrivacyNodeServicer):
             try:
                 urllib.request.urlopen(request, timeout=5).close()
                 self.store.ack_case(message_key, kind)
-            except urllib.error.HTTPError as error:
-                if error.code != 422:
-                    continue  # stays in the outbox
-                self.store.dead_case(message_key, kind)  # not evidence: don't resend
-                log.warning("dead-lettered case message %s %s", kind, message_key)
+            except urllib.error.HTTPError as error:  # other codes stay in the outbox
+                if error.code == 422:  # not evidence: don't resend
+                    self.store.dead_case(message_key, kind)
+                    log.warning("dead-lettered case message %s %s", kind, message_key)
             except OSError:
-                continue  # the case service is down: stays in the outbox
+                break  # the case service is down: try them all again next pass
 
     def deliver_pending(self, stop: threading.Event | None = None) -> None:
         for bank, result in self.store.pending_deliveries():
@@ -583,8 +579,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 break
             self.search(incoming, outgoing)
         self.deliver_pending(stop=stop)
-        if self.case_url:
-            self.deliver_cases(stop=stop)
+        self.deliver_cases(stop=stop)
 
 
 def serve(node: Node, port: int = 0) -> tuple[grpc.Server, int]:
