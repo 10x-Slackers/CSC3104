@@ -4,9 +4,10 @@ version = "0.1.0"
 description = "Role 5: bank-local cases, alerts, analyst UI and draft reports"
 requires-python = ">=3.12"
 dependencies = [
+    "botocore>=1.44.0",
     "fastapi>=0.162.0",
     "privacy-node",
-    "python-multipart>=0.0.32",
+    "psycopg[binary]>=3.3.8",
     "security",
     "uvicorn>=0.54.0",
 ]

@@ -1,55 +1,69 @@
-"""Analyst UI and JSON API for one bank's cases, with the report dispatcher running inside.
+"""Read-only analyst UI and JSON API for one bank's cases.
 
-    CASE_BANK=A CASE_DB=cases-a.db CASE_KEY_DIRECTORY=.secrets uv run python -m case.app
+    CASE_BANK=A CASE_DATABASE_URL=cases-a.db CASE_KEY_DIRECTORY=.secrets uv run python -m case.app
 
-Settings (environment): CASE_BANK, CASE_DB, CASE_KEY_DIRECTORY, CASE_INTAKE_URL, PORT.
-Chain results arrive from the bank's privacy node on POST /results. Alerts and merges
-go straight to this UI's inbox; reports go to the mock intake (intake.py).
+Settings (environment): CASE_BANK, CASE_DATABASE_URL (a postgresql:// URL, or a SQLite
+file), CASE_KEY_DIRECTORY, CASE_SUMMARY_URL, CASE_SUMMARY_TIMEOUT, CASE_SUMMARY_REGION,
+PORT. The bank's privacy node posts each message to POST /results. Analysts can only
+view, bookmark and mark cases reviewed: what the bank does about a case is its own
+process, so there is no free text and no decision.
 """
 
 import os
 import threading
 from collections.abc import Callable
-from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime
 from html import escape
-from typing import Annotated
+from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from google.protobuf.message import DecodeError
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from case.case_store import Case, Decision, ReviewStatus, SqliteCaseStore, neighbours
-from case.evidence import check_result, load_public_keys
-from case.outbox import run, webhook
-from case.report import ReportClient, TemplateClient, draft_report, when
-from privacy_node import privacy_node_pb2 as pb
+from case import log
+from case.case_store import Case, CaseStore, neighbours
+from case.evidence import load_public_keys, parse
+from case.report import summarizer
 from security import PublicKeys
 
-ACTIONS: dict[Decision, str] = {
-    "monitor": "Continue monitoring",
-    "suspend": "Suspend outgoing transactions",
-    "freeze": "Freeze accounts",
-    "report": "Report to authorities",
-}
+TIERS = {2: "ALERT", 1: "low priority"}
 STYLE = """<style>
 body { font: 15px system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem }
 table { border-collapse: collapse; width: 100% } td, th { border-bottom: 1px solid #ccc;
 padding: .3rem .5rem; text-align: left } code { font-size: 12px } .muted { color: #666 }
+form { display: inline } .tag { padding: 0 .4rem; border-radius: 3px; font-size: 13px }
+.t2 { background: #c62828; color: #fff; font-weight: 600 } .t1 { background: #eee; color: #555 }
+.wait { background: #fff3cd; color: #7a5b00 }
 </style>"""
 
 
+def tier(t: int) -> str:
+    """Alerts in red, low priority in grey."""
+    return f"<span class='tag t{t}'>{TIERS.get(t, 'no tier')}</span>"
+
+
+def state(c: dict) -> str:
+    if c["state"] == "pending" and c["waiting"]:
+        return f"<span class='tag wait'>Waiting for bank {escape(c['waiting'])}</span>"
+    return escape(c["state"])
+
+
 def short(token: str) -> str:
-    """Show the stored token hex; peer messages still use raw bytes."""
     if not token:
         return "-"
     return f"<code title='{escape(token)}'>{escape(token[:24])}…</code>"
 
 
-def page(bank: str, title: str, body: str) -> HTMLResponse:
+def when(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "-"
+    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def page(bank: str, title: str, body: str, head: str = "") -> HTMLResponse:
     return HTMLResponse(
-        f"<!doctype html><title>{escape(title)}</title>{STYLE}"
+        f"<!doctype html><title>{escape(title)}</title>{head}{STYLE}"
         f"<p class=muted><a href='/'>Bank {escape(bank)} cases</a></p>{body}"
     )
 
@@ -57,40 +71,19 @@ def page(bank: str, title: str, body: str) -> HTMLResponse:
 def create_app(
     db: str | os.PathLike[str],
     bank: str,
-    intake_url: str,
     public_keys: Callable[[], PublicKeys],
-    interval: float | None = 1.0,
-    client: ReportClient | None = None,
+    summarize: Callable[[Case], str | None] = lambda case: None,
 ) -> FastAPI:
-    """interval=None skips the background dispatcher (tests call dispatch directly)."""
-    client = client or TemplateClient()
-    send = webhook(intake_url)
     local = threading.local()
 
-    def store() -> SqliteCaseStore:
-        """One connection per thread: a SQLite connection belongs to its thread."""
+    def store() -> CaseStore:
+        """One connection per thread: a connection runs one transaction at a time."""
         if not hasattr(local, "store"):
-            local.store = SqliteCaseStore(db)
+            local.store = CaseStore(str(db))
         return local.store
 
-    @asynccontextmanager
-    async def lifespan(app):
-        stop, wait = threading.Event(), interval  # a local, so dispatcher sees a float
-        if wait is not None:
-
-            def dispatcher():
-                run(store(), send, bank, stop, wait)  # this thread's own connection
-
-            threading.Thread(target=dispatcher, daemon=True).start()
-        yield
-        stop.set()
-
-    app = FastAPI(title=f"Bank {bank} cases", lifespan=lifespan)
-
-    # The store rejects results in undeliverable states.
-    @app.exception_handler(ValueError)
-    async def invalid(request: Request, exc: ValueError) -> JSONResponse:
-        return JSONResponse({"detail": str(exc)}, 422)
+    store()  # create the schema before the first request
+    app = FastAPI(title=f"Bank {bank} cases")
 
     def load(case_id: str) -> Case:
         case = store().get(case_id)
@@ -98,31 +91,31 @@ def create_app(
             raise HTTPException(404, "No such case")
         return case
 
+    @app.get("/healthz")
+    def healthz():
+        return {"ok": True}
+
     @app.get("/", response_class=HTMLResponse)
     def index():
         rows = "".join(
             f"<tr><td><a href='/cases/{c['case_id']}'><code>{c['case_id'][:16]}</code></a>"
-            f"<td>{c['state']}<td>{'ALERT ' + when(c['raised_at']) if c['raised_at'] else '-'}"
-            f"<td>{ACTIONS[c['decision']] if c['decision'] else '-'}"
-            for c in reversed(store().cases())
+            f"<td>{tier(c['tier'])}<td>{state(c)}<td>{when(c['raised_at'])}"
+            f"<td>{'★' if c['bookmarked'] else ''}<td>{'✓' if c['reviewed'] else ''}"
+            for c in store().cases()
         )
         inbox = "".join(
             f"<li>{when(n['created_at'])}: {escape(n['kind'])} "
             f"<a href='/cases/{escape(n['case_id'])}'><code>{escape(n['case_id'][:16])}</code></a>"
             for n in store().notifications()
         )
-        pending = "".join(
-            f"<li>{escape(e['event_id'][:24])}: {e['attempts']} attempts, {escape(e['error'] or 'waiting')}"
-            for e in store().outbox(pending=True)
-        )
         return page(
             bank,
             f"Bank {bank} cases",
             f"<h1>Bank {escape(bank)} cases</h1>"
-            "<table><tr><th>Case<th>State<th>Alert<th>Latest decision</tr>"
-            f"{rows or '<tr><td colspan=4>No cases yet'}</table>"
-            f"<h2>Notifications</h2><ul>{inbox or '<li>None'}</ul>"
-            f"<h2>Undelivered</h2><ul>{pending or '<li>None'}</ul>",
+            "<table><tr><th>Case<th>Tier<th>State<th>Alert<th>Bookmark<th>Reviewed</tr>"
+            f"{rows or '<tr><td colspan=6>No cases yet'}</table>"
+            f"<h2>Alerts</h2><ul>{inbox or '<li>None'}</ul>",
+            "<meta http-equiv=refresh content=5>",  # new cases appear during a replay
         )
 
     @app.get("/cases/{case_id}", response_class=HTMLResponse)
@@ -130,34 +123,31 @@ def create_app(
         case = load(case_id)
         links = "".join(
             f"<tr><td>{i}<td>{escape(start)} → <b>{escape(c.signer)}</b> → "
-            f"{escape(end)}<td>{escape(c.signer)}"
-            f"<td>{short(c.in_token)}<td>{short(c.out_token)}"
+            f"{escape(end)}<td>{short(c.in_token)}<td>{short(c.out_token)}"
             for i, c in enumerate(case["claims"], 1)
             for start, end in [neighbours(c.signer, c.in_pair, c.out_pair)]
         )
-        results = "".join(
-            f"<li>{escape(s)} from {escape(sender)} · digest <code>{escape(d[:16])}</code>"
-            for d, sender, s in case["results"]
+        legs = "".join(
+            f"<tr><td>{escape(leg['payment_id'])}<td>{escape(leg['direction'])}"
+            f"<td>{escape(leg['account'])}<td>{leg['amount']:,.2f}"
+            f"<td>{escape(leg['pair'] or 'intra-bank')}"
+            for leg in case["legs"]
         )
-        decisions = "".join(
-            f"<li>{when(t)}: {ACTIONS[a]}" for a, t in case["decisions"]
+        messages = "".join(
+            f"<li>{escape(m['kind'])}{' ' + escape(m['state']) if m['state'] != m['kind'] else ''}"
+            f"{' · ' + escape(m['detail']) if m['detail'] else ''}"
+            f" · <code>{escape(m['key'][:16])}</code> · {when(m['received_at'])}"
+            for m in case["messages"]
         )
+        draft = summarize(case)
         merged = case["merged_into"]
-        reports = "".join(
-            f"<h3>Report {r['report_id']} · {escape(r['source'])} · {escape(r['status'])}"
-            f" · {when(r['created_at'])}</h3><pre>{escape(r['body'])}</pre>"
-            + (
-                f"<form method=post action='/cases/{escape(case_id)}/reports/"
-                f"{r['report_id']}/review'><button name=status value=approved>Approve"
-                "</button> <button name=status value=rejected>Reject</button></form>"
-                if r["status"] == "draft"
-                else ""
+        toggles = "".join(
+            f"<form method=post action='/cases/{escape(case_id)}/{flag}'>"
+            f"<button>{label[case[flag]]}</button></form> "
+            for flag, label in (
+                ("bookmarked", {False: "Bookmark", True: "Remove bookmark"}),
+                ("reviewed", {False: "Mark reviewed", True: "Mark not reviewed"}),
             )
-            for r in store().reports(case_id)
-        )
-        buttons = "".join(
-            f"<button name=action value={a}>{label}</button> "
-            for a, label in ACTIONS.items()
         )
         return page(
             bank,
@@ -168,49 +158,45 @@ def create_app(
                 if merged
                 else ""
             )
-            + f"<p>State: <b>{case['state']}</b> · Alert: {when(case['raised_at'])}"
+            + f"<p>{tier(case['tier'])} · State: <b>{state(case)}</b>"
+            f" · Alert: {when(case['raised_at'])}<p>{toggles}"
             "<p class=muted>A rule flags suspicion, not proven laundering. Each link is "
             "confirmed by the signing bank; a signature doesn't prove its records are true."
-            "<h2>Links</h2><table><tr><th>#<th>Banks (from → confirming → to)"
-            f"<th>Confirmed by<th>Incoming token<th>Outgoing token</tr>{links}</table>"
-            f"<h2>Chain results received</h2><ul>{results}</ul>"
-            f"<h2>Decisions</h2><ul>{decisions or '<li>None yet'}</ul>"
-            f"<form method=post action='/cases/{escape(case_id)}/decision'>{buttons}</form>"
-            "<p class=muted>All actions are simulated."
-            "<h2>Draft reports</h2><p class=muted>Template reports, not AI-generated;"
-            " each needs analyst review.</p>"
-            f"<form method=post action='/cases/{escape(case_id)}/report'>"
-            f"<button>Generate draft</button></form>{reports}",
+            "<h2>This bank's legs</h2><table><tr><th>Payment<th>Direction<th>Account"
+            f"<th>Amount (SGD)<th>Pair</tr>{legs or '<tr><td colspan=5>None'}</table>"
+            "<h2>Links</h2><p class=muted>Other banks' legs are tokens only.</p>"
+            "<table><tr><th>#<th>Banks (from → confirming → to)"
+            f"<th>Incoming token<th>Outgoing token</tr>{links or '<tr><td colspan=4>None'}</table>"
+            f"<h2>From the privacy node</h2><ul>{messages}</ul>"
+            "<h2>Draft summary</h2><p class=muted>Drafted from a fixed template for you to review.</p>"
+            + (
+                f"<pre>{escape(draft)}</pre>"
+                if draft
+                else "<p>No draft: the summary service is unavailable."
+            ),
         )
 
-    @app.post("/cases/{case_id}/decision")
-    def decide(case_id: str, action: Annotated[Decision, Form()]):
+    @app.post("/cases/{case_id}/{flag}")
+    def toggle(case_id: str, flag: Literal["bookmarked", "reviewed"]):
         load(case_id)
-        store().decide(case_id, action)
-        return RedirectResponse(f"/cases/{case_id}", status_code=303)
-
-    @app.post("/cases/{case_id}/report")
-    def generate(case_id: str):
-        draft_report(store(), load(case_id), client)
-        return RedirectResponse(f"/cases/{case_id}", status_code=303)
-
-    @app.post("/cases/{case_id}/reports/{report_id}/review")
-    def review(case_id: str, report_id: int, status: Annotated[ReviewStatus, Form()]):
-        if not store().review_report(case_id, report_id, status):
-            raise HTTPException(409, "Report is not a pending draft")
+        store().flag(case_id, flag)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
     @app.post("/results")
     async def results(request: Request):
-        """Verify one bank-internal protobuf result before storing its normalized copy."""
+        """Check and store one node message (JSON); reply only once it is stored."""
         try:
-            result = pb.ChainResult.FromString(await request.body())
-            keys = public_keys()
-            result = check_result(result, keys, bank)
-        except (DecodeError, ValueError) as exc:
-            raise HTTPException(422, "Invalid chain result") from exc
-        store().record(result)
-        return {"chain_digest": result.chain_digest}
+            message = parse(await request.json(), public_keys(), bank)
+        except (KeyError, TypeError, ValueError) as exc:
+            log(event="rejected", bank=bank, error=type(exc).__name__)
+            raise HTTPException(422, "Invalid message") from exc
+        case = load(store().record(message))
+        # The evaluation joins chain_digest (key) to raised_at, on one clock.
+        log(
+            event="stored", bank=bank, key=message.key, kind=message.kind,
+            case_id=case["case_id"], tier=case["tier"], raised_at=case["raised_at"],
+        )  # fmt: skip
+        return {"key": message.key}
 
     @app.get("/api/cases")
     def api_cases():
@@ -226,15 +212,22 @@ def create_app(
 
 if __name__ == "__main__":
     bank = os.environ.get("CASE_BANK", "A")
+    summarize = summarizer(
+        os.environ.get("CASE_SUMMARY_URL", ""),
+        bank,
+        float(os.environ.get("CASE_SUMMARY_TIMEOUT", "2")),
+        os.environ.get("CASE_SUMMARY_REGION", ""),
+    )
+    keys = os.environ.get("CASE_KEY_DIRECTORY", ".secrets")
     uvicorn.run(
         create_app(
-            os.environ.get("CASE_DB", "cases.db"),
+            os.environ.get("CASE_DATABASE_URL", "cases.db"),
             bank,
-            os.environ.get("CASE_INTAKE_URL", "http://127.0.0.1:8001/reports"),
-            lambda: load_public_keys(
-                os.environ.get("CASE_KEY_DIRECTORY", ".secrets"), bank
-            ),
+            lambda: load_public_keys(keys, bank),
+            summarize,
         ),
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
+        access_log=False,
+        log_config=None,
     )

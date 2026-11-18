@@ -10,8 +10,10 @@ from unittest.mock import Mock
 
 import grpc
 import pytest
+from google.protobuf.json_format import MessageToDict
 
-from case.case_store import SqliteCaseStore
+from case.case_store import CaseStore
+from case.evidence import parse
 from ingestor import Event, read_events
 from privacy_node import node as node_module
 from privacy_node import privacy_node_pb2 as pb
@@ -532,7 +534,7 @@ def test_bounded_delayed_peer_retry(banks, tmp_path, monkeypatch, arrives):
         bank.housekeeping()
 
 
-def test_replay_rebuilds_state_and_repeated_result_alerts_once(banks, tmp_path):
+def test_replay_rebuilds_state_and_repeated_result_makes_one_case(banks, tmp_path):
     nodes, _ = banks
     old = nodes["B"]
     path = tmp_path / "protocol.db"
@@ -555,12 +557,15 @@ def test_replay_rebuilds_state_and_repeated_result_alerts_once(banks, tmp_path):
     assert restarted.local.lookup(old_ref.pair, "k1", old_ref.token, "in") == "p06"
     replayed = restarted.search("p06", "p07")
     assert first.chain_digest == replayed.chain_digest
-    case = SqliteCaseStore(tmp_path / "cases.db")
+    case = CaseStore(str(tmp_path / "cases.db"))
     for result in (first, replayed, first):
         assert check_result(result, old.public_keys, "B")
-        case.record(result)
-    assert len(case.cases()) == len(case.notifications()) == 1
-    assert case.cases()[0]["raised_at"] is not None
+        message = {"key": result.chain_digest, "kind": "chain", "legs": []}
+        message["result"] = MessageToDict(result)
+        case.record(parse(message, old.public_keys, "B"))
+    # m1: only B's rule links it, so one low-priority case and no alert (case.md).
+    assert [c["tier"] for c in case.cases()] == [1]
+    assert case.cases()[0]["raised_at"] is None
 
 
 def test_concurrent_state_reads_and_old_token_retention(tmp_path):

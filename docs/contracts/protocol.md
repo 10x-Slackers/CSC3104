@@ -141,6 +141,8 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 Own-leg details travel only inside the bank, never in a peer message. The case service never reads Valkey.
 
+**draft (proposed by Jia Rui, for Zane to approve):** the JSON format of each message and a shared sample, [`apps/case/fixtures/node_messages.json`](../../apps/case/fixtures/node_messages.json), are in [case.md](case.md#node-messages); the case service accepts them on `POST /results` today. It replies 200 once stored and 422 for a message that isn't evidence, which the outbox should dead-letter rather than retry.
+
 ## Running and testing
 
 The node CLI uses only `--key-directory ROOT`, containing `<bank>/active.json` and

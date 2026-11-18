@@ -1,115 +1,61 @@
-import socket
+import json
+import threading
+from http.server import ThreadingHTTPServer
 
 import pytest
 from fastapi.testclient import TestClient
 
 from case.app import create_app
-from case.case_store import SqliteCaseStore
-from case.report import ALLOWED, TemplateClient, draft_report, report_input
-from sample_chains import o1, public_keys, v1
+from case.report import report_input, summarizer
+from sample_chains import chain, foreign, leaks, m1, message, o1, public_keys
+from summary.app import Handler
 
-# DEPENDS ON Role 3 (privacy node): cases are built from its real ChainResults.
-PRIVATE = {"account": "A-m0", "amount": 10000.0, "payment_id": "p06", "note": "C-m2"}
-
-
-class Recorder:
-    """Test double: keeps what a client was given."""
-
-    source = "recorder"
-
-    def draft(self, data):
-        self.seen = data
-        return "body"
+DOWN = "http://127.0.0.1:9/"  # nothing listens here
 
 
 @pytest.fixture
-def store(tmp_path):
-    store = SqliteCaseStore(tmp_path / "cases.db")
-    store.record(o1())  # loop A -> B -> C -> A, confirmed
-    return store
+def summary_url():
+    """The real summary service on a local port, so drafts travel over HTTP."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}/"
+    server.shutdown()
 
 
-def case_id(store):
-    return store.cases()[0]["case_id"]
+@pytest.fixture
+def case(store):
+    return store.get(store.record(message(o1(), "B")))
 
 
-def keys(value):
-    if isinstance(value, dict):
-        return set(value) | {k for v in value.values() for k in keys(v)}
-    if isinstance(value, list):
-        return {k for v in value for k in keys(v)}
-    return set()
+def test_input_has_own_legs_tokens_and_no_signatures(case):
+    data = report_input(case, "B")
+    assert {g["payment_id"] for g in data["legs"]} == {"p10", "p11"}
+    assert all("signature" not in link for link in data["links"])
+    assert leaks(json.dumps(data), foreign("B")) == set()
 
 
-# DEPENDS ON Role 4 (security and privacy): ALLOWED is pending their review.
-def test_disallowed_fields_never_reach_report(store):
-    # A case carrying private fields, as if a future store change leaked them.
-    leaky = store.get(case_id(store)) | PRIVATE
-    recorder = Recorder()
-    draft_report(store, leaky, recorder)
-    assert keys(recorder.seen) <= ALLOWED
-    template = TemplateClient().draft(report_input(leaky))
-    for text in (str(recorder.seen), template):
-        for value in [*PRIVATE.values(), *(c.signature for c in leaky["claims"])]:
-            assert str(value) not in text
+def test_summary_service_drafts_over_http(case, summary_url):
+    draft = summarizer(summary_url, "B")(case)
+    assert draft.startswith(f"Case {o1().chain_digest[:16]} at bank B")
+    assert "- p10: SGD 7,000.00 received into B-o1 from bank A." in draft
+    assert "Bank B received a transfer from bank A, and its rule linked it" in draft
 
 
-def test_template_report_is_a_labelled_draft(store):
-    report_id = draft_report(store, store.get(case_id(store)), TemplateClient())
-    [report] = store.reports(case_id(store))
-    assert report["report_id"] == report_id
-    assert (report["source"], report["status"]) == ("template", "draft")
-    body = report["body"]
-    assert body.startswith("DRAFT: template report, not AI-generated.")
-    assert "4 signed link claim(s) across banks A, B, C, from A, B, C." in body
-    assert "1. start -> A -> B, confirmed by A" in body
-    assert "2. A -> B -> C, confirmed by B" in body
-    assert "3. B -> C -> A, confirmed by C" in body
-    assert "4. C -> A -> end, confirmed by A" in body
-    assert f"confirmed from B (digest {o1().chain_digest[:16]})" in body
-    assert "not proven laundering" in body
-    assert "links may be missing" not in body
+@pytest.mark.parametrize("summary", [DOWN, ""])
+def test_summary_failure_means_no_draft(case, summary, capsys):
+    assert summarizer(summary, "B", timeout=0.5)(case) is None
+    if summary:
+        assert json.loads(capsys.readouterr().out)["event"] == "no_draft"
 
 
-def test_partial_case_report_states_uncertainty(store):
-    partial = store.record(v1()[0])
-    draft_report(store, store.get(partial), TemplateClient())
-    body = store.reports(partial)[0]["body"]
-    assert "Alert raised: not raised" in body
-    assert "This case is partial: links may be missing or unconfirmed." in body
-
-
-def test_template_needs_no_network(store, monkeypatch):
-    def refuse(*args, **kwargs):
-        raise AssertionError("network used")
-
-    monkeypatch.setattr(socket, "socket", refuse)
-    draft_report(store, store.get(case_id(store)), TemplateClient())
-
-
-def test_review_happens_once(store):
-    cid = case_id(store)
-    report_id = draft_report(store, store.get(cid), TemplateClient())
-    with pytest.raises(ValueError):
-        store.review_report(cid, report_id, "draft")
-    assert not store.review_report("other-case", report_id, "approved")
-    assert store.review_report(cid, report_id, "approved")
-    assert not store.review_report(cid, report_id, "rejected")
-    assert store.reports(case_id(store))[0]["status"] == "approved"
-
-
-def test_ui_generates_and_reviews_drafts(store, tmp_path):
-    client = TestClient(
-        create_app(tmp_path / "cases.db", "B", "http://x", lambda: public_keys(), None)
-    )
-    cid = case_id(store)
-    assert client.post(f"/cases/{cid}/report").status_code == 200  # after redirect
-    page = client.get(f"/cases/{cid}").text
-    assert "template · draft" in page and "Approve" in page
-    review = f"/cases/{cid}/reports/1/review"
-    assert client.post(review, data={"status": "nope"}).status_code == 422
-    assert client.post(review, data={"status": "approved"}).status_code == 200
-    page = client.get(f"/cases/{cid}").text
-    assert "template · approved" in page and "Approve" not in page
-    assert client.post(review, data={"status": "rejected"}).status_code == 409
-    assert client.post("/cases/nope/report").status_code == 404
+def test_case_page_shows_the_draft_and_survives_an_outage(tmp_path, summary_url):
+    url = str(tmp_path / "cases.db")
+    up = TestClient(create_app(url, "B", public_keys, summarizer(summary_url, "B")))
+    up.post("/results", json=chain(m1(), "B"))
+    m1_id = m1().chain_digest
+    assert "Low priority: only bank B" in up.get(f"/cases/{m1_id}").text
+    down = TestClient(create_app(url, "B", public_keys, summarizer(DOWN, "B", 0.5)))
+    page = down.get(f"/cases/{m1_id}")
+    assert page.status_code == 200 and "No draft" in page.text
+    # Detection doesn't wait on summaries: results are still stored.
+    assert down.post("/results", json=chain(o1(), "B")).status_code == 200
