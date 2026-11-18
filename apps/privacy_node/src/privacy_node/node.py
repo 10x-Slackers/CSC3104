@@ -436,7 +436,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
             )
             if leg_state in (pb.PENDING, pb.TIMED_OUT)
         }
-        if self.case_url and waiting:  # not for the ingestion grace's NO_MATCH
+        # not for the ingestion grace's NO_MATCH, nor a failed search with a stuck leg
+        if self.case_url and waiting and state in (pb.PENDING, pb.TIMED_OUT):
             legs = [self.local.leg(incoming, "in"), self.local.leg(outgoing, "out")]
             self.store.put_case(
                 {
@@ -630,7 +631,7 @@ def main():
     parser.add_argument("--bank", required=True, choices="ABC")
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument(
-        "--health-port", type=int, default=50052, help="plaintext gRPC health only"
+        "--health-port", type=int, help="plaintext gRPC health; the chart uses 50052"
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--workload", help="standalone CSV initialization")
@@ -731,9 +732,11 @@ def main():
     # Up once Valkey and the store are reachable (it reports SERVING from the start);
     # plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
     health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    health_pb2_grpc.add_HealthServicer_to_server(health.HealthServicer(), health_server)
-    health_server.add_insecure_port(f"[::]:{args.health_port}")
-    health_server.start()
+    if args.health_port:
+        servicer = health.HealthServicer()
+        health_pb2_grpc.add_HealthServicer_to_server(servicer, health_server)
+        health_server.add_insecure_port(f"[::]:{args.health_port}")
+        health_server.start()
     if args.search and args.workload:
         for result in node.search_detections():
             print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)

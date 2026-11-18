@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS case_outbox (
   key TEXT, kind TEXT, message TEXT, acked INTEGER DEFAULT 0, dead INTEGER DEFAULT 0,
   PRIMARY KEY (key, kind));
 """
-HOUSEKEEPING_LOCK = 3104  # pg_try_advisory_lock key
+HOUSEKEEPING_LOCK, SCHEMA_LOCK = 3104, 3105  # advisory lock keys
 UPSERT_CASE = "INSERT INTO case_outbox (key, kind, message) VALUES (?,?,?) ON CONFLICT (key, kind)"
 
 
@@ -50,7 +50,8 @@ class Store:
     def _connect(self):
         if self.pg:
             db = psycopg.connect(self.url, autocommit=True, connect_timeout=5)
-            db.execute(SCHEMA)
+            # one transaction, under a lock: replicas starting together can't race
+            db.execute(f"SELECT pg_advisory_xact_lock({SCHEMA_LOCK});{SCHEMA}")
         else:
             db = sqlite3.connect(
                 self.url, check_same_thread=False, isolation_level=None

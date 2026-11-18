@@ -271,3 +271,15 @@ def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():
     store.save_chain(confirmed, case={"key": "d", "kind": "chain", "legs": [1]})
     store.ack_case("d", "chain", sent)  # the reply to the partial's POST
     assert [m for _, _, m in store.pending_cases()] != []
+
+
+def test_a_failed_search_with_a_stuck_leg_queues_no_pending_case(run, monkeypatch):
+    nodes, _ = run(tiny())
+    b = nodes["B"]
+
+    def leg(direction, *args):
+        return (pb.FAILED if direction == pb.DOWNSTREAM else pb.PENDING), []
+
+    monkeypatch.setattr(b, "leg", leg)
+    assert b.search("p06", "p07").state == pb.FAILED  # never retried
+    assert [k for _, k, _ in b.store.pending_cases()] == []
