@@ -140,6 +140,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
         self._ingestion_deadlines = {}
+        self._unresolved = {}  # chain hits not yet reaching cross-bank payments
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -486,12 +487,19 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self.store.put_case(
                 {"key": hit["hit_id"], "kind": "hit", "rule": hit["rule"], "legs": legs}
             )
-        if search and hit["rule"] == "chain":
-            incoming, outgoing = hit["payments"]
-            starts = self.local.ends(incoming, "in")
-            ends = self.local.ends(outgoing, "out")
-            if starts and ends:  # else the money starts or stays inside this bank
-                self.search(starts[0], ends[0])  # BRANCH_CAP: linear chains only
+        if search and hit["rule"] == "chain" and not self.resolve(*hit["payments"]):
+            # The money starts or stays inside this bank, or an intra-bank link on
+            # another account isn't written yet: housekeeping looks again.
+            grace = timedelta(seconds=self.ingestion_grace_seconds)
+            self._unresolved[tuple(hit["payments"])] = now() + grace
+
+    def resolve(self, incoming: str, outgoing: str) -> bool:
+        """Search from a chain link, through intra-bank hops, if both ends cross banks."""
+        starts = self.local.ends(incoming, "in")
+        ends = self.local.ends(outgoing, "out")
+        if starts and ends:
+            self.search(starts[0], ends[0])  # BRANCH_CAP: linear chains only
+        return bool(starts and ends)
 
     def consume_hits(self, search: bool = True, block_ms: int = 1000) -> int:
         """Handle the scorer's new hits (ValkeyBank only); each is acknowledged after
@@ -582,6 +590,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
 
             self._key_reload = threading.Thread(target=reload, daemon=True)
             self._key_reload.start()
+        for link, until in list(self._unresolved.items()):
+            if self.resolve(*link) or now() > until:
+                del self._unresolved[link]
         for incoming, outgoing in self.store.unfinished_searches():
             if stop is not None and stop.is_set():
                 break

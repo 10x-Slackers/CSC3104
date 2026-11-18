@@ -120,20 +120,21 @@ def test_fixture_reaches_the_case_store_as_the_offline_evaluator_expects(run, tm
     assert all(n.store.pending_cases() == [] for n in nodes.values())
 
 
-def test_intra_bank_hop_is_followed(run):
-    def event(bank, pid, direction, account, other, minute, amount):
-        return {
-            "payment_id": pid,
-            "event_time": f"2022-09-05T09:{minute:02}:00Z",
-            "bank": bank,
-            "direction": direction,
-            "account": account,
-            "counterparty_account": other,
-            "counterparty_bank": other[0],
-            "amount": amount,
-            "payment_format": "GIRO",
-        }
+def event(bank, pid, direction, account, other, minute, amount):
+    return {
+        "payment_id": pid,
+        "event_time": f"2022-09-05T09:{minute:02}:00Z",
+        "bank": bank,
+        "direction": direction,
+        "account": account,
+        "counterparty_account": other,
+        "counterparty_bank": other[0],
+        "amount": amount,
+        "payment_format": "GIRO",
+    }
 
+
+def test_intra_bank_hop_is_followed(run):
     events = {
         "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
         "B": [
@@ -155,6 +156,37 @@ def test_intra_bank_hop_is_followed(run):
         assert [c.signer for c in chain.claims] == ["A", "B", "C"]
     [message] = [m for m in posted["B"] if m["kind"] == "chain"]
     assert [leg["payment_id"] for leg in message["legs"]] == ["q1", "q3"]
+
+
+def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
+    # q1 -> B-x -q2-> B-y -q3-> B-z -> q4: the q2 -> q3 link is on account B-y, which
+    # another scorer replica may write after both outer hits, and it raises no hit
+    late = [
+        event("B", "q2", "in", "B-y", "B-x", 10, "9800"),
+        event("B", "q3", "out", "B-y", "B-z", 20, "9600"),
+    ]
+    events = {
+        "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
+        "B": [
+            event("B", "q1", "in", "B-x", "A-a", 0, "10000"),
+            event("B", "q2", "out", "B-x", "B-y", 10, "9800"),
+            event("B", "q3", "in", "B-z", "B-y", 20, "9600"),
+            event("B", "q4", "out", "B-z", "C-w", 30, "9500"),
+        ],
+        "C": [event("C", "q4", "in", "C-w", "B-z", 30, "9500")],
+    }
+    nodes, _ = run(events)
+    b = nodes["B"]
+    b.ingestion_grace_seconds = 60
+    b.consume_hits(block_ms=None)
+    assert b.store.chains() == []  # neither hit reaches a cross-bank payment yet
+    index = TokenIndex("B", "k1", pair_paths(tmp_path, "B"))
+    scorer = Scorer("B", state=ValkeyState(b.local.db), token_index=index)
+    for e in late:
+        scorer.process(e)
+    assert b.consume_hits(block_ms=None) == 0  # no hit for the middle link
+    b.housekeeping()
+    assert [c.state for c in b.store.chains()] == [pb.CONFIRMED]
 
 
 def test_hits_survive_errors_lost_pods_and_a_lost_group(run, monkeypatch, tmp_path):
