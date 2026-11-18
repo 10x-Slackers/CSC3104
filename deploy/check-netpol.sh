@@ -48,6 +48,12 @@ probe replay ingestor.bank-c:8080 open
 probe bank-b ingestor.bank-b:8080 open
 probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
 probe default ingestor.bank-b:8080 blocked
+# Case service: this bank's privacy node posts to it; nothing outside the bank reaches it.
+peer a case.bank-a:8000 open
+peer a case.bank-b:8000 blocked
+probe replay case.bank-a:8000 blocked
+probe bank-c summary.bank-c:8080 open
+probe bank-a summary.bank-c:8080 blocked
 # EKS: pods could take LabRole from the node's metadata service; bank pods must not.
 if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
   probe default 169.254.169.254:80 open

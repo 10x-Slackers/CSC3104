@@ -1,0 +1,57 @@
+# This bank's cases and read-only analyst UI, fed by the privacy node (docs/contracts/deployment.md, Case service row).
+# One replica: the store's transfer join takes a table lock, so more would only queue.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: case
+spec:
+  selector:
+    matchLabels: {app: case-service}
+  template:
+    metadata:
+      labels: {app: case-service}
+    spec:
+      {{- include "bank.pod" . | nindent 6 }}
+      containers:
+        - name: case
+          image: {{ .Values.image.repository }}/case:{{ .Values.image.tag }}
+          args: [python, -m, case.app]
+          env:
+            - {name: CASE_BANK, value: {{ .Values.bank }}}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef: {name: postgres-app, key: username}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: postgres-app, key: password}
+            - {name: CASE_DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-rw:5432/cases"}
+            - {name: CASE_KEY_DIRECTORY, value: /keys}
+            - {name: CASE_SUMMARY_URL, value: "http://summary:8080/"}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+          volumeMounts:
+            - {name: keys, mountPath: /keys}
+          {{- include "bank.container" . | nindent 10 }}
+      volumes:
+        - {{- include "bank.keyVolume" (list . "{public,trusted}/signing/**") | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: case
+spec:
+  selector: {app: case-service}
+  ports:
+    - port: 8000
+---
+# The case service's own database in the bank's PostgreSQL, apart from the privacy node's.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: cases
+spec:
+  name: cases
+  owner: app
+  cluster: {name: postgres}

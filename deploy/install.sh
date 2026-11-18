@@ -27,4 +27,4 @@ for b in a b c; do
     --set bank=${b^^} --set image.repository="$repo" --set image.tag="$tag" "$@"
 done
 kubectl wait -A --all --for=condition=Ready --timeout=15m kafka,clusters.postgresql.cnpg.io,certificates.cert-manager.io
-kubectl wait -A -l 'app in (ingestor,scorer,privacy-node)' --for=condition=Ready --timeout=5m pod
+kubectl wait -A -l 'app in (ingestor,scorer,privacy-node,case-service,summary)' --for=condition=Ready --timeout=5m pod

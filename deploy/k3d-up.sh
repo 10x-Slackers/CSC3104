@@ -12,7 +12,7 @@ kubectl config use-context k3d-csc3104
 
 # Service images from the root Dockerfile, imported into the cluster (no registry on k3d).
 tag=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
-for app in ingestor scorer privacy-node dataset; do docker build -q --build-arg APP=$app -t csc3104/$app:$tag .. >/dev/null; done
-k3d image import -c csc3104 csc3104/{ingestor,scorer,privacy-node,dataset}:$tag
+for app in ingestor scorer privacy-node case summary dataset; do docker build -q --build-arg APP=$app -t csc3104/$app:$tag .. >/dev/null; done
+k3d image import -c csc3104 csc3104/{ingestor,scorer,privacy-node,case,summary,dataset}:$tag
 
 ./install.sh csc3104 "$tag"

@@ -1,5 +1,5 @@
 resource "aws_ecr_repository" "image" {
-  for_each     = toset(["ingestor", "scorer", "privacy-node", "dataset"])
+  for_each     = toset(["ingestor", "scorer", "privacy-node", "case", "summary", "dataset"])
   name         = "csc3104/${each.key}"
   force_delete = true
 }
