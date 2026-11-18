@@ -221,11 +221,7 @@ def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path):
         ("q2", "in", "B-y"),
         ("q2", "out", "B-x"),
     ]
-    store = CaseStore(str(tmp_path / "cases-B.db"))
-    for m in posted["B"]:
-        store.record(parse(m, b.public_keys, "B"))
-    [case] = store.cases()  # joined with the hit on q1
-    assert (case["tier"], case["state"]) == (1, "local")
+    assert cases_at(b, posted["B"], tmp_path) == {("B", 1, "q1 q2")}  # joins the hit
     assert b.store.chains() == []
 
 

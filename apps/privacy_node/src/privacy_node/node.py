@@ -146,7 +146,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if ingestion_grace_seconds < 0:
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
-        self._unresolved = {}  # chain hits not reaching cross-bank payments yet
+        self._unresolved = {}  # chain hits not yet reaching cross-bank payments
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -606,9 +606,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         for link, (until, hit_id) in list(self._unresolved.items()):  # own hits
             try:
                 expired = time.monotonic() > until
-                if not expired and not self.resolve(*link):
-                    continue
-                del self._unresolved[link]
+                if expired or self.resolve(*link):
+                    del self._unresolved[link]
                 if expired and self.case_url:  # the money starts or stays here
                     legs = self.local.internal_legs(*link)
                     self.store.put_case({"key": hit_id, "kind": "local", "legs": legs})
