@@ -210,6 +210,29 @@ issued bank URI/DNS SANs, usages and mounts; demonstrate valid peer handshakes,
 wrong-bank/sender rejection and certificate renewal without restart. Local TLS tests
 are application evidence; they do not establish chart correctness or CNI enforcement.
 
+Live evidence (Isaac, k3d with bank A in HA, 20 Nov 2026; EKS not yet run):
+`deploy/check-netpol.sh` passed 47/47 and `deploy/check-mtls.sh` 35/35:
+
+- Each bank's `privacy-node` Certificate is Ready from `ClusterIssuer/bank-ca`, carries
+  exactly its DNS and URI SAN with server and client auth, verifies against the lab CA,
+  and each node pod mounts that Secret (read-only, as all Secret volumes are) at `/tls`
+  with no `subPath`.
+- Each node (A→B, B→C, C→A) calling the next bank's node with its own certificate gets a
+  Trace answer (NO_MATCH). The same call is rejected with PERMISSION_DENIED ("sender
+  differs from bank URI SAN") when `sender` names another bank. Right after another
+  accepted A→B call each time, it is rejected with UNAUTHENTICATED ("trusted bank URI
+  SAN required") for a lab-CA certificate with no bank URI SAN, and the server closes the
+  handshake (UNAVAILABLE, "Socket closed") with no client certificate or a self-signed
+  certificate carrying bank A's URI SAN.
+- Renewing bank A's certificate (cert-manager's `Issuing` condition, as `cmctl renew`
+  sets it) issues a new certificate into the same Secret; within about a minute
+  both of bank A's pods serve the new serial in a real handshake, all three calls keep
+  succeeding, and pod UIDs and restart counts are unchanged.
+
+Not shown live: the node's own outgoing calls using a renewed client certificate (the
+post-renewal calls come from a probe that reads `/tls` itself; the node's per-channel
+reread is covered by the local TLS tests), and in-flight calls finishing on the old session.
+
 For any future summary Function URL, Isaac/Jia Rui must use AWS_IAM and SigV4 requests,
 without public grants or static AWS credentials. The Learner Lab account can't create IAM
 roles, so the permissions are the shared `LabRole` taken from the node's metadata service,
