@@ -184,6 +184,7 @@ class Db:
         self.url, self.pg = url, url.startswith("postgres")
         if self.pg:
             self._connect()
+            self.conn.execute(SCHEMA)
         else:
             self.conn = sqlite3.connect(url, isolation_level=None, timeout=30)
             self.conn.row_factory = lambda cur, row: {
@@ -196,8 +197,9 @@ class Db:
         import psycopg
         from psycopg.rows import dict_row
 
-        self.conn = psycopg.connect(self.url, autocommit=True, row_factory=dict_row)
-        self.conn.execute(SCHEMA)
+        self.conn = psycopg.connect(
+            self.url, autocommit=True, row_factory=dict_row, connect_timeout=5
+        )
 
     def _reconnect_if_broken(self) -> None:
         if self.pg and self.conn.broken:  # PostgreSQL restarted or failed over
@@ -208,6 +210,7 @@ class Db:
         return self.conn.execute(sql.replace("?", "%s") if self.pg else sql, args)
 
     def executemany(self, sql: str, rows) -> None:
+        """Only inside write(), which reconnects first."""
         if self.pg:
             self.conn.cursor().executemany(sql.replace("?", "%s"), rows)
         else:

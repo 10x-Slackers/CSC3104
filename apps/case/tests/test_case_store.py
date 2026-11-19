@@ -235,7 +235,7 @@ def test_reconnects_after_postgresql_restarts(url):
     store = CaseStore(url)
     pid = store.db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
     with psycopg.connect(url, autocommit=True) as admin:  # what a failover does to it
-        admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        admin.execute("SELECT pg_terminate_backend(%s, 5000)", (pid,))  # waits
     with pytest.raises(psycopg.OperationalError):
         store.cases()  # the request in flight fails, and the node resends it
     assert store.cases() == []  # the next one reconnects
