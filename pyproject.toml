@@ -1,28 +1,44 @@
 [project]
-name = "csc3104"
-version = "0.1.0"
-description = "CSC3104 Cloud and Distributed Computing workspace"
+name = "mulechain"
+version = "1.0.0"
+description = "Privacy-preserving detection of cross-bank money-mule chains (CSC3104)"
 requires-python = ">=3.12"
-dependencies = []
-
-[tool.uv.workspace]
-members = ["apps/*"]
+dependencies = [
+    "botocore>=1.44.0",
+    "confluent-kafka>=2.6",
+    "cryptography>=50.0.2",
+    "fastapi>=0.162.0",
+    "grpcio>=1.84.1",
+    "protobuf>=7.35.1",
+    "psycopg[binary]>=3.3.8",
+    "uvicorn>=0.54.0",
+    "valkey>=6.2",
+]
 
 [dependency-groups]
 dev = [
-    "fakeredis>=2.40",
+    "fakeredis>=2.40",  # also the offline evaluator's in-process Valkey
     "grpcio-tools>=1.84.1",
     "httpx2>=2.13.1,<2.14",
     "pre-commit>=4",
     "pytest>=8.4",
     "ruff>=0.14",
 ]
+data = ["kagglehub>=1.0.2", "pandas>=3.0.6"]  # mulechain.prepare only
+
+[tool.uv]
+default-groups = ["dev", "data"]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
 
 [tool.pytest]
-testpaths = ["apps"]
+testpaths = ["tests"]
 
 [tool.ruff]
-src = ["apps/*/src", "apps/*/tests"]
+line-length = 100
+force-exclude = true  # so pre-commit, which names files, also skips the generated ones
 extend-exclude = ["*_pb2.py", "*_pb2.pyi", "*_pb2_grpc.py"]
 
 [tool.ruff.lint]
