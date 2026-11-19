@@ -101,8 +101,8 @@ def test_fixture_reaches_the_case_store_as_the_offline_evaluator_expects(run, tm
         node.housekeeping()
     for bank, node in nodes.items():
         got |= cases_at(node, posted[bank], tmp_path)
-    # apps/evaluation's test_fixture_cases, keeping each bank's own payments: the
-    # case service sees only its own legs
+    # the cross-bank cases, keeping each bank's own payments (the case service sees
+    # only its own legs): apps/evaluation's test_fixture_cases, which runs this offline
     o1, v1 = "p10 p11 p12", "p15 p16 p17 p18 p19 p20"
     expected = {(b, 2, ids) for b in "ABC" for ids in (o1, v1)} | {
         ("A", 1, "p06"),
