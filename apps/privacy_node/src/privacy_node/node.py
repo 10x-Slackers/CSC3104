@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -147,6 +148,14 @@ class Node(pb_grpc.PrivacyNodeServicer):
             raise ValueError("Ingestion grace must be nonnegative")
         self.ingestion_grace_seconds = ingestion_grace_seconds
         self._unresolved = {}  # chain hits not yet reaching cross-bank payments
+
+    def log_line(self, start: float, **fields) -> None:
+        """One timestamped JSON line to stdout with the ms since start (evaluation.md)."""
+        ms = round((time.monotonic() - start) * 1000, 1)
+        line = {"ts": time.time(), "service": "privacy_node", "bank": self.bank}
+        # one write per line, so lines from concurrent threads can't interleave
+        sys.stdout.write(json.dumps(line | fields | {"ms": ms}) + "\n")
+        sys.stdout.flush()
 
     # ---- outgoing calls -------------------------------------------------
 
@@ -388,7 +397,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         search_id = self.search_id(incoming, outgoing)
         # the grace runs from the stored first attempt: replicas and restarts share it
         first = self.store.search_started(search_id) or protocol_store.now()
-        deadline = time.monotonic() + SEARCH_SECONDS
+        start = time.monotonic()
+        deadline = start + SEARCH_SECONDS
         with self.local.lock:
             key_version = self.key_version
             in_ref = self.local.ref(incoming, "in", key_version)
@@ -453,8 +463,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     "legs": legs,
                 }
             )
-        self.store.put_search(
+        attempt = self.store.put_search(
             search_id, incoming, outgoing, state, result.chain_digest, first
+        )
+        self.log_line(
+            start,
+            event="search",
+            search_id=search_id,
+            state=pb.State.Name(state),
+            attempt=attempt,
         )
         return result
 
@@ -574,20 +591,30 @@ class Node(pb_grpc.PrivacyNodeServicer):
         for bank, result in self.store.pending_deliveries():
             if stop is not None and stop.is_set():
                 break
+            start, outcome = time.monotonic(), "OK"
             try:
                 self.call(bank, "Deliver", result, 5, pb.Ack())
-                self.store.ack(result, bank)
             except grpc.RpcError as error:
-                if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
-                    continue  # stays in the outbox until the bank is back
+                outcome, reason = error.code().name, error.details()
+            self.log_line(
+                start,
+                event="deliver",
+                chain_digest=result.chain_digest,
+                peer=bank,
+                outcome=outcome,
+            )
+            if outcome == "OK":
+                self.store.ack(result, bank)
+            elif outcome == "INVALID_ARGUMENT":
                 # The receiver read it and said no, so resending can't help.
                 self.store.dead_letter(result, bank)
                 log.warning(
                     "dead-lettered chain_digest=%s bank=%s reason=%s",
                     result.chain_digest,
                     bank,
-                    error.details(),
+                    reason,
                 )
+            # any other error: it stays in the outbox until the bank is back
 
     def housekeeping(self, stop: threading.Event | None = None) -> None:
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
@@ -752,7 +779,7 @@ def main():
         args.key_directory, read_config()
     )
     server, port = serve(node, args.port)
-    print(f"bank {args.bank} privacy node on port {port}", flush=True)
+    print(f"bank {args.bank} privacy node on port {port}", file=sys.stderr)
     # Up once Valkey and the store are reachable (it reports SERVING from the start);
     # plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
     health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
@@ -763,7 +790,9 @@ def main():
         health_server.start()
     if args.search and args.workload:
         for result in node.search_detections():
-            print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
+            print(
+                pb.State.Name(result.state), result.chain_digest[:12], file=sys.stderr
+            )
 
     stop = threading.Event()
     handlers = {

@@ -17,7 +17,7 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 
 ## Offline detection evaluation
 
-`apps/evaluation/` (Isaac): `uv run python -m evaluation.offline apps/dataset/out/altman-small --split dev` prints the report below as JSON. A run over `altman-small` takes about 8 minutes (estimated: 9 measured before the scorer's TTLs were skipped, which saves about a sixth) and 5.6 GB, mostly the scorer writing every bank transfer through fakeredis.
+`apps/evaluation/` (Isaac): `uv run python -m evaluation.offline apps/dataset/out/altman-small --split dev` prints the report below as JSON; the privacy nodes' JSON log lines go to stderr. A run over `altman-small` takes about 8 minutes (estimated: 9 measured before the scorer's TTLs were skipped, which saves about a sixth) and 5.6 GB, mostly the scorer writing every bank transfer through fakeredis.
 
 - **Input:** `prepare.py`'s bank files and labels file (`altman-small`, and `altman-medium` for experiment 14), with the attempt ID and `altman_pattern` per laundering transfer.
 - **Same code as the live path:** each bank's scorer writes its bank transfers into its own Valkey state (fakeredis, in process, without the 7-day TTLs, which a run ends long before); its privacy node reads it through `ValkeyBank`, consumes the scorer's hits, searches from chain hits through intra-bank hops, and runs housekeeping with the ingestion grace over; its case messages go into a real `CaseStore` for that bank instead of over HTTP. That is the cluster's path after a replay settles. Peer `Trace` and `Deliver` calls are direct method calls between the three nodes. No Kafka, Valkey or gRPC servers.
@@ -54,10 +54,10 @@ Security evidence (sentinel values never leave a bank; bad certificates and clai
 | Metric | From → to | Notes |
 | --- | --- | --- |
 | End-to-end detection latency | Kafka record timestamp at ingestion → durable case or alert at the same bank | Headline latency |
-| Peer-trace latency | Search start → search result | Report separately |
+| Peer-trace latency | Search start → search result | Report separately; from the node's `search` lines (`ms`) |
 | Analyst load | Cases per bank per day, by tier | From the offline evaluator |
 
-**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. The scorer (each `payment_id` that writes a link or hit, with its Kafka timestamp) and the case service (each stored message's key, `chain_digest` for a chain) log JSON lines to stdout with their own timestamp (`ts`), and pandas joins them. The privacy node logs none yet, so peer-trace latency has no source until it does.
+**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. The scorer (each `payment_id` that writes a link or hit, with its Kafka timestamp) and the case service (each stored message's key, `chain_digest` for a chain) log JSON lines to stdout with their own timestamp (`ts`), and pandas joins them. The privacy node logs one JSON line per finished search attempt and per `Deliver` call ([protocol.md](contracts/protocol.md#failure-contract)), the source of peer-trace latency and experiment 4's search latency.
 
 **Metric sources** (no monitoring stack): `kubectl top`, `kubectl get hpa`, `kafka-consumer-groups.sh`, CloudWatch for Lambda, and JSON logs. Results are presented as RED (rate, errors, duration) and USE (utilisation, saturation, errors).
 

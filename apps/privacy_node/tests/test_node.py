@@ -227,7 +227,7 @@ def test_intra_bank_detection_is_not_searched(tmp_path):
     assert local.onward == {} and local.detections == []
 
 
-def test_offline_bank_leaves_search_pending_then_recovers(banks):
+def test_offline_bank_leaves_search_pending_then_recovers(banks, capsys):
     nodes, servers = banks
     port = int(nodes["B"].peers["C"].split(":")[1])
     servers["C"].stop(0)
@@ -242,6 +242,9 @@ def test_offline_bank_leaves_search_pending_then_recovers(banks):
     for node in nodes.values():
         [chain] = node.store.chains()
         assert chain.state == pb.CONFIRMED
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    searches = [(x["state"], x["attempt"]) for x in lines if x["event"] == "search"]
+    assert searches == [("PENDING", 1), ("CONFIRMED", 2)]  # one line per attempt
 
 
 def test_undelivered_result_is_redelivered_after_restart(banks):
