@@ -10,7 +10,7 @@ resource "aws_elasticache_replication_group" "valkey" {
   replication_group_id       = "csc3104-valkey-${lower(each.key)}"
   description                = "Bank ${each.key} scorer state"
   engine                     = "valkey"
-  node_type                  = "cache.t3.micro"
+  node_type                  = "cache.t3.medium"
   num_cache_clusters         = 2
   automatic_failover_enabled = true
   multi_az_enabled           = true
