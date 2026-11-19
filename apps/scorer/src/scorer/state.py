@@ -1,7 +1,7 @@
 """A bank's scorer state, with the entries of streaming.md's Valkey layout.
 
-MemoryState keeps them in dicts (tests and the offline evaluator); ValkeyState keeps
-them in the bank's Valkey (live). Both have the same methods.
+MemoryState keeps them in dicts (tests); ValkeyState keeps them in the bank's Valkey
+(live, and the offline evaluator's fakeredis). Both have the same methods.
 """
 
 import json

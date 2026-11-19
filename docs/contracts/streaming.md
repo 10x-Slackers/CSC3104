@@ -35,7 +35,7 @@ the topic exists: non-fatal Kafka errors are logged and retried. A scorer test l
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
 The live scorer keeps its state in the bank's Valkey (`ValkeyState`, [Valkey layout](#valkey-layout-draft-cindy--zane));
-tests and the offline evaluator use a `MemoryState` with the same methods
+tests use a `MemoryState` with the same methods, and the offline evaluator a `ValkeyState` on fakeredis
 ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)). The window is trimmed by
 event time per account, with no count cap; an account's watermark is its latest kept
 event. In a `MemoryState` the other entries (`pay`, links, hits, `last`) last for the
