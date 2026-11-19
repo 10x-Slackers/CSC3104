@@ -50,9 +50,9 @@ spec:
     config:
       offsets.topic.replication.factor: {{ $n }}
       transaction.state.log.replication.factor: {{ $n }}
-      transaction.state.log.min.isr: {{ ternary 2 1 .Values.ha }}
+      transaction.state.log.min.isr: {{ min $n 2 }}
       default.replication.factor: {{ $n }}
-      min.insync.replicas: {{ ternary 2 1 .Values.ha }}
+      min.insync.replicas: {{ min $n 2 }}
       auto.create.topics.enable: false
   entityOperator:
     topicOperator: {jvmOptions: {"-Xmx": 128m}}

@@ -9,5 +9,6 @@ for app in ingestor summary; do
   uv pip install -q --target "build/$app" --python-platform x86_64-manylinux_2_28 --python-version 3.12 \
     --only-binary :all: -r "build/$app.txt"
   cp -r "../../apps/$app/src/$app" "build/$app/"
-  (cd "build/$app" && zip -qr -X "../$app.zip" . -x '*__pycache__*')
+  # Fixed timestamps and file order, so an unchanged zip keeps its hash and terraform apply leaves the function alone.
+  (cd "build/$app" && find . -exec touch -d 1980-01-02 {} + && find . -type f ! -path '*__pycache__*' | LC_ALL=C sort | zip -q -X "../$app.zip" -@)
 done

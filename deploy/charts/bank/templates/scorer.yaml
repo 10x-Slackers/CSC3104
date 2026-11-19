@@ -19,7 +19,7 @@ spec:
           env:  # docs/contracts/deployment.md, Scorer row
             - {name: SCORER_BANK, value: {{ $bank }}}
             - {name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka-kafka-bootstrap:9092"}
-            - {name: VALKEY_URL, value: {{ (get .Values.aws .Values.bank | default (dict)).valkeyUrl | default "valkey://valkey:6379" | quote }}}
+            - {name: VALKEY_URL, value: {{ dig .Values.bank "valkeyUrl" "valkey://valkey:6379" .Values.aws | quote }}}
             - {name: KEY_DIR, value: /keys}  # every version in <bank>/active.json
           volumeMounts:
             - {name: keys, mountPath: /keys}
