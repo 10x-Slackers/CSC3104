@@ -111,6 +111,21 @@ def test_a_forged_chain_is_refused_and_a_repeated_one_is_harmless(nodes):
     assert refused.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
 
+def test_a_chain_is_not_refused_just_because_a_signers_keys_cannot_be_fetched(nodes):
+    """Refusing means a dead letter at the sender, so "can't check yet" must not refuse."""
+    settle(nodes)
+    node, chain = nodes["A"], chains(nodes["A"])[0]
+
+    def unreachable(peer, method, request, timeout):
+        raise Refused(grpc.StatusCode.UNAVAILABLE, "")
+
+    node.call, node.keys = unreachable, {}  # a replica that has just started, cut off
+    node.store.db.run("DELETE FROM peer_keys")
+    with pytest.raises(Refused) as refused:
+        node.Deliver(chain, Context("B", 5))
+    assert refused.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
 def test_a_refused_delivery_becomes_a_dead_letter_and_others_are_retried(nodes):
     store = nodes["A"].store
     store.queue("B", "bad", pb.Chain().SerializeToString())

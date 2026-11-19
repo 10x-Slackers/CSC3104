@@ -104,18 +104,21 @@ class Node(pb_grpc.PrivacyNodeServicer):
             keys=[pb.PublicKey(agreement=k.agreement, signing=k.signing) for k in public]
         )
 
-    def refresh_keys(self) -> None:
+    def refresh_keys(self) -> set[str]:
         """Re-read this bank's keys and ask each peer for its public keys.
 
         They go to the store (so every replica has them after a restart) and to Valkey
-        (where this bank's scorer derives its pair keys from them).
+        (where this bank's scorer derives its pair keys from them). Returns the peers
+        that didn't answer.
         """
         self.own = crypto.load_keys(self.key_dir)
+        silent = set()
         for peer in self.peers:
             try:
                 reply = self.call(peer, "Keys", pb.Empty(), CALL_SECONDS)
             except grpc.RpcError:
-                continue  # keep the keys it published last time
+                silent.add(peer)  # keep the keys it published last time
+                continue
             if reply.keys:
                 keys = [crypto.PublicKey(k.agreement, k.signing) for k in reply.keys]
                 self.store.put_peer_keys(peer, crypto.encode(keys))
@@ -125,14 +128,22 @@ class Node(pb_grpc.PrivacyNodeServicer):
         peer_keys = {bank: crypto.decode(text) for bank, text in known.items()}
         self.keys = peer_keys | {self.name: [k.public for k in self.own]}
         self.keys_at = time.monotonic()
+        return silent
 
     def valid(self, claims: list[pb.LinkClaim]) -> bool:
         """Check a chain's signatures; if that fails, fetch the keys again and recheck,
-        because a peer may have just started or rotated its keys."""
+        because a peer may have just started or rotated its keys.
+
+        Raises Unanswered if a signer's keys couldn't be fetched: the chain may be fine.
+        """
         if valid_chain(claims, self.keys):
             return True
-        self.refresh_keys()
-        return valid_chain(claims, self.keys)
+        silent = self.refresh_keys() & {c.signer for c in claims}
+        if valid_chain(claims, self.keys):
+            return True
+        if silent:
+            raise Unanswered(min(silent))
+        return False
 
     def sign(
         self, in_from: str, in_token: bytes, out_to: str, out_token: bytes, cut: bool = False
@@ -190,7 +201,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """Store a chain another bank assembled. A repeat changes nothing (idempotent)."""
         sender, claims = caller(context), list(request.claims)
         signers = {c.signer for c in claims}
-        if not ({self.name, sender} <= signers and self.valid(claims)):
+        try:
+            valid = {self.name, sender} <= signers and self.valid(claims)
+        except Unanswered as silent:  # can't check it yet: the sender will try again
+            context.abort(grpc.StatusCode.UNAVAILABLE, f"no keys for bank {silent.peer}")
+        if not valid:
             # The sender reads this code as "never send it again" (a dead letter).
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "not a valid chain of ours")
         self.save(claims, deliver_to=[])
@@ -263,6 +278,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
             return "moved"
         try:
             claims = self.search(incoming, outgoing)
+            if claims and not self.valid(claims):
+                return "failed"
         except Unanswered as silent:
             legs = [self.bank.leg(incoming, "in"), self.bank.leg(outgoing, "out")]
             waiting = {"key": search["id"], "kind": "pending", "waiting_for": silent.peer}
@@ -270,8 +287,6 @@ class Node(pb_grpc.PrivacyNodeServicer):
             return "pending"
         if not claims:
             return "no_match" if late else "pending"
-        if not self.valid(claims):
-            return "failed"
         return self.save(claims, deliver_to=sorted({c.signer for c in claims} - {self.name}))
 
     def save(self, claims: list[pb.LinkClaim], deliver_to: list[str]) -> str:
@@ -315,8 +330,11 @@ class Node(pb_grpc.PrivacyNodeServicer):
             return 0
         with self.store.transaction():
             for _, hit in hits:
-                legs = [self.bank.leg(hit["incoming"], "in")] if hit["incoming"] else []
-                legs.append(self.bank.leg(hit["outgoing"], "out"))
+                try:
+                    legs = [self.bank.leg(hit["incoming"], "in")] if hit["incoming"] else []
+                    legs.append(self.bank.leg(hit["outgoing"], "out"))
+                except KeyError:  # its payments have expired from Valkey: nothing to show
+                    continue
                 self.store.queue_case(
                     {"key": hit["id"], "kind": "hit", "rule": hit["rule"], "legs": legs}
                 )
@@ -469,7 +487,7 @@ def main() -> None:
         os.environ["KEY_DIR"],
         tls.call,
         post_to(os.environ["CASE_URL"] + "/messages"),
-        grace=float(os.environ.get("INGESTION_GRACE_SECONDS", "0")),
+        grace=float(os.environ.get("INGESTION_GRACE_SECONDS", "60")),
     )
     server = serve(node, tls)
     stop = threading.Event()

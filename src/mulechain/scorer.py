@@ -75,9 +75,9 @@ class Scorer:
             tokens = [
                 crypto.token(k, payment).hex() for k in self.pair_keys(e["counterparty_bank"])
             ]
-            for token in tokens:  # one per active key pair, so a rotation finds it
+            for token in tokens:  # one per key pair, so the peer finds it during a rotation
                 tx.set(f"tok:{token}", f"{payment}:{direction}", ex=TTL)
-            own["token"] = tokens[0]  # the oldest keys: what this bank queries with
+            own["token"] = tokens[0]  # what this bank calls the transfer when it asks the peer
         tx.hset(f"pay:{payment}:{direction}", mapping=own)
         tx.expire(f"pay:{payment}:{direction}", TTL)
 

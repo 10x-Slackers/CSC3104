@@ -9,9 +9,11 @@ any two banks then derive the same pair key on their own:
 A transfer's token is an HMAC of its payment ID under that pair key, so the two banks
 on a transfer compute the same token and no third bank can.
 
-Rotation needs no coordination either. A bank lists its keys oldest first: it indexes
-payments under every listed key, but queries and signs with the oldest. Adding a key
-introduces it; removing the old one switches to it.
+Rotation needs no coordination either. A bank lists its keys oldest first. It indexes
+each transfer under every (own key, peer key) pair, and names it to the peer with its
+own oldest key and the peer's newest. So a bank adds a new key, waits until its peers
+have fetched it, and then removes the old one: at every step each side asks with a
+token the other side has indexed.
 """
 
 import hashlib
@@ -67,14 +69,17 @@ def decode(text: str) -> list[PublicKey]:
 
 
 def pair_keys(bank: str, peer: str, own: list[PrivateKey], theirs: list[PublicKey]) -> list[bytes]:
-    """The keys two banks share, one per (own key, peer key), oldest first."""
+    """The keys two banks share, one per (own key, peer key).
+
+    The first is the one to query with: own oldest key, peer's newest.
+    """
     info = b"mulechain pair key " + "-".join(sorted((bank, peer))).encode()
     return [
         HKDF(hashes.SHA256(), 32, salt=None, info=info).derive(
             mine.agreement.exchange(X25519PublicKey.from_public_bytes(yours.agreement))
         )
         for mine in own
-        for yours in theirs
+        for yours in reversed(theirs)
     ]
 
 

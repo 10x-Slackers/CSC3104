@@ -6,8 +6,12 @@
 This is the cluster's own code with the infrastructure swapped out: fakeredis for
 Valkey, SQLite for PostgreSQL, and a direct function call where the cluster has gRPC
 over mTLS. Each bank still has its own keys, state, privacy node and case store, and
-the nodes still only exchange protocol messages. Because detection uses event time,
-the cases are the ones a cluster replay of the same workload ends with.
+the nodes still only exchange protocol messages.
+
+One difference from a cluster: here every event is scored before any search runs, so
+each search sees the finished picture. A cluster searches as soon as a rule fires, and
+a search is not repeated when the money moves on later, so its cases can hold fewer
+transfers and fewer alerts than this report (docs/evaluation.md).
 
 The services' JSON log lines go to stderr; the report is the only thing on stdout.
 """
