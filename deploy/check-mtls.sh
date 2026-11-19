@@ -44,8 +44,9 @@ ctx.set_alpn_protocols(["h2"])
 with ctx.wrap_socket(socket.create_connection((sys.argv[1], 50051), 3), server_hostname=sys.argv[2]) as s:
     print(s.getpeercert()["serialNumber"])'
 
-secret() { kubectl get secret -n "bank-$1" "${2:-privacy-node-tls}" -o go-template="{{index .data \"${3:-tls.crt}\" | base64decode}}"; }
-serial() { secret "$1" | openssl x509 -noout -serial | cut -d= -f2; }
+secret() { # <namespace> [secret] [key]
+  kubectl get secret -n "$1" "${2:-privacy-node-tls}" -o go-template="{{index .data \"${3:-tls.crt}\" | base64decode}}"; }
+serial() { secret "bank-$1" | openssl x509 -noout -serial | cut -d= -f2; }
 pods() { kubectl get pod -n "bank-$1" -l app=privacy-node \
   -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid} {.status.containerStatuses[0].restartCount} {.status.podIP}{"\n"}{end}'; }
 
@@ -54,13 +55,13 @@ echo "== Issued certificates and mounts"
 for b in a b c; do
   got=$(kubectl get certificate -n "bank-$b" privacy-node -o jsonpath='{.spec.issuerRef.kind}/{.spec.issuerRef.name} {.status.conditions[?(@.type=="Ready")].status}')
   check "bank-$b Certificate issuer, Ready" "ClusterIssuer/bank-ca True"
-  crt=$(secret "$b")
+  crt=$(secret "bank-$b")
   got=$(openssl x509 -noout -ext subjectAltName <<<"$crt" | tail -1 | xargs)
   check "bank-$b SANs" "DNS:privacy-node.bank-$b.svc, URI:spiffe://csc3104/bank/${b^^}/privacy-node"
   got=$(openssl x509 -noout -ext extendedKeyUsage <<<"$crt" | tail -1 | xargs)
   check "bank-$b usages" "TLS Web Server Authentication, TLS Web Client Authentication"
-  got=$(openssl verify -CAfile <(secret "$b" privacy-node-tls ca.crt) <(echo "$crt") 2>&1 | sed 's/.*: //')
-  check "bank-$b certificate verifies against the lab CA" "OK"
+  got=$(openssl verify -CAfile <(secret cert-manager bank-ca) <(echo "$crt") 2>&1 | sed 's/.*: //')
+  check "bank-$b certificate verifies against the lab CA (cert-manager/bank-ca)" "OK"
   got=$(kubectl get deploy -n "bank-$b" privacy-node -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[?(@.name=="tls")]}')
   check "bank-$b /tls mount" '{"mountPath":"/tls","name":"tls"}'
   while read -r pod _; do
@@ -87,22 +88,22 @@ spec:
 EOF
 kubectl wait -n bank-a certificate/mtls-check-no-uri --for=condition=Ready --timeout=60s >/dev/null
 trace "lab-CA certificate without a bank URI SAN" a b A UNAUTHENTICATED \
-  "$(secret a mtls-check-no-uri tls.key; secret a mtls-check-no-uri)"
+  "$(secret bank-a mtls-check-no-uri tls.key; secret bank-a mtls-check-no-uri)"
 kubectl delete -n bank-a certificate/mtls-check-no-uri secret/mtls-check-no-uri >/dev/null
 
-echo "== Renewal without restart (bank A: both its pods, server and client)"
+echo "== Renewal without restart (bank A: both its pods serve it)"
 before=$(pods a) old=$(serial a)
 kubectl patch certificate privacy-node -n bank-a --subresource=status --type=json -p "[{\"op\": \"add\", \
   \"path\": \"/status/conditions/-\", \"value\": {\"type\": \"Issuing\", \"status\": \"True\", \
   \"reason\": \"ManuallyTriggered\", \"message\": \"check-mtls.sh\", \"lastTransitionTime\": \"$(date -u +%FT%TZ)\"}}]" \
   >/dev/null  # what cmctl renew does: cert-manager issues a new key and certificate into the same Secret
-for _ in $(seq 60); do new=$(serial a); [ "$new" != "$old" ] && break; sleep 2; done
-got=$([ "$new" != "$old" ] && echo renewed)
+for _ in $(seq 60); do new=$(serial a); [ -n "$new" ] && [ "$new" != "$old" ] && break; sleep 2; done
+got=$([ -n "$new" ] && [ "$new" != "$old" ] && echo renewed)
 check "bank-a certificate $old -> $new" renewed
 while read -r pod _ _ ip; do # the kubelet refreshes Secret volumes within about a minute
   for _ in $(seq 60); do got=$(kubectl exec -n bank-c deploy/privacy-node -- python -c "$SERIAL" "$ip" \
     privacy-node.bank-a.svc 2>/dev/null); [ "$got" = "$new" ] && break; sleep 3; done
-  check "bank-a $pod serves the new certificate" "$new"
+  check "bank-a $pod serves the new certificate" "${new:-a new serial}"
 done <<<"$before"
 ring " after renewal"
 got=$(pods a | xargs)
