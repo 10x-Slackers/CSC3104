@@ -53,12 +53,13 @@ if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
   # The case service reaches HTTPS outside the VPC (function URLs); other bank pods don't.
   app b case lambda.us-east-1.amazonaws.com:443 open
   app b privacy-node lambda.us-east-1.amazonaws.com:443 blocked
-  # The scorer and privacy node reach ElastiCache; the case service doesn't.
+  # The scorer and privacy node reach their own bank's ElastiCache; the case service and other banks don't.
   valkey=$(kubectl get deploy scorer -n bank-c -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="VALKEY_URL")].value}')
   valkey=${valkey#valkey://}
   app c scorer "$valkey" open
   app c privacy-node "$valkey" open
   app c case "$valkey" blocked
+  app a scorer "$valkey" blocked
 else
   # k3d. Replay: only to each bank's ingestor HTTP port (on EKS replay calls the ingestor Lambdas instead).
   probe replay ingestor.bank-a:8080 open

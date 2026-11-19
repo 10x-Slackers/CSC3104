@@ -73,7 +73,7 @@ spec:
     - from: [{ipBlock: {cidr: {{ .vpcCidr }}}}]
       ports: [{protocol: TCP, port: 9094}]
 ---
-# EKS: the scorer and privacy node -> this bank's ElastiCache, in the VPC.
+# EKS: the scorer and privacy node -> this bank's ElastiCache, in its own subnets (deploy/terraform/cache.tf).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -83,7 +83,10 @@ spec:
     matchExpressions: [{key: app, operator: In, values: [scorer, privacy-node]}]
   policyTypes: [Egress]
   egress:
-    - to: [{ipBlock: {cidr: {{ .vpcCidr }}}}]
+    - to:
+        {{- range .valkeyCidrs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
       ports: [{protocol: TCP, port: 6379}]
 ---
 # EKS: the case service -> the summary Lambda's function URL over HTTPS, signed as LabRole taken from the node's

@@ -90,6 +90,7 @@ output "bank_values" {
     summaryUrl    = aws_lambda_function_url.summary[b].function_url
     valkeyUrl     = "valkey://${aws_elasticache_replication_group.valkey[b].primary_endpoint_address}:6379"
     vpcCidr       = data.aws_vpc.default.cidr_block
+    valkeyCidrs   = [for z in [0, 1] : aws_subnet.valkey["${b}${z}"].cidr_block]
     kafkaNodePort = local.kafka_port[b]
   } })
 }
