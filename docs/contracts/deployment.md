@@ -4,7 +4,7 @@ Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPoli
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Hardening:** per-path and per-store NetworkPolicies; k3s secrets encryption.
+> - **Hardening:** per-path and per-store NetworkPolicies.
 
 **HA flag:** the chart's `ha` value runs a bank with replicas: Kafka 3 brokers (replication 3, `min.insync.replicas` 2, the offsets and transaction-state topics likewise), PostgreSQL 3 instances (a primary and two streaming replicas with automatic failover) and privacy node 2. `install.sh` sets it for the banks in `HA`: bank A on k3d (`k3d-up.sh`), which is one node, so failover there is pod-level only; every bank on EKS (`eks-up.sh`). Set it on a fresh bank: turning it on for a running one leaves the existing topics at replication 1, below `min.insync.replicas` 2, so every write fails.
 
@@ -18,7 +18,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 
 | | Local | Cloud |
 | --- | --- | --- |
-| Cluster | k3d | Amazon EKS |
+| Cluster | k3d, with Secrets encrypted at rest in the k3s datastore (`--secrets-encryption`) | Amazon EKS |
 | Setup command | `deploy/k3d-up.sh`: the cluster and images, then `deploy/install.sh` (operators, lab CA, keys, the three bank releases) | `deploy/eks-up.sh`, with the Learner Lab's credentials in `~/.aws/credentials`: the Lambda zips, Terraform (cluster, ECR, ElastiCache, Lambdas), the workloads bucket, images pushed to ECR, then `deploy/install.sh` with every bank in HA, the EKS API server addresses and the `bank_values` output |
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | The same command: an init container first copies `s3://csc3104-workloads-<account-id>/<workload>` into an `emptyDir`, as `LabRole`. Upload a workload once with `aws s3 sync apps/dataset/out/<workload> s3://csc3104-workloads-<account-id>/<workload>`. Replay sends to the ingestor Lambdas' function URLs (Terraform output `ingestor_urls`), signed as `LabRole` |
 | Teardown | `k3d cluster delete csc3104` | `deploy/eks-down.sh`: deletes the bank namespaces and waits for their EBS volumes to go, then `terraform destroy` (a plain destroy leaves the volumes behind) |
