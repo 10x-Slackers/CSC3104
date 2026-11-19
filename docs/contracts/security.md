@@ -210,6 +210,27 @@ issued bank URI/DNS SANs, usages and mounts; demonstrate valid peer handshakes,
 wrong-bank/sender rejection and certificate renewal without restart. Local TLS tests
 are application evidence; they do not establish chart correctness or CNI enforcement.
 
+Live evidence (Isaac, k3d with bank A in HA, 20 Nov 2026; EKS not yet run). Paths:
+`deploy/check-netpol.sh` passed 47/47, each blocked path paired with an open probe from
+a pod that should get through. mTLS: `deploy/check-mtls.sh` passed 41/41:
+
+- Each bank's `privacy-node` Certificate is Ready from `ClusterIssuer/bank-ca`, carries
+  exactly its DNS and URI SAN with server and client auth, verifies against the lab CA,
+  and is mounted read-only at `/tls` with no `subPath`.
+- From one node's pod to another bank's node, a Trace with the pod's own certificate
+  returns NO_MATCH (accepted). The same call is rejected with PERMISSION_DENIED when
+  `sender` names another bank; UNAUTHENTICATED for a lab-CA certificate with no bank URI
+  SAN; and fails the handshake (UNAVAILABLE) with no client certificate, a self-signed
+  certificate carrying bank A's URI SAN, or a client expecting another bank's DNS name.
+- Deleting bank B's and then bank A's `privacy-node-tls` Secret makes cert-manager issue
+  a new key and certificate; within about a minute every node pod (both of bank A's)
+  serves the new serial in a real handshake, calls in both directions keep succeeding,
+  and pod UIDs and restart counts are unchanged.
+
+Not shown live: the node's own outgoing calls using a renewed client certificate (the
+post-renewal calls come from a probe that reads `/tls` itself; the node's per-channel
+reread is covered by the local TLS tests), and in-flight calls finishing on the old session.
+
 For any future summary Function URL, Isaac/Jia Rui must use AWS_IAM and SigV4 requests,
 without public grants or static AWS credentials. The Learner Lab account can't create IAM
 roles, so the permissions are the shared `LabRole` taken from the node's metadata service,
