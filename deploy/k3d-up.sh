@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-command local setup: k3d cluster and service images, then install.sh (operators, lab CA, keys, one bank release per namespace).
+# One-command local setup: k3d cluster and service images, then install.sh (operators, lab CA, keys, one bank release per
+# namespace, bank A with replicas).
 # Needs docker, k3d, kubectl and helm. Expects no existing cluster; teardown: k3d cluster delete csc3104
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -19,4 +20,4 @@ for app in ingestor scorer privacy-node case summary dataset; do
 done
 k3d image import -c csc3104 "${images[@]}"
 
-./install.sh csc3104 "$tag"
+HA=a ./install.sh csc3104 "$tag"  # one HA bank: the VM has room for one

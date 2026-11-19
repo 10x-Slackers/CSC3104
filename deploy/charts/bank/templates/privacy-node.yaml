@@ -21,7 +21,7 @@ spec:
             - -m
             - privacy_node.node
             - --bank={{ .Values.bank }}
-            - --valkey-url=valkey://valkey:6379
+            - --valkey-url={{ dig .Values.bank "valkeyUrl" "valkey://valkey:6379" .Values.aws }}
             - --key-directory=/keys
             - --tls-cert=/tls/tls.crt
             - --tls-key=/tls/tls.key

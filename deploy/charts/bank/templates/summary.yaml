@@ -1,5 +1,5 @@
 # Draft case summaries for the case service (docs/contracts/deployment.md, Summary service row).
-# A container in the bank on both clusters until the EKS Lambda lands.
+{{- if not (get .Values.aws .Values.bank) }}  # EKS: the summary Lambda instead
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,3 +30,4 @@ spec:
   selector: {app: summary}
   ports:
     - port: 8080
+{{- end }}

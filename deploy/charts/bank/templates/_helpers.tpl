@@ -8,14 +8,15 @@ securityContext:
   seccompProfile: {type: RuntimeDefault}
 {{- end }}
 
+{{/* Container hardening and memory; pass (dict "request" .. "limit" ..) instead of . to change the memory. */}}
 {{- define "bank.container" -}}
 securityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
   capabilities: {drop: [ALL]}
 resources:
-  requests: {memory: 64Mi}
-  limits: {memory: 128Mi}
+  requests: {memory: {{ .request | default "64Mi" }}}
+  limits: {memory: {{ .limit | default "128Mi" }}}
 {{- end }}
 
 {{/* This bank's key tree from keys/<bank>/ (install.sh generates it), mounted at /keys/<bank>/ without subPath.
