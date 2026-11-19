@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command EKS setup: Terraform (cluster, ECR, ElastiCache, the ingestor and summary Lambdas), the workloads bucket,
 # service images pushed to ECR, then install.sh with every bank in HA.
-# Needs aws, terraform, docker, kubectl and helm, with the Learner Lab's credentials in ~/.aws/credentials. Teardown: eks-down.sh
+# Needs aws, terraform, docker, kubectl, helm, uv and zip, with the Learner Lab's credentials in ~/.aws/credentials. Teardown: eks-down.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -1,5 +1,6 @@
 # Each bank's serverless edge: the ingestor and the summary service as Lambda function URLs with AWS_IAM, run as
-# LabRole (docs/contracts/deployment.md). eks-up.sh builds the zips into build/ before applying.
+# LabRole (docs/contracts/deployment.md). eks-up.sh builds the zips into build/ before applying;
+# try() lets eks-down.sh destroy without them.
 locals {
   banks = { A = 0, B = 1, C = 2 }
   # Each bank's Kafka VPC listener: bootstrap on this node port, broker n on port + 1 + n (charts/bank/templates/kafka.yaml).
@@ -8,7 +9,8 @@ locals {
 
 data "aws_vpc" "default" { default = true }
 
-# Node IPs for the ingestor's Kafka bootstrap: every node forwards the bank's bootstrap node port.
+# Node IPs for the ingestor's Kafka bootstrap: every node forwards the bank's bootstrap node port. Read at apply time,
+# so rerun eks-up.sh after the node group replaces its nodes.
 data "aws_instances" "nodes" {
   instance_tags = { "eks:nodegroup-name" = aws_eks_node_group.nodes.node_group_name }
   depends_on    = [aws_eks_node_group.nodes] # read after the nodes exist, not at plan time
@@ -43,7 +45,7 @@ resource "aws_lambda_function" "ingestor" {
   runtime          = "python3.12"
   handler          = "ingestor.app.lambda_handler"
   filename         = "build/ingestor.zip"
-  source_code_hash = filebase64sha256("build/ingestor.zip")
+  source_code_hash = try(filebase64sha256("build/ingestor.zip"), null)
   timeout          = 30 # message.timeout.ms is 25 s
   memory_size      = 256
   vpc_config {
@@ -53,7 +55,7 @@ resource "aws_lambda_function" "ingestor" {
   environment {
     variables = {
       INGESTOR_BANK           = each.key
-      KAFKA_BOOTSTRAP_SERVERS = join(",", [for ip in data.aws_instances.nodes.private_ips : "${ip}:${local.kafka_port[each.key]}"])
+      KAFKA_BOOTSTRAP_SERVERS = join(",", [for ip in sort(data.aws_instances.nodes.private_ips) : "${ip}:${local.kafka_port[each.key]}"])
     }
   }
 }
@@ -66,7 +68,7 @@ resource "aws_lambda_function" "summary" {
   runtime          = "python3.12"
   handler          = "summary.app.lambda_handler"
   filename         = "build/summary.zip"
-  source_code_hash = filebase64sha256("build/summary.zip")
+  source_code_hash = try(filebase64sha256("build/summary.zip"), null)
   timeout          = 5
 }
 

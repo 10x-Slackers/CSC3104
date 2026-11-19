@@ -2,7 +2,8 @@
 # Replays a workload into all three banks' ingestors as a Job in the replay namespace. Contract: docs/contracts/data.md (Replay).
 # Usage: deploy/replay.sh <workload> [replay flags, e.g. --speed 0]. Run after k3d-up.sh or eks-up.sh.
 # k3d mounts apps/dataset/out/<workload> and sends to the ingestor Services; EKS copies s3://<workloads bucket>/<workload>
-# first, as LabRole from the node, and sends to the ingestor Lambdas' function URLs, signed as LabRole.
+# first, as LabRole from the node, and sends to the ingestor Lambdas' function URLs, signed as LabRole (needs jq and
+# the Terraform state eks-up.sh left in deploy/terraform).
 set -euo pipefail
 workload=$1; shift
 image=$(kubectl get deploy scorer -n bank-a -o jsonpath='{.spec.template.spec.containers[0].image}')  # what setup built
@@ -16,7 +17,7 @@ if [[ $image == *.dkr.ecr.* ]]; then  # EKS: <account>.dkr.ecr.us-east-1.amazona
   volume='emptyDir: {}'
   init="[{name: fetch, image: amazon/aws-cli:2.40.1, args: [s3, sync, --only-show-errors, s3://$bucket/$workload, /workloads/$workload],
          volumeMounts: [{name: workloads, mountPath: /workloads}], securityContext: $hardening}]"
-  mapfile -t urls < <(terraform -chdir="$(dirname "$0")/terraform" output -json ingestor_urls | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+  urls=($(terraform -chdir="$(dirname "$0")/terraform" output -json ingestor_urls | jq -r 'to_entries[] | "\(.key)=\(.value)"'))
 fi
 url_args=$(printf ', --url, "%s"' "${urls[@]}")
 
