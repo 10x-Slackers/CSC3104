@@ -1,0 +1,16 @@
+# The checks from AGENTS.md on every pull request and push to main. uv picks Python from .python-version.
+name: checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3  # no floating major tag
+      - run: uv sync --all-packages --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest

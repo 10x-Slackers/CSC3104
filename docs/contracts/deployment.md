@@ -40,9 +40,9 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | CNI enforcing NetworkPolicy | k3d: k3s's built-in network policy controller. EKS: the VPC CNI add-on with `enableNetworkPolicy` | k3d: enforced; `check-netpol.sh` passes. EKS: enforced; `check-netpol.sh` passes |
 | Registry | ECR | One repository per image, `<account>.dkr.ecr.us-east-1.amazonaws.com/csc3104/<package>` (Terraform output `registry`); `eks-up.sh` pushes each image tagged with the commit |
 | Images | One pattern, the root `Dockerfile`: `docker build --build-arg APP=<package> -t csc3104/<package>:$(git rev-parse --short HEAD) .`; only the architectures needed. Non-root (UID 65532), and the image holds no state: durable data goes to PostgreSQL. The entrypoint is `tini`, so SIGTERM reaches the app; the chart sets each container's `args` (`[python, -m, <package>.<module>]`), never `command`, which would replace `tini`. The ingestor Lambda ships as a zip instead | Dockerfile done; `k3d-up.sh` builds the ingestor, scorer, privacy-node, case, summary and dataset (replay) images and imports them with `k3d image import`. `eks-up.sh` builds them for `linux/amd64` and pushes them to ECR |
-| CI | GitHub Actions | TODO |
-| Monitoring | No dedicated stack: k3s metrics-server (`kubectl top`), `kubectl get hpa` for KEDA lag and replicas, `kafka-consumer-groups.sh` for lag, CloudWatch for Lambda, JSON logs to stdout | TODO |
-| Fault injection | `kubectl delete pod`, `kubectl scale --replicas=0`, a temporary deny-all NetworkPolicy | TODO |
+| CI | GitHub Actions | `.github/workflows/checks.yml` runs the repository checks (`uv sync --locked`, ruff check and format, pytest) on every pull request and push to `main`. It doesn't build images or touch a cluster |
+| Monitoring | No dedicated stack: k3s metrics-server (`kubectl top`), `kubectl get hpa` for KEDA lag and replicas, `kafka-consumer-groups.sh` for lag, CloudWatch for Lambda, JSON logs to stdout | In use: the evaluation experiments ([evaluation.md](../evaluation.md)) take their measurements from these. No Prometheus or dashboards |
+| Fault injection | `kubectl delete pod`, `kubectl scale --replicas=0`, a temporary deny-all NetworkPolicy | In use, by hand, for the failure experiments ([evaluation.md](../evaluation.md)); no chaos tool |
 
 ## Per-service settings
 
