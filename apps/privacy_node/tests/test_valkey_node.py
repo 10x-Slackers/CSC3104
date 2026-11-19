@@ -164,7 +164,8 @@ def test_intra_bank_hop_is_followed(run, monkeypatch):
     assert [leg["payment_id"] for leg in message["legs"]] == ["q1", "q3"]
 
 
-def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
+@pytest.mark.parametrize("grace_over", [False, True])
+def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path, grace_over):
     # q1 -> B-x -q2-> B-y -q3-> B-z -> q4: the q2 -> q3 link is on account B-y, which
     # another scorer replica may write after both outer hits, and it raises no hit
     late = [
@@ -181,7 +182,7 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
         ],
         "C": [event("C", "q4", "in", "C-w", "B-z", 30, "9500")],
     }
-    nodes, _ = run(events)
+    nodes, posted = run(events)
     b = nodes["B"]
     b.ingestion_grace_seconds = 60
     b.consume_hits(block_ms=None)
@@ -191,8 +192,46 @@ def test_a_middle_link_written_after_both_hits_is_rechecked(run, tmp_path):
     for e in late:
         scorer.process(e)
     assert b.consume_hits(block_ms=None) == 0  # no hit for the middle link
+    if grace_over:  # the link arrived just before: one last look, not a local case
+        b._unresolved = {k: (0, h) for k, (_, h) in b._unresolved.items()}
     b.housekeeping()
     assert [c.state for c in b.store.chains()] == [pb.CONFIRMED]
+    assert "local" not in {m["kind"] for m in posted["B"]}
+    assert b._unresolved == {}
+
+
+@pytest.mark.parametrize("late_leg", [False, True])
+def test_money_that_stays_in_the_bank_becomes_a_local_case(run, tmp_path, late_leg):
+    # A-a -q1-> B-x -q2-> B-y, and B-y pays no other bank: nothing to search. B-y's
+    # leg of q2 may be on a partition not scored yet when the grace ends.
+    q2_in = event("B", "q2", "in", "B-y", "B-x", 10, "9800")
+    events = {
+        "A": [event("A", "q1", "out", "A-a", "B-x", 0, "10000")],
+        "B": [
+            event("B", "q1", "in", "B-x", "A-a", 0, "10000"),
+            event("B", "q2", "out", "B-x", "B-y", 10, "9800"),
+            *([] if late_leg else [q2_in]),
+        ],
+        "C": [],
+    }
+    nodes, posted = run(events)
+    b = nodes["B"]
+    b.ingestion_grace_seconds = 60
+    b.consume_hits(block_ms=None)
+    b.housekeeping()
+    assert [m["kind"] for m in posted["B"]] == ["hit"]  # still within the grace
+    b._unresolved = {k: (0, h) for k, (_, h) in b._unresolved.items()}  # grace over
+    b.housekeeping()
+    [local] = [m for m in posted["B"] if m["kind"] == "local"]
+    assert local["key"] == posted["B"][0]["key"]  # the chain hit's ID
+    legs = [("q1", "in", "B-x"), ("q2", "in", "B-y"), ("q2", "out", "B-x")]
+    if late_leg:
+        legs.remove(("q2", "in", "B-y"))
+    assert [
+        (g["payment_id"], g["direction"], g["account"]) for g in local["legs"]
+    ] == legs
+    assert cases_at(b, posted["B"], tmp_path) == {("B", 1, "q1 q2")}  # joins the hit
+    assert b.store.chains() == []
 
 
 def test_hits_survive_errors_lost_pods_and_a_lost_group(run, monkeypatch, tmp_path):
@@ -262,12 +301,15 @@ def test_a_broken_retry_doesnt_block_delivery(run, monkeypatch):
     node = nodes["B"]
     stuck = node.search_id("expired-in", "expired-out")
     node.store.put_search(stuck, "expired-in", "expired-out", pb.PENDING, "")
-    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60
+    node._unresolved[("expired-in", "expired-out")] = time.monotonic() + 60, "h0"
     node.store.put_case({"key": "h1", "kind": "hit", "rule": "new_payee", "legs": []})
     monkeypatch.setattr("privacy_node.store.random.random", lambda: 1.0)
     node.housekeeping()
     assert [m["key"] for m in posted["B"]] == ["h1"]
     assert node.store.unfinished_searches() == []  # backed off, not retried every pass
+    node._unresolved[("gone-in", "gone-out")] = 0, "h0"  # never searched, grace over
+    node.housekeeping()
+    assert node._unresolved == {}  # its data is gone: not retried forever
 
 
 def test_an_upgrade_isnt_acknowledged_by_the_older_posts_reply():

@@ -55,18 +55,24 @@ class ValkeyBank:
         entry = self.state.lookup(pair, key_version, token.hex()) or {}
         return entry["payment_id"] if entry.get("direction") == direction else None
 
-    def links(self, payment_id: str, direction: Direction) -> list[str]:
-        """Cross-bank payments a local rule links onward from an incoming payment ("in")
-        or into an outgoing one ("out"), through any intra-bank hops."""
-        found, todo = set(), [(payment_id, 0)]
+    def _walk(self, payment_id: str, direction: Direction) -> tuple[list[str], set]:
+        """The cross-bank payments reached through intra-bank hops, and the payments
+        walked through on the way (the start included)."""
+        found, passed, todo = set(), set(), [(payment_id, 0)]
         while todo:
             pid, hops = todo.pop()
+            passed.add(pid)
             for other in self.state.links(pid, direction):
                 if self.peer(other, OTHER[direction]) != self.bank:
                     found.add(other)
                 elif hops < MAX_INTERNAL_HOPS:
                     todo.append((other, hops + 1))  # the same payment's other leg
-        return sorted(found)
+        return sorted(found), passed
+
+    def links(self, payment_id: str, direction: Direction) -> list[str]:
+        """Cross-bank payments a local rule links onward from an incoming payment ("in")
+        or into an outgoing one ("out"), through any intra-bank hops."""
+        return self._walk(payment_id, direction)[0]
 
     def ends(self, payment_id: str, direction: Direction) -> list[str]:
         """The payment itself if it crosses banks, else the cross-bank ones behind
@@ -74,6 +80,16 @@ class ValkeyBank:
         if self.peer(payment_id, direction) != self.bank:
             return [payment_id]
         return self.links(payment_id, OTHER[direction])
+
+    def internal_legs(self, incoming: str, outgoing: str) -> list[dict]:
+        """A chain link's legs plus both legs of each intra-bank payment behind or
+        after it, for a `local` message (case.md). A leg not written yet is left out."""
+        legs = {(incoming, "in"), (outgoing, "out")}
+        for p, d in list(legs):
+            if self.peer(p, d) == self.bank:
+                passed = self._walk(p, OTHER[d])[1]
+                legs |= {(q, e) for q in passed for e in ("in", "out")}
+        return [self.leg(p, d) for p, d in sorted(legs) if self.state.payment(p, d)]
 
     def leg(self, payment_id: str, direction: Direction, token: str = "") -> dict:
         """One of this bank's own payments, as the case service stores it (case.md)."""
