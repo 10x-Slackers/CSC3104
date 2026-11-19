@@ -77,10 +77,6 @@ SEVERITY = [
 ]
 
 
-def ms(start: float) -> float:
-    return round((time.monotonic() - start) * 1000, 1)
-
-
 UNREADABLE_TRACE = pb.TraceReply(state=pb.INVALID_CLAIM)
 
 
@@ -152,12 +148,13 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.ingestion_grace_seconds = ingestion_grace_seconds
         self._unresolved = {}  # chain hits not yet reaching cross-bank payments
 
-    # ---- outgoing calls -------------------------------------------------
-
-    def log_line(self, **fields) -> None:
-        """One timestamped JSON line to stdout, for the evaluation (evaluation.md)."""
+    def log_line(self, start: float, **fields) -> None:
+        """One timestamped JSON line to stdout with the ms since start (evaluation.md)."""
+        ms = round((time.monotonic() - start) * 1000, 1)
         line = {"ts": time.time(), "service": "privacy_node", "bank": self.bank}
-        print(json.dumps(line | fields), flush=True)
+        print(json.dumps(line | fields | {"ms": ms}), flush=True)
+
+    # ---- outgoing calls -------------------------------------------------
 
     @property
     def key_version(self) -> str:
@@ -467,10 +464,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
             search_id, incoming, outgoing, state, result.chain_digest, first
         )
         self.log_line(
+            start,
             event="search",
             search_id=search_id,
             state=pb.State.Name(state),
-            ms=ms(start),
             attempt=attempt,
         )
         return result
@@ -594,25 +591,27 @@ class Node(pb_grpc.PrivacyNodeServicer):
             start, outcome = time.monotonic(), "OK"
             try:
                 self.call(bank, "Deliver", result, 5, pb.Ack())
-                self.store.ack(result, bank)
-            except grpc.RpcError as error:  # else it stays in the outbox for later
-                outcome = error.code().name
-                if error.code() == grpc.StatusCode.INVALID_ARGUMENT:
-                    # The receiver read it and said no, so resending can't help.
-                    self.store.dead_letter(result, bank)
-                    log.warning(
-                        "dead-lettered chain_digest=%s bank=%s reason=%s",
-                        result.chain_digest,
-                        bank,
-                        error.details(),
-                    )
+            except grpc.RpcError as error:
+                outcome, reason = error.code().name, error.details()
             self.log_line(
+                start,
                 event="deliver",
                 chain_digest=result.chain_digest,
                 peer=bank,
                 outcome=outcome,
-                ms=ms(start),
             )
+            if outcome == "OK":
+                self.store.ack(result, bank)
+            elif outcome == "INVALID_ARGUMENT":
+                # The receiver read it and said no, so resending can't help.
+                self.store.dead_letter(result, bank)
+                log.warning(
+                    "dead-lettered chain_digest=%s bank=%s reason=%s",
+                    result.chain_digest,
+                    bank,
+                    reason,
+                )
+            # any other error: it stays in the outbox until the bank is back
 
     def housekeeping(self, stop: threading.Event | None = None) -> None:
         """Resume searches that needed an unavailable bank; redeliver unacknowledged results."""
