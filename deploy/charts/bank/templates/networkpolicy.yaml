@@ -1,5 +1,7 @@
-# Deny everything, then allow: traffic inside this bank, DNS, the Kubernetes API, and the platform operators (KEDA reads Kafka lag).
-# TODO: narrow to per-service paths and add privacy node <-> other banks (docs/contracts/security.md).
+# Deny everything, then allow DNS and the Kubernetes API. Each path inside the bank is then allowed at both ends: the
+# server admits only its labelled clients, and each client may send only to its servers (docs/contracts/deployment.md).
+# Both ends, because k3s's policy controller runs a pod's egress rules on traffic to it as well, so a broad egress rule
+# would let any bank pod in.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -7,17 +9,7 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
-  ingress:
-    - from:
-        - podSelector: {}
-        - namespaceSelector:
-            matchExpressions:
-              - key: kubernetes.io/metadata.name
-                operator: In
-                values: [strimzi, cnpg-system, keda]
   egress:
-    - to:
-        - podSelector: {}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -33,8 +25,114 @@ spec:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}
 ---
+# Kafka: its own pods (brokers and topic operator, which also talk to each other) and the Strimzi operator on any port;
+# the ingestor, the scorer and KEDA (reads consumer lag) on the plain listener only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-clients
+spec:
+  podSelector:
+    matchLabels: {strimzi.io/cluster: kafka}
+  policyTypes: [Ingress, Egress]
+  egress: [{to: [{podSelector: {matchLabels: {strimzi.io/cluster: kafka}}}]}]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {strimzi.io/cluster: kafka}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: strimzi}
+    - from:
+        - podSelector:
+            matchExpressions: [{key: app, operator: In, values: [ingestor, scorer]}]
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: keda}
+      ports: [{protocol: TCP, port: 9092}]
+---
+# PostgreSQL: its own instances (replication, both ways) and the CloudNativePG operator on any port; the privacy node
+# and the case service on 5432 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-clients
+spec:
+  podSelector:
+    matchLabels: {cnpg.io/cluster: postgres}
+  policyTypes: [Ingress, Egress]
+  egress: [{to: [{podSelector: {matchLabels: {cnpg.io/cluster: postgres}}}]}]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {cnpg.io/cluster: postgres}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: cnpg-system}
+    - from:
+        - podSelector:
+            matchExpressions: [{key: app, operator: In, values: [privacy-node, case]}]
+      ports: [{protocol: TCP, port: 5432}]
+---
+# The privacy node -> this bank's case service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: node-to-case
+spec:
+  podSelector:
+    matchLabels: {app: case}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: privacy-node}
+      ports: [{protocol: TCP, port: 8000}]
+---
+# The client end of each path above. Valkey and summary pods run on k3d only; on EKS these rules match nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingestor-egress
+spec:
+  podSelector: {matchLabels: {app: ingestor}}
+  policyTypes: [Egress]
+  egress:
+    - {to: [{podSelector: {matchLabels: {strimzi.io/cluster: kafka}}}], ports: [{protocol: TCP, port: 9092}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scorer-egress
+spec:
+  podSelector: {matchLabels: {app: scorer}}
+  policyTypes: [Egress]
+  egress:
+    - {to: [{podSelector: {matchLabels: {strimzi.io/cluster: kafka}}}], ports: [{protocol: TCP, port: 9092}]}
+    - {to: [{podSelector: {matchLabels: {app: valkey}}}], ports: [{protocol: TCP, port: 6379}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: privacy-node-egress
+spec:
+  podSelector: {matchLabels: {app: privacy-node}}
+  policyTypes: [Egress]
+  egress:
+    - {to: [{podSelector: {matchLabels: {app: valkey}}}], ports: [{protocol: TCP, port: 6379}]}
+    - {to: [{podSelector: {matchLabels: {cnpg.io/cluster: postgres}}}], ports: [{protocol: TCP, port: 5432}]}
+    - {to: [{podSelector: {matchLabels: {app: case}}}], ports: [{protocol: TCP, port: 8000}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: case-egress
+spec:
+  podSelector: {matchLabels: {app: case}}
+  policyTypes: [Egress]
+  egress:
+    - {to: [{podSelector: {matchLabels: {cnpg.io/cluster: postgres}}}], ports: [{protocol: TCP, port: 5432}]}
+    - {to: [{podSelector: {matchLabels: {app: summary}}}], ports: [{protocol: TCP, port: 8080}]}
+---
 # Privacy node <-> the other banks' privacy nodes, gRPC port only (docs/contracts/security.md).
-# Listing its own namespace changes nothing: the baseline already allows traffic inside the bank.
+{{- $peers := without (list "bank-a" "bank-b" "bank-c") (printf "bank-%s" (lower .Values.bank)) | toJson }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -46,14 +144,14 @@ spec:
   ingress:
     - from:
         - namespaceSelector:
-            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}]
+            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: {{ $peers }}}]
           podSelector:
             matchLabels: {app: privacy-node}
       ports: [{protocol: TCP, port: 50051}]
   egress:
     - to:
         - namespaceSelector:
-            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: [bank-a, bank-b, bank-c]}]
+            matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: {{ $peers }}}]
           podSelector:
             matchLabels: {app: privacy-node}
       ports: [{protocol: TCP, port: 50051}]
@@ -106,7 +204,37 @@ spec:
       ports: [{protocol: TCP, port: 80}]
 {{- else }}
 ---
-# Replay Job (replay namespace) -> this bank's ingestor, HTTP port only (docs/contracts/deployment.md).
+# k3d: the scorer and privacy node -> this bank's Valkey pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-clients
+spec:
+  podSelector:
+    matchLabels: {app: valkey}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions: [{key: app, operator: In, values: [scorer, privacy-node]}]
+      ports: [{protocol: TCP, port: 6379}]
+---
+# k3d: the case service -> this bank's summary pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: case-to-summary
+spec:
+  podSelector:
+    matchLabels: {app: summary}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: case}
+      ports: [{protocol: TCP, port: 8080}]
+---
+# k3d: the replay Job (replay namespace) -> this bank's ingestor, HTTP port only (docs/contracts/deployment.md).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
