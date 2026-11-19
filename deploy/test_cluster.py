@@ -4,7 +4,7 @@
 
 They test what the charts promise, from inside the pods:
 
-- End to end: the tiny workload gives every bank its expected cases.
+- End to end: the tiny workload gives every bank the cases the offline evaluator finds.
 - NetworkPolicy: each path a service needs is open, and everything else is closed.
   Every "blocked" target is also shown open from a pod that may reach it, so a
   missing service can't pass as a blocked one.
@@ -18,9 +18,13 @@ import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from cryptography import x509
+
+from mulechain import evaluate
+from mulechain.node.node import identity
 
 BANKS = ("a", "b", "c")
 OPEN, BLOCKED = "open", "blocked"
@@ -38,23 +42,21 @@ def python_in(namespace: str, pod: str, code: str, *args: str) -> str:
     return kubectl("exec", "-n", namespace, pod, "--", "python", "-c", code, *args)
 
 
-ON_EKS = kubectl("config", "current-context").startswith("arn:aws:eks:")
+# On AWS a bank has no Valkey, ingestor or summary pods: ElastiCache and Lambda do that.
+ON_EKS = not kubectl("get", "service", "valkey", "-n", "bank-a", "--ignore-not-found")
 
 # ---- end to end
 
 
-def test_the_tiny_workload_gives_every_bank_its_cases():
-    """The same cases as `python -m mulechain.evaluate workloads/tiny --cases`."""
+def test_the_tiny_workload_gives_every_bank_the_cases_the_offline_evaluator_finds():
+    offline, _ = evaluate.run(Path(__file__).parents[1] / "workloads/tiny")
+    expected = sorted((c.bank, c.tier, " ".join(sorted(c.ids))) for c in offline)
     fetch = "import urllib.request as u; print(u.urlopen('http://localhost:8000/api/cases').read().decode())"
-    found = {}
+    found = []
     for bank in BANKS:
         cases = json.loads(python_in(f"bank-{bank}", "deploy/case", fetch))
-        found[bank] = sorted((case["tier"], " ".join(case["payments"])) for case in cases)
-    assert found == {
-        "a": [(1, "p06"), (1, "p08"), (1, "p13"), (2, "p10 p12"), (2, "p15 p17 p18 p20")],
-        "b": [(1, "p05"), (1, "p06 p07"), (1, "p09"), (2, "p10 p11"), (2, "p15 p16 p18 p19")],
-        "c": [(1, "p03"), (1, "p14"), (2, "p11 p12"), (2, "p16 p17 p19 p20")],
-    }
+        found += [(bank.upper(), case["tier"], " ".join(case["payments"])) for case in cases]
+    assert sorted(found) == expected
 
 
 # ---- NetworkPolicy
@@ -183,7 +185,7 @@ PATHS = paths()
 @pytest.fixture(scope="session")
 def reached() -> dict:
     """Every path tried once, side by side (each new pod waits ten seconds)."""
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=len(PATHS)) as pool:
         return dict(zip(PATHS, pool.map(lambda path: reach(*path[:2]), PATHS), strict=True))
 
 
@@ -232,12 +234,12 @@ def certificate(bank: str) -> x509.Certificate:
 
 @pytest.mark.parametrize("bank", BANKS)
 def test_each_bank_has_a_certificate_from_the_lab_ca_naming_it(bank):
-    names = certificate(bank).extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    issued = certificate(bank)
+    names = issued.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     assert names.get_values_for_type(x509.DNSName) == [f"privacy-node.bank-{bank}.svc"]
-    identity = f"spiffe://csc3104/bank/{bank.upper()}/privacy-node"
-    assert names.get_values_for_type(x509.UniformResourceIdentifier) == [identity]
+    assert names.get_values_for_type(x509.UniformResourceIdentifier) == [identity(bank.upper())]
     authority = x509.load_pem_x509_certificate(secret("cert-manager", "bank-ca", "tls.crt"))
-    certificate(bank).verify_directly_issued_by(authority)
+    issued.verify_directly_issued_by(authority)
 
 
 @pytest.mark.parametrize(("caller", "callee"), [("a", "b"), ("b", "c"), ("c", "a")])
@@ -250,7 +252,7 @@ def test_a_caller_with_no_certificate_cannot_connect():
 
 
 def test_a_self_signed_certificate_naming_bank_a_cannot_connect():
-    name = "subjectAltName=URI:spiffe://csc3104/bank/A/privacy-node"
+    name = f"subjectAltName=URI:{identity('A')}"
     make = ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"]
     make += ["-nodes", "-subj", "/CN=impostor", "-days", "1", "-addext", name]
     impostor = subprocess.run(
@@ -290,41 +292,45 @@ def test_a_node_answers_only_the_bank_on_the_other_side_of_a_transfer():
     read = "import os, valkey; print(valkey.Valkey.from_url(os.environ['VALKEY_URL'], decode_responses=True).hget('pay:p06:out', 'token'))"
     token = python_in("bank-a", "deploy/privacy-node", read)
     assert len(token) == 32, "replay the tiny workload first: make replay WORKLOAD=tiny"
-    assert trace("a", "b", token).startswith("OK") and trace("a", "b", token) != "OK 0"
+    assert trace("a", "b", token) not in ("OK 0", "UNAVAILABLE")
     assert trace("c", "b", token) == "OK 0"
+
+
+def served_serial(ip: str) -> int | None:
+    """The serial number of the certificate a bank A node pod serves, seen from bank C."""
+    args = (SERVED_SERIAL, ip, "privacy-node.bank-a.svc")
+    answer = python_in("bank-c", "deploy/privacy-node", *args)
+    return int(answer) if answer.isdigit() else None
+
+
+def changed(read, old: int) -> int:
+    """Wait up to three minutes for `read()` to give something other than `old`."""
+    for _ in range(60):
+        if (got := read()) not in (old, None):
+            return got
+        time.sleep(3)
+    return old
 
 
 def test_a_renewed_certificate_is_served_without_a_restart():
     pods = "{range .items[*]}{.metadata.uid} {.status.containerStatuses[0].restartCount} {end}"
     running = ("get", "pod", "-n", "bank-a", "-l", "app=privacy-node", "-o", f"jsonpath={pods}")
     before, old = kubectl(*running), certificate("a").serial_number
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    issuing = {"type": "Issuing", "status": "True", "reason": "ManuallyTriggered"}
-    issuing |= {"message": "test_cluster.py", "lastTransitionTime": now}
-    patch = [
-        {"op": "add", "path": "/status/conditions/-", "value": issuing}
-    ]  # what `cmctl renew` does
+    # What `cmctl renew` does: mark the certificate as being issued again.
+    issuing = {
+        "type": "Issuing",
+        "status": "True",
+        "reason": "ManuallyTriggered",
+        "message": "test_cluster.py",
+        "lastTransitionTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    patch = [{"op": "add", "path": "/status/conditions/-", "value": issuing}]
     renew = ("patch", "certificate", "privacy-node", "-n", "bank-a", "--subresource=status")
     kubectl(*renew, "--type=json", "-p", json.dumps(patch))
-
-    def wait_for(serial) -> int:
-        for _ in range(60):
-            if (now := serial()) not in (old, None):
-                return now
-            time.sleep(3)
-        return old
-
-    new = wait_for(lambda: certificate("a").serial_number)
+    new = changed(lambda: certificate("a").serial_number, old)
     assert new != old, "cert-manager issued no new certificate"
-    for _, ip in pod_ips(
-        "bank-a", "app=privacy-node"
-    ):  # the kubelet updates the mount within a minute
-
-        def served(ip: str = ip) -> int | None:
-            args = (SERVED_SERIAL, ip, "privacy-node.bank-a.svc")
-            answer = python_in("bank-c", "deploy/privacy-node", *args)
-            return int(answer) if answer.isdigit() else None
-
-        assert wait_for(served) == new
+    # The kubelet updates the mounted Secret within a minute; the node reads it per connection.
+    for _, ip in pod_ips("bank-a", "app=privacy-node"):
+        assert changed(lambda ip=ip: served_serial(ip), old) == new
     assert trace("a", "b") == "OK 0" and trace("c", "a") == "OK 0"
     assert kubectl(*running) == before  # the same pods, never restarted

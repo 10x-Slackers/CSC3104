@@ -27,8 +27,3 @@ resources:
 {{- define "bank.valkeyUrl" -}}
 {{ .Values.aws.valkeyUrl | default "valkey://valkey:6379" }}
 {{- end }}
-
-{{/* The other two banks, lower case. */}}
-{{- define "bank.peers" -}}
-{{ without (list "a" "b" "c") (lower .Values.bank) | toJson }}
-{{- end }}

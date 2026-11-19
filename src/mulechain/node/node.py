@@ -138,7 +138,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         if known:
             self.bank.publish_keys(known)
         peer_keys = {bank: crypto.decode(text) for bank, text in known.items()}
-        self.keys = peer_keys | {self.name: [k.public for k in self.own]}
+        self.keys = peer_keys | {self.name: current}
         self.keys_at = time.monotonic()
         return silent
 

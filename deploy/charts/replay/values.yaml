@@ -1,6 +1,6 @@
-# A directory under workloads/, and extra replay flags such as [--speed, "0"].
+# A directory under workloads/, and extra replay flags such as "--speed 0".
 workload: tiny
-args: []
+args: ""
 image:
   repository: mulechain
   tag: dev

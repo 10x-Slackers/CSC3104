@@ -68,6 +68,7 @@ spec:
         - podSelector: {matchExpressions: [{key: app, operator: In, values: [privacy-node, case]}]}
       ports: [{protocol: TCP, port: 5432}]
 ---
+{{- if not .Values.aws }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -80,6 +81,7 @@ spec:
       ports: [{protocol: TCP, port: 8080}]
   egress:
     - {to: [{podSelector: {matchLabels: {strimzi.io/cluster: kafka}}}], ports: [{protocol: TCP, port: 9092}]}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -92,6 +94,7 @@ spec:
     - {to: [{podSelector: {matchLabels: {strimzi.io/cluster: kafka}}}], ports: [{protocol: TCP, port: 9092}]}
     - {to: [{podSelector: {matchLabels: {app: valkey}}}], ports: [{protocol: TCP, port: 6379}]}
 ---
+{{- if not .Values.aws }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -102,13 +105,12 @@ spec:
   ingress:
     - from: [{podSelector: {matchExpressions: [{key: app, operator: In, values: [scorer, privacy-node]}]}}]
       ports: [{protocol: TCP, port: 6379}]
+{{- end }}
 ---
 # The privacy node: its own bank's Valkey, PostgreSQL and case service, and the other
 # banks' privacy nodes on the gRPC port, both ways. Not a node in its own bank, and
 # nothing else in another bank.
-{{- $peers := list }}
-{{- range include "bank.peers" . | fromJsonArray }}{{ $peers = append $peers (printf "bank-%s" .) }}{{ end }}
-{{- $peerNodes := dict "namespaceSelector" (dict "matchExpressions" (list (dict "key" "kubernetes.io/metadata.name" "operator" "In" "values" $peers))) "podSelector" (dict "matchLabels" (dict "app" "privacy-node")) }}
+{{- $peers := without (list "bank-a" "bank-b" "bank-c") .Release.Namespace | toJson }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -117,10 +119,14 @@ spec:
   podSelector: {matchLabels: {app: privacy-node}}
   policyTypes: [Ingress, Egress]
   ingress:
-    - from: [{{ toJson $peerNodes }}]
+    - from:
+        - namespaceSelector: {matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: {{ $peers }}}]}
+          podSelector: {matchLabels: {app: privacy-node}}
       ports: [{protocol: TCP, port: 50051}]
   egress:
-    - to: [{{ toJson $peerNodes }}]
+    - to:
+        - namespaceSelector: {matchExpressions: [{key: kubernetes.io/metadata.name, operator: In, values: {{ $peers }}}]}
+          podSelector: {matchLabels: {app: privacy-node}}
       ports: [{protocol: TCP, port: 50051}]
     - {to: [{podSelector: {matchLabels: {app: valkey}}}], ports: [{protocol: TCP, port: 6379}]}
     - {to: [{podSelector: {matchLabels: {cnpg.io/cluster: postgres}}}], ports: [{protocol: TCP, port: 5432}]}
@@ -140,6 +146,7 @@ spec:
     - {to: [{podSelector: {matchLabels: {cnpg.io/cluster: postgres}}}], ports: [{protocol: TCP, port: 5432}]}
     - {to: [{podSelector: {matchLabels: {app: summary}}}], ports: [{protocol: TCP, port: 8080}]}
 ---
+{{- if not .Values.aws }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -150,6 +157,7 @@ spec:
   ingress:
     - from: [{podSelector: {matchLabels: {app: case}}}]
       ports: [{protocol: TCP, port: 8080}]
+{{- end }}
 {{- with .Values.aws }}
 ---
 # AWS: the ingestor Lambda -> Kafka's VPC listener. A NetworkPolicy can't name the

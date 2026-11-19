@@ -6,12 +6,13 @@
 environments:
   k3d:
     values:
-      - image: {repository: mulechain, tag: dev}
+      - image: {repository: mulechain}
         ha: [a]  # banks that run with replicas; a laptop has room for one
         aws: {}
   eks:
     values:
       - eks-values.yaml  # written by `make eks` from Terraform's outputs
+      - ha: [a, b, c]
 ---
 repositories:
   - {name: cnpg, url: https://cloudnative-pg.github.io/charts}

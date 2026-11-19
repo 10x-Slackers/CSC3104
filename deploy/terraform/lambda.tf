@@ -89,7 +89,6 @@ resource "aws_lambda_function_url" "summary" {
 output "helm_values" {
   value = jsonencode({
     image           = { repository = aws_ecr_repository.image.repository_url }
-    ha              = ["a", "b", "c"]
     workloadsBucket = local.workloads_bucket
     ingestorUrls    = { for b, _ in local.banks : b => aws_lambda_function_url.ingestor[b].function_url }
     aws = { for b, _ in local.banks : b => {

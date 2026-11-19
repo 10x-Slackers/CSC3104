@@ -34,7 +34,7 @@ spec:
             {{- range $bank, $url := .Values.ingestorUrls }}
             - --url={{ $bank }}={{ $url }}
             {{- end }}
-            {{- range .Values.args }}
+            {{- range splitList " " .Values.args | compact }}
             - {{ . | quote }}
             {{- end }}
           volumeMounts: [{name: workloads, mountPath: /workloads, readOnly: true}]

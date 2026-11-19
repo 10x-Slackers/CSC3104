@@ -10,8 +10,6 @@ KEY      ?= 2
 HELMFILE = helmfile -f deploy/helmfile.yaml.gotmpl -e $(ENV) --state-values-set image.tag=$(TAG)
 TF       = terraform -chdir=deploy/terraform
 EKS      = $(if $(filter eks,$(ENV)),-f deploy/eks-values.yaml)
-comma   := ,
-space   := $(subst ,, )
 
 help:  ## list the commands
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/' | column -t -s "$$(printf '\t')"
@@ -33,7 +31,7 @@ proto:  ## regenerate the gRPC code from protocol.proto
 image:  ## build the one image every service runs
 	docker build -q -t mulechain:$(TAG) .
 
-k3d: image  ## create the local cluster and deploy all three banks
+k3d:  ## create the local cluster and deploy all three banks
 	mkdir -p workloads
 	k3d cluster create $(CLUSTER) --config deploy/k3d.yaml --wait
 	$(MAKE) load deploy
@@ -54,8 +52,7 @@ deploy:  ## install or update everything in the current cluster (ENV=k3d or eks)
 
 replay:  ## replay a workload into the banks: make replay WORKLOAD=slice-6h ARGS="--speed 0"
 	helm template replay deploy/charts/replay $(EKS) --set image.tag=$(TAG) --set workload=$(WORKLOAD) \
-	  $(if $(strip $(ARGS)),--set 'args={$(subst $(space),$(comma),$(strip $(ARGS)))}') \
-	  | kubectl replace --force --cascade=foreground -f -
+	  --set-string args='$(ARGS)' | kubectl replace --force --cascade=foreground -f -
 	kubectl logs -n replay -f job/replay --pod-running-timeout=10m
 	kubectl wait -n replay --for=condition=complete job/replay --timeout=10s
 

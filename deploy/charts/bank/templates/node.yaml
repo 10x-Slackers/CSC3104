@@ -25,7 +25,7 @@ spec:
               valueFrom:
                 secretKeyRef: {name: postgres-app, key: uri}
             - name: PEERS
-              value: {{ range $i, $peer := include "bank.peers" . | fromJsonArray }}{{ if $i }},{{ end }}{{ upper $peer }}=privacy-node.bank-{{ $peer }}.svc:50051{{ end }}
+              value: {{ range $i, $peer := without (list "a" "b" "c") (lower .Values.bank) }}{{ if $i }},{{ end }}{{ upper $peer }}=privacy-node.bank-{{ $peer }}.svc:50051{{ end }}
             - {name: CASE_URL, value: "http://case:8000"}
             - {name: KEY_DIR, value: /keys}
             - {name: TLS_DIR, value: /tls}

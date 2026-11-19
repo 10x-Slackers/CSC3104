@@ -194,9 +194,7 @@ def main() -> None:
         {
             "bootstrap.servers": os.environ["KAFKA_BOOTSTRAP_SERVERS"],
             "group.id": f"scorer-{bank}",
-            # Offsets are committed to Kafka only so that KEDA can see the lag: the
-            # background commit sends the offsets stored below, after each event.
-            "enable.auto.offset.store": False,
+            # The client still commits offsets to Kafka, only so that KEDA can see the lag.
             "queued.max.messages.kbytes": 16384,  # 16 MiB prefetch, not the 64 MiB default
         }
     )
@@ -227,9 +225,8 @@ def main() -> None:
             if made["links"] or made["hits"]:
                 kafka_ts = message.timestamp()[1] / 1000  # when the ingestor accepted it
                 log("scorer", bank=bank, payment_id=event["payment_id"], kafka_ts=kafka_ts, **made)
-            consumer.store_offsets(message=message)
     finally:
-        consumer.close()  # commits the stored offsets and leaves the group
+        consumer.close()  # leaves the group, so its partitions move on at once
 
 
 if __name__ == "__main__":
