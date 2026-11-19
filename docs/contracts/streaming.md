@@ -61,7 +61,7 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | Incoming-to-outgoing value ratio | Outgoing / incoming: 0.90–0.98 inclusive | `--min-ratio`, `--max-ratio`; draft defaults pending team approval |
 | Time window | 1–30 minutes inclusive, using transaction timestamps | `--min-delay` (60 seconds), `--window` (1800 seconds) |
 | Minimum chain length | Replaced by the alert tiers | [case.md](case.md#cases-and-alerts) |
-| Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md#why-the-hop-limit-is-4); checked by a 4/6/8 sweep |
+| Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md#why-the-hop-limit-is-4); checked by experiment 4 (4 vs 8) |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
 | Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing or trimmed history produces no local match | History is bounded by the event-time trim, not a count |
 
@@ -80,7 +80,7 @@ Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` 
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,877 to 796 a day) for 0.7 points of recall.
   - **New payee instead of fan-in and fan-out:** the fan rules (≥ 5 counterparties in 72 h) caught 4–78% of the fan, scatter/gather and bipartite attempts; a first-payment-to-a-new-payee rule caught 83–89%. An exception for payees with ≥ 30 earlier payers (businesses) was dropped: only the payee's bank sees all of a payee's payers, and counting this bank's own customers removed 12 ordinary flags a day.
   - **Quick repeat:** 85% of the 126 repeat laundering payments to a just-flagged payee came within 24 h (67% in the same minute). Dev's five days start with no history, so its ordinary repeats can't include weekly ones: 63% came within 24 h, falling from 55% on 2 Sep to 26% on 5 Sep. It added 1.1 points of recall (16 of 1,471) for 4,836 ordinary flags a day, 99% of them on 1–2 Sep, when every payee is new; on 3–5 Sep it added about 105 a day.
-  - **Amount floor:** a S$1,500 floor on both payments of a link caught the same CYCLE and RANDOM attempts (42 of 42) and lost 2 laundering payments (1,439 of 1,471), while removing 352 of the chain rule's 796 ordinary flags a day (6.33% to 6.28% of payments flagged). The starting point stays no floor; experiment 3 tunes it ([evaluation.md](../evaluation.md#experiments)).
+  - **Amount floor:** a S$1,500 floor on both payments of a link caught the same CYCLE and RANDOM attempts (42 of 42) and lost 2 laundering payments (1,439 of 1,471), while removing 352 of the chain rule's 796 ordinary flags a day (6.33% to 6.28% of payments flagged). The starting point stays no floor; experiment 3 sweeps only the chain band, so the floor is not tuned ([evaluation.md](../evaluation.md#results)).
   - **Together:** 98.0% of dev's cross-bank laundering bank transfers (1,441 of 1,471) with 6.33% of all payments flagged as ordinary, 93.7% on eval (963 of 1,028, 1.54% flagged), and 92.6% on HI-Medium (16,461 of 17,777, 2.98% flagged) with the thresholds unchanged ([evaluation.md](../evaluation.md#results)).
 - **Intra-bank hops:** the scorer writes a link for each account as usual, internal legs included, and the node follows them through the bank until it reaches a cross-bank payment, so it still signs one claim ([protocol.md](protocol.md#searches-from-valkey)). Where the money starts or stays inside the bank, the node posts a `local` message instead ([protocol.md](protocol.md#result-delivery-to-the-case-service)).
 
@@ -272,6 +272,6 @@ Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md
 
 - [x] Intra-bank hops: followed by the node when it reads, rather than collapsed by the scorer.
 - [ ] TTL for `tok:` and `pay:`: a peer's query can arrive up to 72 h after the event under the chain rule, longer than the 24 h pending-search expiry in [protocol.md](protocol.md) (Cindy, with Caleb for PDPA retention).
-- [ ] Rule thresholds, from the offline sweep on the dev split, starting from the exploratory values above (Cindy, with Isaac).
+- [x] Rule thresholds: experiment 3 swept the chain band on the dev split and kept 0.90–1.10 ([evaluation.md](../evaluation.md#results)); the windows and floor stay at the exploratory values.
 - [ ] Cite red flags for the new payee and quick repeat rules (Cindy).
 - [ ] TTL for the `last:` keys, which keep the whole history (Cindy, with Caleb for PDPA retention).

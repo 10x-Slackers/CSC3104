@@ -97,7 +97,7 @@ No regulator sets a hop count, so the value comes from the lengths of Altman's l
 | CYCLE (54 attempts) | 61% | 80% | 12 |
 | RANDOM (41 attempts) | 59% | 83% | 11 |
 
-A higher limit costs latency (hops run one after another within the deadline), message size (`visited` grows each hop) and disclosure. Longer chains aren't lost: overlapping searches started at different banks each return partial, the case service joins them into one case, and partial chains can still alert ([case.md](case.md)). Experiment 4 sweeps 4/6/8 ([evaluation.md](../evaluation.md#experiments)).
+A higher limit costs latency (hops run one after another within the deadline), message size (`visited` grows each hop) and disclosure. Longer chains aren't lost: overlapping searches started at different banks each return partial, the case service joins them into one case, and partial chains can still alert ([case.md](case.md)). Which payments a bank's case lists can depend on the order those searches finish: in experiment 1's order race one payment was missing from one bank's case, with the same tier. Experiment 4 compares 4 and 8: 8 confirms 28 of 44 partial searches and changes no case ([evaluation.md](../evaluation.md#results)).
 
 ## Result states
 
@@ -209,7 +209,7 @@ Also part of: [Token and key API](security.md#interfaces), [Valkey layout](strea
 - [ ] Review the claim bytes, `ALLOWED_FIELDS` and the `chain_id` → `chain_digest` rename (Caleb).
 - [x] mTLS: `privacy-node-tls`; `transport.authenticated_bank` maps the client certificate's URI SAN to a bank and rejects a `Trace` or `Deliver` whose `sender` doesn't match (`PERMISSION_DENIED`), since #26.
 - [x] Move `store.py` to PostgreSQL, then test two replicas per bank (`test_store.py`).
-- [x] `BRANCH_CAP = 1` and `HOP_LIMIT = 4`, checked by a 4/6/8 sweep; shared state moves to Valkey and PostgreSQL.
+- [x] `BRANCH_CAP = 1` and `HOP_LIMIT = 4`, checked by comparing 4 and 8 (experiment 4: 8 confirms 28 of 44 partial searches and changes no case); shared state moves to Valkey and PostgreSQL.
 - [x] `chain_digest` is the case identity; the case service merges overlapping partial chains by shared transfers.
 - [x] Retention lifetimes: see the [failure contract](#failure-contract).
 - [x] Late events: keep the ingestion grace (`--ingestion-grace-seconds`), with its default set from measured ingest lag (the chart sets 60 s until then); it runs from the search's first attempt, `started` in the `searches` row, so replicas and restarts share it.
