@@ -146,7 +146,9 @@ With this few pending searches, backoff saves only 15–20% of retries and delay
 
 **Key rotation (experiment 12).** During `slice-24h --rate 500`, every bank introduced k2 at +30 s, switched to it at +120 s and retired k1 at +210 s. All 44,983 cases and 79 CONFIRMED searches matched offline, so no link was missed. Introducing new key files changes the pod spec, which restarts the scorer, node and case pods; switching and retiring are live file updates.
 
-**Still to do.** Graphs; `check-netpol.sh` and `check-mtls.sh` on the policies from #63/#65 (experiment 1's NetworkPolicy check ran on the older ones); experiments 10 and 14. The fault experiments are single runs: the case comparisons are exact, but the RTO gaps are single samples.
+**Security checks on `288432c`** (fresh `k3d-up.sh`, 14 min 28 s, with #63/#65's policies and #61's Secrets encryption): `check-netpol.sh` 47/47 PASS, `check-mtls.sh` 35/35 PASS. Three more fixture runs on that cluster found an order race: in 2 of the 3, bank A's case for the `v1` chain (longer than the hop limit) lists 3 of its 4 own payments instead of 4 (`p20` missing). Same tier, same case count. Each bank's search of that chain returns a different partial window, and live the searches finish in any order, while offline they always run A, B, C. None of the other 23 runs showed it.
+
+**Still to do.** Graphs; experiments 10 and 14; a look at the `v1` order race. The fault experiments are single runs: the case comparisons are exact, but the RTO gaps are single samples.
 
 ### Exploratory sweep (not the offline evaluator)
 
