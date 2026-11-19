@@ -20,6 +20,15 @@ spec:
   jvmOptions:
     -Xms: 256m
     -Xmx: 512m
+  template:
+    pod:  # HA: spread the brokers over nodes where there are several (EKS), so one node's loss keeps a majority
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector: {matchLabels: {strimzi.io/pool-name: kafka}}
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: Kafka
