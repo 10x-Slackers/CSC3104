@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -776,7 +777,7 @@ def main():
         args.key_directory, read_config()
     )
     server, port = serve(node, args.port)
-    print(f"bank {args.bank} privacy node on port {port}", flush=True)
+    print(f"bank {args.bank} privacy node on port {port}", file=sys.stderr)
     # Up once Valkey and the store are reachable (it reports SERVING from the start);
     # plaintext, unlike the mTLS port, so the kubelet's gRPC probe can call it.
     health_server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
@@ -787,7 +788,9 @@ def main():
         health_server.start()
     if args.search and args.workload:
         for result in node.search_detections():
-            print(pb.State.Name(result.state), result.chain_digest[:12], flush=True)
+            print(
+                pb.State.Name(result.state), result.chain_digest[:12], file=sys.stderr
+            )
 
     stop = threading.Event()
     handlers = {
