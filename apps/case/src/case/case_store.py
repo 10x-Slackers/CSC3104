@@ -208,7 +208,6 @@ class Db:
         return self.conn.execute(sql.replace("?", "%s") if self.pg else sql, args)
 
     def executemany(self, sql: str, rows) -> None:
-        self._reconnect_if_broken()
         if self.pg:
             self.conn.cursor().executemany(sql.replace("?", "%s"), rows)
         else:
