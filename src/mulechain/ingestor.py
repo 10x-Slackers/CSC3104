@@ -111,6 +111,11 @@ def handle(body: bytes | str) -> tuple[int, dict]:
     except (KeyError, TypeError, ValueError) as error:
         status, reply = 400, {"error": f"{type(error).__name__}: {error}"}
     else:
+
+        def delivered(error, _message) -> None:
+            if error:
+                errors.append(str(error))
+
         for event in out:
             producer().produce(
                 topic(BANK),
@@ -118,7 +123,7 @@ def handle(body: bytes | str) -> tuple[int, dict]:
                 value=json.dumps(event),
                 headers=headers(event),
                 timestamp=int(ts * 1000),
-                on_delivery=lambda error, _: error and errors.append(str(error)),
+                on_delivery=delivered,
             )
         producer().flush()  # returns once every event is delivered or has failed
         status, reply = (503, {"error": errors[0]}) if errors else (200, {"events": len(out)})

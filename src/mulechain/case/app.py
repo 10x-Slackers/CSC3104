@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from mulechain import log
 from mulechain.case.store import CaseStore
+from mulechain.serverless import request_headers
 
 SUMMARY_SECONDS = 2
 STYLE = """<style>
@@ -34,36 +35,23 @@ form { display: inline } .tag { padding: 0 .4rem; border-radius: 3px; font-size:
 TIERS = {2: "ALERT", 1: "low priority", 0: "no tier"}
 
 
-def summarizer(url: str, bank: str, region: str = "") -> Callable[[dict], str | None]:
-    """Ask the summary service for a draft; any failure or a slow answer means "no draft".
-
-    With `region`, requests are signed (SigV4) for a Lambda function URL on AWS.
-    """
-    if region:
-        from botocore.auth import SigV4Auth
-        from botocore.awsrequest import AWSRequest
-        from botocore.session import Session
-
-        credentials = Session().get_credentials()  # botocore refreshes them as they expire
+def summarizer(url: str) -> Callable[[dict], str | None]:
+    """Ask the summary service for a draft; any failure or a slow answer means "no draft"."""
 
     def summarize(case: dict) -> str | None:
-        body, headers = (
-            json.dumps(case | {"bank": bank}).encode(),
-            {"Content-Type": "application/json"},
-        )
+        if not url:
+            return None
+        body = json.dumps(case).encode()
         try:
-            if region:
-                signed = AWSRequest("POST", url, data=body, headers=headers)
-                SigV4Auth(credentials, "lambda", region).add_auth(signed)
-                headers = dict(signed.headers)
-            request = urllib.request.Request(url, body, headers)
+            request = urllib.request.Request(url, body, request_headers(url, body))
             with urllib.request.urlopen(request, timeout=SUMMARY_SECONDS) as reply:
                 return json.load(reply)["draft"]
         except Exception as error:  # noqa: BLE001 - the bulkhead: a summary outage stops here
-            log("case", bank=bank, event="no_draft", case_id=case["id"], error=type(error).__name__)
+            failure = type(error).__name__
+            log("case", bank=case["bank"], event="no_draft", case_id=case["id"], error=failure)
             return None
 
-    return summarize if url else lambda case: None
+    return summarize
 
 
 def tag(case: dict) -> str:
@@ -71,7 +59,7 @@ def tag(case: dict) -> str:
 
 
 def state(case: dict) -> str:
-    if case["state"] == "pending":
+    if case["state"] == "pending" and case["waiting"]:
         return f"<span class='tag wait'>Waiting for bank {escape(case['waiting'])}</span>"
     return escape(case["state"])
 
@@ -91,9 +79,7 @@ def table(headings: str, rows: list[str]) -> str:
     return f"<table><tr>{head}</tr>{''.join(rows) or '<tr><td>None'}</table>"
 
 
-def create_app(
-    store: CaseStore, summarize: Callable[[dict], str | None] = lambda case: None
-) -> FastAPI:
+def create_app(store: CaseStore, summarize: Callable[[dict], str | None]) -> FastAPI:
     bank = store.bank
     app = FastAPI(title=f"Bank {bank} cases")
 
@@ -116,8 +102,7 @@ def create_app(
     @app.post("/messages")
     def messages(batch: list[dict]):
         """Store a batch from the privacy node; it sends the batch again unless this replies."""
-        for message in batch:
-            case = store.record(message)
+        for message, case in zip(batch, store.record(batch), strict=True):
             log(
                 "case",
                 bank=bank,
@@ -173,7 +158,7 @@ def create_app(
             for i, link in enumerate(case["links"], 1)
         ]
         received = "".join(
-            f"<li>{m['kind']} {escape(m['rule'] or '')} {escape(m['waiting'])}"
+            f"<li>{m['kind']} {escape(m['rule'] or '')} {escape(m['waiting'] or '')}"
             f" · <code>{m['key'][:16]}</code> · {when(m['received_at'])}"
             for m in case["messages"]
         )
@@ -212,11 +197,11 @@ def create_app(
 
 if __name__ == "__main__":
     bank = os.environ["BANK"]
-    summarize = summarizer(
-        os.environ.get("SUMMARY_URL", ""), bank, os.environ.get("SUMMARY_REGION", "")
-    )
     uvicorn.run(
-        create_app(CaseStore(os.environ["DATABASE_URL"], bank), summarize),
+        create_app(
+            CaseStore(os.environ["DATABASE_URL"], bank),
+            summarizer(os.environ.get("SUMMARY_URL", "")),
+        ),
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "8000")),
         access_log=False,

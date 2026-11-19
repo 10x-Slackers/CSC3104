@@ -39,10 +39,9 @@ from mulechain.node import protocol_pb2 as pb
 from mulechain.node import protocol_pb2_grpc as pb_grpc
 from mulechain.node.bank import Bank
 from mulechain.node.claims import claim_bytes, complete, digest, tokens, valid_chain
-from mulechain.node.store import CASE, HOUSEKEEPING_LOCK, Store
+from mulechain.node.store import CASE, Store
 
 HOP_LIMIT = 4  # a chain holds at most HOP_LIMIT + 1 transfers
-BRANCH_CAP = 1  # follow one path; a bank that knows of more marks its claim as cut
 SEARCH_SECONDS = 10  # the whole search's deadline, set by the bank that starts it
 REPLY_MARGIN = 0.25  # seconds each bank keeps back to send its own reply
 CALL_SECONDS = 5  # for Deliver and Keys, which no search is waiting on
@@ -71,7 +70,10 @@ def time_left(context: grpc.ServicerContext) -> float:
 
 
 class Unanswered(Exception):
-    """A bank on the path gave no answer; args[0] is the bank this node asked."""
+    """A bank on the path gave no answer in time."""
+
+    def __init__(self, peer: str) -> None:
+        self.peer = peer  # the neighbour this node asked; the silent bank may be further on
 
 
 class Node(pb_grpc.PrivacyNodeServicer):
@@ -119,7 +121,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 self.store.put_peer_keys(peer, crypto.encode(keys))
         known = self.store.peer_keys()
         if known:
-            self.bank.db.hset("keys", mapping=known)
+            self.bank.publish_keys(known)
         peer_keys = {bank: crypto.decode(text) for bank, text in known.items()}
         self.keys = peer_keys | {self.name: [k.public for k in self.own]}
         self.keys_at = time.monotonic()
@@ -163,7 +165,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         nexts = self.bank.links(payment, here)
         if not nexts:  # the chain starts or ends at this bank
             return pb.TraceReply(claims=[claim()])
-        cut = len(nexts) > BRANCH_CAP
+        cut = len(nexts) > 1  # a branch: follow one path and say that there is more
         peer, token = self.bank.peer(nexts[0], there), self.bank.token(nexts[0], there)
         if token in request.visited:  # the chain has come back round: a loop
             return pb.TraceReply(claims=[claim(peer, token, cut)])
@@ -257,24 +259,26 @@ class Node(pb_grpc.PrivacyNodeServicer):
             self.store.queue_case({"key": search["id"], "kind": "local", "legs": legs})
             return "local"
         if (starts[0], ends[0]) != (incoming, outgoing):
-            self.store.add_search(starts[0], ends[0])  # BRANCH_CAP: one path through the bank
+            self.store.add_search(starts[0], ends[0])  # one path through the bank
             return "moved"
         try:
             claims = self.search(incoming, outgoing)
-        except Unanswered as bank:
+        except Unanswered as silent:
             legs = [self.bank.leg(incoming, "in"), self.bank.leg(outgoing, "out")]
-            waiting = {"key": search["id"], "kind": "pending", "waiting_for": [bank.args[0]]}
+            waiting = {"key": search["id"], "kind": "pending", "waiting_for": silent.peer}
             self.store.queue_case(waiting | {"legs": legs})
             return "pending"
         if not claims:
             return "no_match" if late else "pending"
         if not self.valid(claims):
             return "failed"
-        self.save(claims, deliver_to=sorted({c.signer for c in claims} - {self.name}))
-        return "confirmed" if complete(claims) else "partial"
+        return self.save(claims, deliver_to=sorted({c.signer for c in claims} - {self.name}))
 
-    def save(self, claims: list[pb.LinkClaim], deliver_to: list[str]) -> None:
-        """Store a verified chain with the messages it owes: the outbox pattern."""
+    def save(self, claims: list[pb.LinkClaim], deliver_to: list[str]) -> str:
+        """Store a verified chain with the messages it owes (the outbox pattern).
+
+        Returns its state: `confirmed`, or `partial` if a bank cut it short.
+        """
         own_legs = []
         for claim in (c for c in claims if c.signer == self.name):
             for token, direction in ((claim.in_token, "in"), (claim.out_token, "out")):
@@ -294,7 +298,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         key, state = digest(claims), "confirmed" if complete(claims) else "partial"
         case = {"key": key, "kind": "chain", "state": state, "legs": own_legs, "links": links}
         chain = pb.Chain(claims=claims).SerializeToString()
-        self.store.save_chain(key, state, chain, deliver_to, case)
+        self.store.save_chain(key, chain, deliver_to, case)
+        return state
 
     # ---- background work --------------------------------------------------------
 
@@ -305,22 +310,20 @@ class Node(pb_grpc.PrivacyNodeServicer):
         in the same transaction as the stream position, so a crash repeats nothing and
         skips nothing.
         """
-        reply = self.bank.db.xread({"hits": self.store.cursor()}, count=500, block=block_ms)
-        entries = reply[0][1] if reply else []
-        if not entries:
+        hits = self.bank.hits(self.store.cursor(), block_ms)
+        if not hits:
             return 0
-        with self.store.db.transaction():
-            for _, hit in entries:
-                payments = json.loads(hit["payments"])
-                directions = ("in", "out") if hit["rule"] == "chain" else ("out",)
-                legs = [self.bank.leg(p, d) for p, d in zip(payments, directions, strict=True)]
+        with self.store.transaction():
+            for _, hit in hits:
+                legs = [self.bank.leg(hit["incoming"], "in")] if hit["incoming"] else []
+                legs.append(self.bank.leg(hit["outgoing"], "out"))
                 self.store.queue_case(
                     {"key": hit["id"], "kind": "hit", "rule": hit["rule"], "legs": legs}
                 )
                 if hit["rule"] == "chain":
-                    self.store.add_search(*payments)
-            self.store.set_cursor(entries[-1][0])
-        return len(entries)
+                    self.store.add_search(hit["incoming"], hit["outgoing"])
+            self.store.set_cursor(hits[-1][0])
+        return len(hits)
 
     def run_searches(self) -> int:
         due = self.store.due_searches()
@@ -348,18 +351,24 @@ class Node(pb_grpc.PrivacyNodeServicer):
     def deliver(self) -> int:
         """Send what the outbox owes; anything not acknowledged stays for a later pass."""
         due = self.store.due_messages()
-        down = set()  # banks that failed in this pass aren't called again in it
-        for message in (m for m in due if m["dest"] != CASE):
-            peer, start = message["dest"], time.monotonic()
-            outcome = "UNAVAILABLE"
+        self.deliver_chains([m for m in due if m["dest"] != CASE])
+        self.deliver_cases([m for m in due if m["dest"] == CASE])
+        return len(due)
+
+    def deliver_chains(self, messages: list[dict]) -> None:
+        down = set()  # a bank that failed in this pass isn't called again in it
+        for message in messages:
+            peer, start, state = message["dest"], time.monotonic(), "queued"
             if peer not in down:
                 try:
                     chain = pb.Chain.FromString(bytes(message["body"]))
                     self.call(peer, "Deliver", chain, CALL_SECONDS)
-                    outcome = "OK"
+                    outcome, state = "OK", "sent"
                 except grpc.RpcError as error:
                     outcome = error.code().name
-                    if outcome != "INVALID_ARGUMENT":
+                    if outcome == "INVALID_ARGUMENT":
+                        state = "dead"  # the bank read it and refused: sending again can't help
+                    else:
                         down.add(peer)
                 log(
                     "node",
@@ -370,19 +379,15 @@ class Node(pb_grpc.PrivacyNodeServicer):
                     outcome=outcome,
                     ms=round((time.monotonic() - start) * 1000, 1),
                 )
-            # INVALID_ARGUMENT: the bank read it and refused, so sending again can't help.
-            states = {"OK": "sent", "INVALID_ARGUMENT": "dead"}
-            self.store.settle(message, states.get(outcome, "queued"))
-        cases = [m for m in due if m["dest"] == CASE]
-        if cases:
-            outcome = "sent"
+            self.store.settle([message], state)
+
+    def deliver_cases(self, messages: list[dict]) -> None:
+        if messages:
             try:
-                self.send_cases([json.loads(bytes(m["body"])) for m in cases])  # one batch
+                self.send_cases([json.loads(bytes(m["body"])) for m in messages])  # one batch
+                self.store.settle(messages, "sent")
             except OSError:
-                outcome = "queued"
-            for message in cases:
-                self.store.settle(message, outcome)
-        return len(due)
+                self.store.settle(messages, "queued")
 
     def work_once(self, block_ms: int | None = None) -> int | None:
         """One pass of the background work, if no other replica is doing it.
@@ -391,12 +396,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """
         if time.monotonic() - self.keys_at >= KEY_SECONDS:
             self.refresh_keys()  # every replica, since every replica checks signatures
-        if not self.store.db.try_lock(HOUSEKEEPING_LOCK):
-            return None
-        try:
+        with self.store.housekeeping() as mine:
+            if not mine:
+                return None
             return self.take_hits(block_ms) + self.run_searches() + self.deliver()
-        finally:
-            self.store.db.unlock(HOUSEKEEPING_LOCK)
 
     def work(self, stop: threading.Event) -> None:
         done = 0

@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 BANKS = ("A", "B", "C")
-BANK_TRANSFERS = ("GIRO", "MEPS+")  # the only payment types replayed, ingested and scored
+BANK_TRANSFERS = ("GIRO", "MEPS+")  # the only payment types replayed and ingested
 
 
 def log(service: str, **fields) -> None:
@@ -27,7 +27,11 @@ def log(service: str, **fields) -> None:
 
 
 def read_events(path: str | Path) -> Iterator[dict]:
-    """A workload's bank file as the events the ingestor would write to Kafka."""
+    """A workload's bank file as the events the ingestor would write to Kafka.
+
+    The file holds every payment type; only bank transfers are replayed and ingested.
+    """
     with Path(path).open() as source:
         for row in csv.DictReader(source):
-            yield row | {"amount": float(row["amount"])}
+            if row["payment_format"] in BANK_TRANSFERS:
+                yield row | {"amount": float(row["amount"])}

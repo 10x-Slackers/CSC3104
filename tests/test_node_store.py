@@ -25,7 +25,7 @@ def test_backoff_doubles_up_to_the_cap_with_full_jitter(monkeypatch):
 def test_a_chain_and_what_it_owes_are_stored_once():
     s = Store()
     for _ in range(2):  # the same chain from two searches, or delivered twice
-        s.save_chain("d1", "confirmed", b"chain", ["B", "C"], {"key": "d1", "kind": "chain"})
+        s.save_chain("d1", b"chain", ["B", "C"], {"key": "d1", "kind": "chain"})
     owed = [(m["dest"], m["key"]) for m in s.due_messages()]
     assert sorted(owed) == [("B", "d1"), ("C", "d1"), ("case", "chain:d1")]
 
@@ -34,11 +34,11 @@ def test_an_unacknowledged_message_waits_then_is_due_again(monkeypatch):
     s = Store()
     s.queue("B", "d1", b"chain")
     (message,) = s.due_messages()
-    s.settle(message, "queued")
+    s.settle([message], "queued")
     assert s.due_messages() == []  # backing off
     later(monkeypatch, 301)
     assert [m["attempts"] for m in s.due_messages()] == [1]
-    s.settle(s.due_messages()[0], "sent")
+    s.settle(s.due_messages(), "sent")
     assert s.due_messages() == []
 
 

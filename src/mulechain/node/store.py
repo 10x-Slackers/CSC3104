@@ -21,6 +21,7 @@ import hashlib
 import json
 import random
 import time
+from contextlib import contextmanager
 
 from mulechain.db import Db
 
@@ -29,8 +30,7 @@ CREATE TABLE IF NOT EXISTS searches (
   id TEXT PRIMARY KEY, incoming TEXT, outgoing TEXT, state TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, next_at DOUBLE PRECISION DEFAULT 0, started DOUBLE PRECISION);
 CREATE INDEX IF NOT EXISTS searches_due ON searches (state, next_at);
-CREATE TABLE IF NOT EXISTS chains (
-  digest TEXT PRIMARY KEY, state TEXT, chain BYTEA);
+CREATE TABLE IF NOT EXISTS chains (digest TEXT PRIMARY KEY, chain BYTEA);
 CREATE TABLE IF NOT EXISTS outbox (
   dest TEXT, key TEXT, body BYTEA, state TEXT DEFAULT 'queued',
   attempts INTEGER DEFAULT 0, next_at DOUBLE PRECISION DEFAULT 0, queued_at DOUBLE PRECISION,
@@ -52,6 +52,17 @@ def backoff(attempts: int) -> float:
 class Store:
     def __init__(self, url: str = ":memory:") -> None:
         self.db = Db(url, SCHEMA)
+        self.transaction = self.db.transaction
+
+    @contextmanager
+    def housekeeping(self):
+        """Yields True to the one replica that may do the background work right now."""
+        held = self.db.try_lock(HOUSEKEEPING_LOCK)
+        try:
+            yield held
+        finally:
+            if held:
+                self.db.unlock(HOUSEKEEPING_LOCK)
 
     # ---- searches
 
@@ -61,33 +72,37 @@ class Store:
         self.db.run(
             "INSERT INTO searches (id, incoming, outgoing, started) VALUES (?,?,?,?)"
             " ON CONFLICT DO NOTHING",
-            *(search_id, incoming, outgoing, time.time()),
+            search_id,
+            incoming,
+            outgoing,
+            time.time(),
         )
 
-    def due_searches(self, limit: int = 64) -> list[dict]:
+    def due_searches(self) -> list[dict]:
         now = time.time()
         return self.db.all(
             "SELECT * FROM searches WHERE state = 'pending' AND next_at <= ? AND started > ?"
-            " ORDER BY next_at LIMIT ?",
-            *(now, now - EXPIRY, limit),
+            " ORDER BY next_at LIMIT 64",
+            now,
+            now - EXPIRY,
         )
 
     def finish_search(self, search: dict, state: str) -> None:
         """Record an attempt's outcome; `pending` means try again after a backoff."""
         self.db.run(
             "UPDATE searches SET state = ?, attempts = attempts + 1, next_at = ? WHERE id = ?",
-            *(state, time.time() + backoff(search["attempts"]), search["id"]),
+            state,
+            time.time() + backoff(search["attempts"]),
+            search["id"],
         )
 
     # ---- chains and the outbox
 
-    def save_chain(
-        self, digest: str, state: str, chain: bytes, deliver_to: list[str], case: dict
-    ) -> None:
+    def save_chain(self, digest: str, chain: bytes, deliver_to: list[str], case: dict) -> None:
         """Store a chain once, with everything it owes, in one transaction."""
-        with self.db.transaction():
+        with self.transaction():
             new = self.db.run(
-                "INSERT INTO chains VALUES (?,?,?) ON CONFLICT DO NOTHING", digest, state, chain
+                "INSERT INTO chains VALUES (?,?) ON CONFLICT DO NOTHING", digest, chain
             )
             if new:
                 for bank in deliver_to:
@@ -98,29 +113,36 @@ class Store:
         """Owe `dest` a message; queuing the same one again changes nothing."""
         self.db.run(
             "INSERT INTO outbox (dest, key, body, queued_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
-            *(dest, key, body, time.time()),
+            dest,
+            key,
+            body,
+            time.time(),
         )
 
     def queue_case(self, message: dict) -> None:
         self.queue(CASE, f"{message['kind']}:{message['key']}", json.dumps(message).encode())
 
-    def due_messages(self, limit: int = 500) -> list[dict]:
+    def due_messages(self) -> list[dict]:
         return self.db.all(
             "SELECT dest, key, body, attempts FROM outbox WHERE state = 'queued' AND next_at <= ?"
-            " ORDER BY queued_at LIMIT ?",
-            *(time.time(), limit),
+            " ORDER BY queued_at LIMIT 500",
+            time.time(),
         )
 
-    def settle(self, message: dict, outcome: str) -> None:
+    def settle(self, messages: list[dict], state: str) -> None:
         """`sent`: acknowledged. `dead`: the receiver refused it, so stop. `queued`: retry later."""
-        self.db.run(
-            "UPDATE outbox SET state = ?, attempts = attempts + 1, next_at = ?"
-            " WHERE dest = ? AND key = ?",
-            *(outcome, time.time() + backoff(message["attempts"])),
-            *(message["dest"], message["key"]),
-        )
+        with self.transaction():
+            for message in messages:
+                self.db.run(
+                    "UPDATE outbox SET state = ?, attempts = attempts + 1, next_at = ?"
+                    " WHERE dest = ? AND key = ?",
+                    state,
+                    time.time() + backoff(message["attempts"]),
+                    message["dest"],
+                    message["key"],
+                )
 
-    # ---- peers' public keys, and the hit stream cursor
+    # ---- peers' public keys, and the hit stream position
 
     def peer_keys(self) -> dict[str, str]:
         return {row["bank"]: row["keys"] for row in self.db.all("SELECT * FROM peer_keys")}
@@ -128,7 +150,8 @@ class Store:
     def put_peer_keys(self, bank: str, keys: str) -> None:
         self.db.run(
             "INSERT INTO peer_keys VALUES (?,?) ON CONFLICT (bank) DO UPDATE SET keys = excluded.keys",
-            *(bank, keys),
+            bank,
+            keys,
         )
 
     def cursor(self) -> str:

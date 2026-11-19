@@ -5,22 +5,21 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from itertools import pairwise
 
-from conftest import settle
+from conftest import hit, leg
 from fastapi.testclient import TestClient
 
 from mulechain import summary
 from mulechain.case import app as case_app
 from mulechain.case.app import create_app, summarizer
+from mulechain.case.store import CaseStore
+from mulechain.evaluate import settle
 
 
 def test_an_alert_page_shows_own_payments_tokens_and_a_draft(nodes):
     settle(nodes)
-    store = nodes["B"].cases
-
-    def summarize(case):
-        return summary.handle(json.dumps(case | {"bank": "B"}))[1]["draft"]
-
-    client = TestClient(create_app(store, summarize))
+    client = TestClient(
+        create_app(nodes["B"].cases, lambda case: summary.handle(json.dumps(case))[1]["draft"])
+    )
     listed = client.get("/api/cases").json()
     assert [c["tier"] for c in listed] == [2, 2, 1, 1, 1]
     loop = next(c for c in listed if c["payments"] == ["p10", "p11"])
@@ -40,19 +39,11 @@ def test_an_alert_page_shows_own_payments_tokens_and_a_draft(nodes):
 
 
 def test_the_node_posts_batches_and_a_resent_batch_is_harmless():
-    from mulechain.case.store import CaseStore
-
-    client = TestClient(create_app(CaseStore(":memory:", "A")))
-    leg = {"payment_id": "p1", "direction": "out", "account": "A-1", "amount": 5.0}
-    hit = {
-        "key": "h1",
-        "kind": "hit",
-        "rule": "new_payee",
-        "legs": [leg | {"peer": "B", "token": "t1"}],
-    }
+    client = TestClient(create_app(CaseStore(":memory:", "A"), summarizer("")))
     for _ in range(2):
-        assert client.post("/messages", json=[hit]).json() == {"stored": 1}
+        assert client.post("/messages", json=[hit("h1", leg("p1"))]).json() == {"stored": 1}
     assert [c["payments"] for c in client.get("/api/cases").json()] == [["p1"]]
+    assert len(client.get("/api/cases/h1").json()["messages"]) == 1
     assert "No draft" in client.get("/cases/h1").text  # no summary service configured
 
 
@@ -69,10 +60,10 @@ def test_a_slow_or_broken_summary_service_only_costs_the_draft(monkeypatch):
     server = HTTPServer(("127.0.0.1", 0), Slow)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setattr(case_app, "SUMMARY_SECONDS", 0.2)
-    case = {"id": "c1"}
+    case = {"id": "c1", "bank": "A"}
     try:
-        assert summarizer(f"http://127.0.0.1:{server.server_port}", "A")(case) is None  # timeout
-        assert summarizer("http://127.0.0.1:1", "A")(case) is None  # nothing listening
+        assert summarizer(f"http://127.0.0.1:{server.server_port}")(case) is None  # timeout
+        assert summarizer("http://127.0.0.1:1")(case) is None  # nothing listening
     finally:
         release.set()
         server.shutdown()

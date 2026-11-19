@@ -6,14 +6,13 @@ import json
 import pytest
 from conftest import TINY
 
-from mulechain import ingestor, read_events
-from mulechain.replay import pacs008, transfers
+from mulechain import BANK_TRANSFERS, BANKS, ingestor, read_events
+from mulechain.replay import message, pacs008, transfers
 from mulechain.serverless import as_lambda
 
 
 def batch(*events):
-    header = {"MsgId": "m1", "CreDtTm": "2022-09-05T09:00:00Z", "NbOfTxs": str(len(events))}
-    return {"FIToFICstmrCdtTrf": {"GrpHdr": header, "CdtTrfTxInf": [pacs008(e) for e in events]}}
+    return message("m1", [pacs008(e) for e in events])
 
 
 def order(event):
@@ -21,16 +20,13 @@ def order(event):
 
 
 def test_replay_and_the_ingestor_rebuild_each_banks_events():
-    """Workload -> pacs.008 -> events gives every bank its bank-transfer events back."""
-    for bank in "ABC":
-        mine = [
-            e
-            for e in read_events(TINY / f"bank_{bank}.csv")
-            if e["payment_format"] in ("GIRO", "MEPS+")
-        ]
+    """Workload -> pacs.008 -> events gives every bank its events back."""
+    for bank in BANKS:
         sent = [t for t in transfers(TINY) if bank in (t["bank"], t["counterparty_bank"])]
         made = ingestor.events(batch(*sent), bank)
+        mine = list(read_events(TINY / f"bank_{bank}.csv"))
         assert sorted(made, key=order) == sorted(mine, key=order)
+        assert mine and all(e["payment_format"] in BANK_TRANSFERS for e in mine)  # no cheques
 
 
 def edit(path, value):
@@ -60,11 +56,11 @@ def edit(path, value):
 )
 def test_one_bad_transfer_rejects_the_whole_batch(change):
     first, second, *_ = (t for t in transfers(TINY) if t["bank"] == "B")
-    message = batch(first, second)
-    assert len(ingestor.events(copy.deepcopy(message), "B")) >= 2
-    change(message)
+    bad = batch(first, second)
+    assert len(ingestor.events(copy.deepcopy(bad), "B")) >= 2
+    change(bad)
     with pytest.raises((KeyError, TypeError, ValueError)):
-        ingestor.events(message, "B")
+        ingestor.events(bad, "B")
 
 
 def test_a_transfer_between_two_other_banks_is_rejected():

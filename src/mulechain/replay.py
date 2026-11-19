@@ -10,8 +10,7 @@ Patterns (docs/patterns.md): each bank has its own queue and sender, so a slow b
 delays only itself; a failed batch is sent again with capped exponential backoff and
 full jitter; and with --speed 0 the queues are bounded, which is back-pressure.
 
-An https:// URL is a Lambda function URL: requests are signed (SigV4) with whatever
-AWS role the process runs as.
+A Lambda function URL works too: those requests are signed (mulechain/serverless.py).
 """
 
 import argparse
@@ -28,12 +27,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import botocore.session
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-
-from mulechain import BANK_TRANSFERS, BANKS, log, read_events
+from mulechain import BANKS, log, read_events
 from mulechain.ingestor import BICS
+from mulechain.serverless import request_headers
 
 BATCH = 100  # transfers per pacs.008 message, at most
 BACKLOG = 1000  # --speed 0: transfers queued per bank, at most
@@ -43,11 +39,12 @@ def transfers(workload: Path) -> Iterator[dict]:
     """Each bank transfer once, from its `out` event, in time order across the banks."""
     banks = [read_events(workload / f"bank_{bank}.csv") for bank in BANKS]
     for e in heapq.merge(*banks, key=lambda e: e["event_time"]):
-        if e["direction"] == "out" and e["payment_format"] in BANK_TRANSFERS:
+        if e["direction"] == "out":
             yield e
 
 
 def pacs008(e: dict) -> dict:
+    """One transfer as a pacs.008 credit transfer."""
     return {
         "PmtId": {"EndToEndId": e["payment_id"]},
         "PmtTpInf": {"LclInstrm": {"Prtry": e["payment_format"]}},
@@ -60,46 +57,40 @@ def pacs008(e: dict) -> dict:
     }
 
 
+def message(message_id: str, batch: list[dict]) -> dict:
+    """A pacs.008 message: a header and its transfers."""
+    header = {"MsgId": message_id, "CreDtTm": batch[-1]["AccptncDtTm"], "NbOfTxs": str(len(batch))}
+    return {"FIToFICstmrCdtTrf": {"GrpHdr": header, "CdtTrfTxInf": batch}}
+
+
+def next_batch(todo: queue.Queue) -> tuple[list[dict], bool]:
+    """Whatever became due while the last batch was being sent; True at the workload's end."""
+    batch = [todo.get()]
+    while batch[-1] and len(batch) < BATCH and not todo.empty():
+        batch.append(todo.get())
+    return [t for t in batch if t], batch[-1] is None
+
+
 def send(bank: str, url: str, todo: queue.Queue, failed: threading.Event) -> None:
     """POST one bank's queue in batches, one at a time, so its events keep their order.
 
-    A batch is whatever became due while the last one was being sent. Anything but a
-    200 or a 400 sends the same batch again, after random(0, min(30 s, 2^attempt s)).
-    A 400 can never succeed, so it stops the replay.
+    Anything but a 200 or a 400 sends the same batch again, after
+    random(0, min(30 s, 2^attempt s)). A 400 can never succeed, so it stops the replay.
     """
     target = urlsplit(url)
     https = target.scheme == "https"
-    connection = (http.client.HTTPSConnection if https else http.client.HTTPConnection)(
-        target.netloc, timeout=35
-    )
-    signer = None
-    if https:  # <id>.lambda-url.<region>.on.aws
-        credentials = botocore.session.get_session().get_credentials()
-        signer = SigV4Auth(credentials, "lambda", target.hostname.split(".")[2])
+    connect = http.client.HTTPSConnection if https else http.client.HTTPConnection
+    connection = connect(target.netloc, timeout=35)
     for number in itertools.count(1):
-        batch = [todo.get()]
-        while batch[-1] and len(batch) < BATCH and not todo.empty():
-            batch.append(todo.get())
-        last = batch[-1] is None  # the end of the workload
-        batch = [t for t in batch if t]
+        batch, last = next_batch(todo)
         if not batch or failed.is_set():
             return
         message_id = f"replay-{bank}-{number:06d}"
-        header = {
-            "MsgId": message_id,
-            "CreDtTm": batch[-1]["AccptncDtTm"],
-            "NbOfTxs": str(len(batch)),
-        }
-        body = json.dumps({"FIToFICstmrCdtTrf": {"GrpHdr": header, "CdtTrfTxInf": batch}}).encode()
+        body = json.dumps(message(message_id, batch)).encode()
         for attempt in itertools.count():
             start = time.monotonic()
             try:
-                headers = {"Content-Type": "application/json"}
-                if signer:  # per attempt: a signature is valid for five minutes
-                    signed = AWSRequest("POST", url, data=body, headers=headers)
-                    signer.add_auth(signed)
-                    headers = dict(signed.headers)
-                connection.request("POST", target.path or "/", body, headers)
+                connection.request("POST", target.path or "/", body, request_headers(url, body))
                 reply = connection.getresponse()
                 status, text = reply.status, reply.read().decode()
             except Exception as error:  # noqa: BLE001 - any network or signing error: retry

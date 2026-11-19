@@ -63,24 +63,25 @@ class Context:
         raise Refused(code, details)
 
 
-def start(workload: str | Path, key_dir: str | Path) -> dict[str, Node]:
+class LocalNode(Node):
+    """A privacy node whose peers and case store are objects in this process."""
+
+    def __init__(self, bank: str, key_dir: Path, nodes: dict[str, "LocalNode"]) -> None:
+        (key_dir / "1").write_bytes(os.urandom(64))  # the bank's own first key
+        self.nodes, self.cases = nodes, CaseStore(":memory:", bank)
+        db = fakeredis.FakeValkey(decode_responses=True)
+        super().__init__(Bank(bank, db), Store(), key_dir, self.call_peer, self.cases.record)
+
+    def call_peer(self, peer: str, method: str, request, timeout: float):
+        return getattr(self.nodes[peer], method)(request, Context(self.name, timeout))
+
+
+def start(workload: str | Path, key_dir: str | Path) -> dict[str, LocalNode]:
     """Give each bank keys, a Valkey, a node and a case store; then score its events."""
-    nodes: dict[str, Node] = {}
+    nodes: dict[str, LocalNode] = {}
     for bank in BANKS:
         (Path(key_dir) / bank).mkdir()
-        (Path(key_dir) / bank / "1").write_bytes(os.urandom(64))  # the bank's own key
-        cases = CaseStore(":memory:", bank)
-
-        def call(peer: str, method: str, request, timeout: float, caller: str = bank):
-            return getattr(nodes[peer], method)(request, Context(caller, timeout))
-
-        def send_cases(messages: list[dict], cases: CaseStore = cases) -> None:
-            for message in messages:
-                cases.record(message)
-
-        db = fakeredis.FakeValkey(decode_responses=True)
-        nodes[bank] = Node(Bank(bank, db), Store(), Path(key_dir) / bank, call, send_cases)
-        nodes[bank].cases = cases
+        nodes[bank] = LocalNode(bank, Path(key_dir) / bank, nodes)
     for node in nodes.values():
         node.refresh_keys()  # key agreement: fetch the peers' public keys
     for bank, node in nodes.items():
@@ -90,6 +91,12 @@ def start(workload: str | Path, key_dir: str | Path) -> dict[str, Node]:
     return nodes
 
 
+def settle(nodes: dict[str, LocalNode]) -> None:
+    """Let every bank work until none has a hit to read, a search to run or a message to send."""
+    while sum(node.work_once() for node in nodes.values()):
+        pass
+
+
 @dataclass(eq=False)
 class Case:
     bank: str
@@ -97,18 +104,26 @@ class Case:
     ids: set[str]  # the bank's own payment IDs on the case
 
 
+def cases(nodes: dict[str, LocalNode]) -> list[Case]:
+    """Every bank's listed cases, as its analyst sees them."""
+    found = []
+    for bank, node in nodes.items():
+        payments = node.cases.payments()
+        found += [Case(bank, c["tier"], set(payments[c["id"]])) for c in node.cases.cases()]
+    return found
+
+
 def run(workload: str | Path) -> tuple[list[Case], dict[str, int]]:
     """Everything a cluster does for a replay; returns (cases, searches by final state)."""
     with tempfile.TemporaryDirectory() as key_dir:
         nodes = start(workload, key_dir)
-        while sum(node.work_once() for node in nodes.values()):
-            pass  # until no bank has a hit to read, a search to run or a message to send
-    cases, searches = [], Counter()
-    for bank, node in nodes.items():
-        payments = node.cases.payments()
-        cases += [Case(bank, c["tier"], set(payments[c["id"]])) for c in node.cases.cases()]
-        searches.update(row["state"] for row in node.store.db.all("SELECT state FROM searches"))
-    return cases, dict(sorted(searches.items()))
+        settle(nodes)
+    searches = Counter(
+        row["state"]
+        for node in nodes.values()
+        for row in node.store.db.all("SELECT state FROM searches")
+    )
+    return cases(nodes), dict(sorted(searches.items()))
 
 
 class Transfer(NamedTuple):
@@ -125,8 +140,13 @@ def load(workload: str | Path) -> tuple[dict[str, Transfer], dict[str, dict]]:
         with path.open() as source:
             for e in csv.DictReader(source):
                 if e["direction"] == "out":
+                    # interned: millions of rows share a few days and payment types
+                    day, payment_format = (
+                        sys.intern(e["event_time"][:10]),
+                        sys.intern(e["payment_format"]),
+                    )
                     transfers[e["payment_id"]] = Transfer(
-                        e["event_time"][:10], e["bank"], e["counterparty_bank"], e["payment_format"]
+                        day, e["bank"], e["counterparty_bank"], payment_format
                     )
     with (Path(workload) / "labels.csv").open() as source:
         labels = {row["payment_id"]: row for row in csv.DictReader(source)}
@@ -185,18 +205,18 @@ def score(
             row["caught_in_scope"] += reachable and caught
 
     in_scope = [p for p in counted if scope(p) == "in_scope"]
-    own_days = {p for p in transfers if in_split(day(p))}
-    own_flagged = own_days & flagged
+    split_payments = {p for p in transfers if in_split(day(p))}
+    split_flagged = split_payments & flagged
     per_bank_tier = Counter(
         f"{c.bank} tier {c.tier}" for c in cases if in_split(max(map(day, c.ids)))
     )
-    days = len({day(p) for p in own_days})
+    days = len({day(p) for p in split_payments})
     return {
         "patterns": {name: dict(row) for name, row in sorted(patterns.items())},
         "payment_recall": fraction(flagged.intersection(in_scope), in_scope),
         "laundering_by_scope": dict(sorted(Counter(map(scope, counted)).items())),
-        "precision": fraction(own_flagged & laundering, own_flagged),
-        "false_positive_rate": fraction(own_flagged - laundering, own_days),
+        "precision": fraction(split_flagged & laundering, split_flagged),
+        "false_positive_rate": fraction(split_flagged - laundering, split_payments),
         "cases_per_bank_per_day": {k: n / days for k, n in sorted(per_bank_tier.items())},
     }
 
@@ -210,13 +230,13 @@ def main() -> None:
     args = parser.parse_args()
     node_module.HOP_LIMIT = args.hop_limit
     with redirect_stdout(sys.stderr):
-        cases, searches = run(args.workload)
+        found, searches = run(args.workload)
     if args.cases:
-        listed = sorted((c.bank, c.tier, " ".join(sorted(c.ids))) for c in cases)
+        listed = sorted((c.bank, c.tier, " ".join(sorted(c.ids))) for c in found)
         report = {"searches": searches, "cases": listed}
     else:
         report = {"split": args.split, "searches": searches}
-        report |= score(cases, *load(args.workload), args.split)
+        report |= score(found, *load(args.workload), args.split)
     print(json.dumps(report, indent=2))
 
 

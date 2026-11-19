@@ -4,8 +4,9 @@ import socket
 
 import grpc
 import pytest
-from conftest import Authority, settle
+from conftest import Authority
 
+from mulechain.evaluate import settle
 from mulechain.node import protocol_pb2 as pb
 from mulechain.node.node import Mtls, identity, serve
 

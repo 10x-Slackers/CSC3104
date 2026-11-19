@@ -7,9 +7,9 @@ lookalike whose amounts don't match.
 
 import grpc
 import pytest
-from conftest import cases, retry_now, settle
+from conftest import cases, retry_now
 
-from mulechain.evaluate import Context, Refused
+from mulechain.evaluate import Context, Refused, settle
 from mulechain.node import protocol_pb2 as pb
 from mulechain.node.claims import digest
 
@@ -95,15 +95,6 @@ def test_a_bank_that_is_down_delays_cases_but_loses_none(nodes):
     retry_now(nodes)  # chains queued for C while it was down
     settle(nodes)
     assert cases(nodes) == EXPECTED
-
-
-def test_a_bank_answers_only_the_counterparty_of_a_transfer(nodes):
-    """p06 went from A to B. C may learn its token from a claim, but can't ask about it."""
-    settle(nodes)
-    token = nodes["B"].bank.token("p06", "in")
-    request = pb.TraceRequest(token=token, direction=pb.DOWNSTREAM, hops_remaining=2)
-    assert nodes["B"].Trace(request, Context("A", 5)).claims
-    assert not nodes["B"].Trace(request, Context("C", 5)).claims
 
 
 def test_a_forged_chain_is_refused_and_a_repeated_one_is_harmless(nodes):

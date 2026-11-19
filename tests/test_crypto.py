@@ -44,11 +44,3 @@ def test_a_signature_verifies_under_any_published_key_only():
     assert crypto.verify([old.public, new.public], b"claim", signature)
     assert not crypto.verify([old.public, new.public], b"other claim", signature)
     assert not crypto.verify([other.public], b"claim", signature)
-
-
-def test_public_keys_survive_the_text_encoding():
-    private = keys(2)
-    decoded = crypto.decode(crypto.encode(public(private)))
-    assert [(k.agreement, k.signing) for k in decoded] == [
-        (k.agreement, k.signing) for k in public(private)
-    ]

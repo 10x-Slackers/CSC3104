@@ -11,8 +11,29 @@ import json
 import os
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 Handle = Callable[[bytes | str], tuple[int, dict]]
+
+
+def request_headers(url: str, body: bytes) -> dict:
+    """Headers for a JSON POST, signed (SigV4) if `url` is a Lambda function URL.
+
+    The signature is made with whatever AWS role the process runs as, and is valid for
+    five minutes, so callers ask again for every request.
+    """
+    headers = {"Content-Type": "application/json"}
+    host = urlsplit(url).hostname or ""
+    if host.endswith(".on.aws"):  # <id>.lambda-url.<region>.on.aws
+        import botocore.session  # only needed on AWS
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        credentials = botocore.session.get_session().get_credentials()
+        signed = AWSRequest("POST", url, data=body, headers=headers)
+        SigV4Auth(credentials, "lambda", host.split(".")[2]).add_auth(signed)
+        headers = dict(signed.headers)
+    return headers
 
 
 def as_lambda(handle: Handle) -> Callable[[dict, object], dict]:
@@ -33,6 +54,7 @@ def as_lambda(handle: Handle) -> Callable[[dict, object], dict]:
 def serve(handle: Handle) -> None:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"  # keep-alive: replay reuses one connection
+        disable_nagle_algorithm = True  # or each reply waits ~40 ms for the client's ACK
 
         def do_GET(self) -> None:  # readiness probe
             self.reply(200, {"ok": True})

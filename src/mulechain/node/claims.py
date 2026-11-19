@@ -1,8 +1,8 @@
 """Link claims: what a bank signs, and how any bank checks a chain of them.
 
-A chain is nothing more than its signed claims. Its ID, its state (complete or cut)
-and which banks' rules backed it are all computed from the claims, so every bank
-that receives the same chain reaches the same answers without coordinating.
+A chain is nothing more than its signed claims. Its ID and its state (complete or cut)
+are computed from the claims, so every bank that receives the same chain reaches the
+same answers without coordinating. So is its tier, in each bank's case store.
 """
 
 import hashlib
@@ -58,11 +58,7 @@ def complete(claims: list[pb.LinkClaim]) -> bool:
     return not any(c.cut for c in claims) and all(not end or seen.count(end) > 1 for end in ends)
 
 
-def rule_backed(claims: list[pb.LinkClaim]) -> set[str]:
-    """Banks whose own rule linked an incoming transfer to an outgoing one."""
-    return {c.signer for c in claims if c.in_token and c.out_token}
-
-
 def digest(claims: list[pb.LinkClaim]) -> str:
-    """Content addressing: the same claims give the same chain ID at every bank."""
-    return hashlib.sha256(b"".join(sorted(claim_bytes(c) for c in claims))).hexdigest()
+    """Content addressing: the same claims give the same chain ID at every bank,
+    whichever bank assembled them and from whichever end."""
+    return hashlib.sha256(b"".join(sorted({claim_bytes(c) for c in claims}))).hexdigest()

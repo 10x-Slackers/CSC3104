@@ -32,8 +32,8 @@ cold = True  # the first request in this process; Lambda cold starts are measure
 
 def listed(items) -> str:
     """Join names: A; A and B; A, B and C."""
-    items = sorted(set(items))
-    return " and ".join(filter(None, [", ".join(items[:-1]), items[-1]]))
+    *first, last = sorted(set(items))
+    return f"{', '.join(first)} and {last}" if first else last
 
 
 def step(link: dict) -> str:
@@ -109,7 +109,7 @@ def handle(body: bytes | str) -> tuple[int, dict]:
     try:
         case = json.loads(body)
         case_id = case["id"]
-        status, reply = 200, {"source": "template", "draft": draft(case)}
+        status, reply = 200, {"draft": draft(case)}
     except (KeyError, TypeError, ValueError) as error:
         status, reply = 400, {"error": repr(error)}
     ms = round((time.monotonic() - start) * 1000, 1)

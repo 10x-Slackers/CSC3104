@@ -1,8 +1,9 @@
-"""What a privacy node knows about its own bank: a read-only view of the scorer's Valkey.
+"""What a privacy node knows about its own bank: the scorer's state in Valkey.
 
 The node keeps no copy, so it starts with the bank's full state and a restart loses
 nothing. Payment IDs, accounts and amounts read here stay inside the bank: only
-tokens go to peers, and own-leg details go to this bank's case service.
+tokens go to peers, and own-leg details go to this bank's case service. The one
+thing the node writes is `keys`, the peers' public keys the scorer needs.
 
 A transfer between two accounts of this bank has no token and no peer to ask, so the
 node walks through such intra-bank hops until it reaches a payment that crosses banks.
@@ -18,6 +19,15 @@ class Bank:
     def __init__(self, name: str, db: Valkey) -> None:
         """`db` needs decode_responses=True, as the scorer's client does."""
         self.name, self.db = name, db
+
+    def hits(self, after: str, block_ms: int | None) -> list[tuple[str, dict]]:
+        """The scorer's rule hits after stream position `after`, as (position, hit)."""
+        reply = self.db.xread({"hits": after}, count=500, block=block_ms)
+        return reply[0][1] if reply else []
+
+    def publish_keys(self, keys: dict[str, str]) -> None:
+        """Give the scorer each peer's public keys, to derive its pair keys from."""
+        self.db.hset("keys", mapping=keys)
 
     def peer(self, payment: str, direction: str) -> str:
         """The bank on the other side of one of this bank's payments."""

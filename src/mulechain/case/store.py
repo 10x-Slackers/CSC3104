@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS cases (
 -- Which case a transfer belongs to: "tok:<token>" or, for own payments, "pay:<payment id>".
 CREATE TABLE IF NOT EXISTS refs (ref TEXT PRIMARY KEY, case_id TEXT);
 CREATE TABLE IF NOT EXISTS messages (
-  key TEXT, kind TEXT, case_id TEXT, tier INTEGER, state TEXT, rule TEXT, waiting TEXT,
-  links TEXT, received_at DOUBLE PRECISION, PRIMARY KEY (key, kind));
+  key TEXT, kind TEXT, case_id TEXT, rule TEXT, waiting TEXT, links TEXT,
+  received_at DOUBLE PRECISION, PRIMARY KEY (key, kind));
 CREATE TABLE IF NOT EXISTS legs (
   payment_id TEXT, direction TEXT, account TEXT, amount DOUBLE PRECISION, peer TEXT,
   token TEXT, case_id TEXT, PRIMARY KEY (payment_id, direction));
@@ -70,8 +70,16 @@ class CaseStore:
     def __init__(self, url: str, bank: str) -> None:
         self.db, self.bank = Db(url, SCHEMA), bank
 
-    def record(self, message: dict) -> dict:
-        """Store one message from the node and return the case it belongs to."""
+    def record(self, messages: list[dict]) -> list[dict]:
+        """Store a batch of the node's messages; returns the case each one belongs to.
+
+        One transaction for the batch, under an advisory lock so that two replicas
+        can't both start a case for the same transfer.
+        """
+        with self.db.transaction(lock=JOIN_LOCK):
+            return [self._record(message) for message in messages]
+
+    def _record(self, message: dict) -> dict:
         key, kind, legs = message["key"], message["kind"], message["legs"]
         links = message.get("links", [])
         new_tier = tier(self.bank, message)
@@ -84,35 +92,42 @@ class CaseStore:
         )
         refs = [ref for ref in refs if ref != "tok:"]
         now = time.time()
-        with self.db.transaction(lock=JOIN_LOCK):
-            seen = self.db.all("SELECT case_id FROM messages WHERE key = ? AND kind = ?", key, kind)
-            if seen:  # a repeat: nothing changes
-                return self.db.all("SELECT * FROM cases WHERE id = ?", seen[0]["case_id"])[0]
-            case = self._join(refs, key, now)
-            if new_tier > case["tier"]:
-                case["reviewed"] = 0  # a case that got more serious needs another look
-            if new_tier == 2 and not case["alerted_at"]:
-                case["alerted_at"] = now  # one alert per case, however many chains join it
-            case["tier"] = max(case["tier"], new_tier)
-            case["state"] = min(case["state"], state, key=STATES.index)
+        seen = self.db.all("SELECT case_id FROM messages WHERE key = ? AND kind = ?", key, kind)
+        if seen:  # a repeat: nothing changes
+            return self.db.all("SELECT * FROM cases WHERE id = ?", seen[0]["case_id"])[0]
+        case = self._join(refs, key, now)
+        if new_tier > case["tier"]:
+            case["reviewed"] = 0  # a case that got more serious needs another look
+        if new_tier == 2 and not case["alerted_at"]:
+            case["alerted_at"] = now  # one alert per case, however many chains join it
+        case["tier"] = max(case["tier"], new_tier)
+        case["state"] = min(case["state"], state, key=STATES.index)
+        self.db.run(
+            "UPDATE cases SET tier = ?, state = ?, alerted_at = ?, bookmarked = ?, reviewed = ?"
+            " WHERE id = ?",
+            *(case[f] for f in ("tier", "state", "alerted_at", "bookmarked", "reviewed", "id")),
+        )
+        self.db.run(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+            key,
+            kind,
+            case["id"],
+            rule,
+            message.get("waiting_for"),
+            json.dumps(links),
+            now,
+        )
+        for ref in refs:
+            self.db.run("INSERT INTO refs VALUES (?,?) ON CONFLICT DO NOTHING", ref, case["id"])
+        for leg in legs:
             self.db.run(
-                "UPDATE cases SET tier = ?, state = ?, alerted_at = ?, bookmarked = ?,"
-                " reviewed = ? WHERE id = ?",
-                *(case[f] for f in ("tier", "state", "alerted_at", "bookmarked", "reviewed", "id")),
+                "INSERT INTO legs VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                *(
+                    leg[f]
+                    for f in ("payment_id", "direction", "account", "amount", "peer", "token")
+                ),
+                case["id"],
             )
-            self.db.run(
-                "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)",
-                *(key, kind, case["id"], new_tier, state, rule),
-                *(", ".join(message.get("waiting_for", [])), json.dumps(links), now),
-            )
-            for ref in refs:
-                self.db.run("INSERT INTO refs VALUES (?,?) ON CONFLICT DO NOTHING", ref, case["id"])
-            for leg in legs:
-                self.db.run(
-                    "INSERT INTO legs VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
-                    *(leg[f] for f in ("payment_id", "direction", "account", "amount")),
-                    *(leg["peer"], leg["token"], case["id"]),
-                )
         return case
 
     def _join(self, refs: list[str], key: str, now: float) -> dict:
@@ -124,10 +139,10 @@ class CaseStore:
             *refs,
         )
         if not found:
-            self.db.run(
-                "INSERT INTO cases (id, created_at, tier, state) VALUES (?,?,0,'hit')", key, now
-            )
-            return self.db.all("SELECT * FROM cases WHERE id = ?", key)[0]
+            case = {"id": key, "created_at": now, "tier": 0, "state": "hit", "alerted_at": None}
+            case |= {"bookmarked": 0, "reviewed": 0, "merged_into": None}
+            self.db.run("INSERT INTO cases VALUES (?,?,?,?,?,?,?,?)", *case.values())
+            return case
         case, *others = found
         for other in others:
             for table in ("refs", "messages", "legs"):
@@ -137,25 +152,25 @@ class CaseStore:
             self.db.run("UPDATE cases SET merged_into = ? WHERE id = ?", case["id"], other["id"])
             case["tier"] = max(case["tier"], other["tier"])
             case["state"] = min(case["state"], other["state"], key=STATES.index)
-            case["alerted_at"] = min(
-                filter(None, (case["alerted_at"], other["alerted_at"])), default=None
-            )
+            alerts = [c["alerted_at"] for c in (case, other) if c["alerted_at"]]
+            case["alerted_at"] = min(alerts, default=None)
             case["bookmarked"] = max(case["bookmarked"], other["bookmarked"])
             case["reviewed"] = min(case["reviewed"], other["reviewed"])
         return case
 
-    def cases(self, limit: int | None = None) -> list[dict]:
+    def cases(self, limit: int = 10**9) -> list[dict]:
         """Open cases, most urgent first: alerts, then Tier 1 by the number of this bank's
         rules that fired, then by amount, then oldest first."""
         return self.db.all(
-            "SELECT * FROM (SELECT c.*,"
-            " (SELECT COUNT(DISTINCT rule) FROM messages m WHERE m.case_id = c.id) AS rules,"
-            " (SELECT COALESCE(SUM(amount), 0) FROM legs l WHERE l.case_id = c.id) AS amount,"
-            " (SELECT MAX(waiting) FROM messages m WHERE m.case_id = c.id) AS waiting"
-            " FROM cases c WHERE merged_into IS NULL AND tier > 0) listed"
-            " ORDER BY tier DESC, CASE WHEN tier = 1 THEN rules END DESC,"
-            " CASE WHEN tier = 1 THEN amount END DESC, created_at, id LIMIT ?",
-            limit or 10**9,
+            "SELECT c.*, m.rules, m.waiting, l.amount FROM cases c"
+            " JOIN (SELECT case_id, COUNT(DISTINCT rule) AS rules, MAX(waiting) AS waiting"
+            "  FROM messages GROUP BY case_id) m ON m.case_id = c.id"
+            " JOIN (SELECT case_id, SUM(amount) AS amount FROM legs GROUP BY case_id) l"
+            "  ON l.case_id = c.id"
+            " WHERE c.merged_into IS NULL AND c.tier > 0"
+            " ORDER BY c.tier DESC, CASE WHEN c.tier = 1 THEN m.rules END DESC,"
+            " CASE WHEN c.tier = 1 THEN l.amount END DESC, c.created_at, c.id LIMIT ?",
+            limit,
         )
 
     def payments(self) -> dict[str, list[str]]:
@@ -179,7 +194,9 @@ class CaseStore:
             " WHERE case_id = ? ORDER BY payment_id, direction",
             case_id,
         )
-        return found[0] | {"messages": messages, "legs": legs, "links": flow_order(links)}
+        waiting = next((m["waiting"] for m in messages if m["waiting"]), None)
+        seen = {"messages": messages, "legs": legs, "links": flow_order(links)}
+        return found[0] | {"bank": self.bank, "waiting": waiting} | seen
 
     def toggle(self, case_id: str, flag: str) -> None:
         """Flip the analyst's `bookmarked` or `reviewed` flag."""

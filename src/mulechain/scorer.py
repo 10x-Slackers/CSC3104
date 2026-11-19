@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import signal
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -39,7 +40,7 @@ from decimal import Decimal
 from confluent_kafka import Consumer, KafkaException
 from valkey import Valkey
 
-from mulechain import BANK_TRANSFERS, crypto, log
+from mulechain import crypto, log
 from mulechain.ingestor import topic
 
 # The four rules. Amount ratios are outgoing / incoming on one account.
@@ -59,10 +60,9 @@ class Scorer:
     def process(self, e: dict) -> dict:
         """Score one event and write its state. Returns the links and hits it made."""
         made = {"links": [], "hits": []}
-        if e["payment_format"] in BANK_TRANSFERS:
-            tx = self.db.pipeline(transaction=True)  # MULTI ... EXEC: all or nothing
-            self._score(e, tx, made)
-            tx.execute()
+        tx = self.db.pipeline(transaction=True)  # MULTI ... EXEC: all or nothing
+        self._score(e, tx, made)
+        tx.execute()
         return made
 
     def _score(self, e: dict, tx, made: dict) -> None:
@@ -70,7 +70,7 @@ class Scorer:
         now = datetime.fromisoformat(e["event_time"]).timestamp()
 
         # 1. This bank's side of the payment, and its token if it crosses banks.
-        own = {k: e[k] for k in ("account", "amount", "event_time", "counterparty_bank")}
+        own = {k: e[k] for k in ("account", "amount", "counterparty_bank")}
         if e["counterparty_bank"] != self.bank:
             tokens = [
                 crypto.token(k, payment).hex() for k in self.pair_keys(e["counterparty_bank"])
@@ -113,7 +113,7 @@ class Scorer:
             made["links"].append(pair)
             if chain:  # only chain links are hits; a fast link alone never makes a case
                 flagged = True
-                self._hit(tx, made, "chain", account, *pair)
+                self._hit(tx, made, "chain", outgoing=pair[1], incoming=pair[0])
 
         # 4. New payee and quick repeat: one entry per payer and payee, kept forever.
         if direction == "out":
@@ -122,9 +122,9 @@ class Scorer:
             last_ts, last_flagged = map(float, last.split(":")) if last else (None, 0)
             if cross and last is None:
                 flagged = True
-                self._hit(tx, made, "new_payee", account, payment)
+                self._hit(tx, made, "new_payee", payment)
             elif cross and last_flagged and 0 <= now - last_ts <= REPEAT_WINDOW:
-                self._hit(tx, made, "quick_repeat", account, payment)
+                self._hit(tx, made, "quick_repeat", payment)
             if last is None or now >= last_ts:  # a late, older payment keeps the newer entry
                 tx.set(f"last:{account}:{payee}", f"{now:.0f}:{int(flagged)}")
 
@@ -134,13 +134,11 @@ class Scorer:
         tx.zadd(f"win:{account}", {member: now})
         tx.expire(f"win:{account}", TTL)
 
-    def _hit(self, tx, made: dict, rule: str, account: str, *payments: str) -> None:
+    def _hit(self, tx, made: dict, rule: str, outgoing: str, incoming: str = "") -> None:
         """Append a rule hit to the stream the privacy node reads."""
-        hit_id = hit_identity(self.bank, rule, *payments)
-        tx.xadd(
-            "hits",
-            {"id": hit_id, "rule": rule, "account": account, "payments": json.dumps(payments)},
-        )
+        payments = [incoming, outgoing] if incoming else [outgoing]
+        hit = {"id": hit_identity(self.bank, rule, *payments), "rule": rule}
+        tx.xadd("hits", hit | {"incoming": incoming, "outgoing": outgoing})
         tx.expire("hits", TTL)
         made["hits"].append(rule)
 
@@ -197,17 +195,12 @@ def main() -> None:
             "queued.max.messages.kbytes": 16384,  # 16 MiB prefetch, not the 64 MiB default
         }
     )
-    running = True
-
-    def stop(*_) -> None:
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
     consumer.subscribe([topic(bank)])
     try:
-        while running:
+        while not stop.is_set():
             message = consumer.poll(1)
             if message is None:
                 continue

@@ -13,12 +13,6 @@ from mulechain import evaluate
 TINY = Path(__file__).parent.parent / "workloads" / "tiny"
 
 
-def settle(nodes) -> None:
-    """Let every bank work until nothing is left to do."""
-    while sum(node.work_once() for node in nodes.values()):
-        pass
-
-
 def retry_now(nodes) -> None:
     """Skip the backoff waits."""
     for node in nodes.values():
@@ -28,11 +22,24 @@ def retry_now(nodes) -> None:
 
 def cases(nodes) -> list[tuple[str, int, str]]:
     """(bank, tier, the bank's own payment IDs) per case, as each bank's analyst sees them."""
-    found = []
-    for bank, node in nodes.items():
-        payments = node.cases.payments()
-        found += [(bank, c["tier"], " ".join(payments[c["id"]])) for c in node.cases.cases()]
-    return sorted(found)
+    return sorted((c.bank, c.tier, " ".join(sorted(c.ids))) for c in evaluate.cases(nodes))
+
+
+def leg(payment, direction="out", amount=100.0, token=""):
+    """One of bank A's own payments, as its node describes it to the case service."""
+    token = token or f"t-{payment}"
+    return {
+        "payment_id": payment,
+        "direction": direction,
+        "account": "A-1",
+        "amount": amount,
+        "peer": "B",
+        "token": token,
+    }
+
+
+def hit(key, *legs, rule="new_payee"):
+    return {"key": key, "kind": "hit", "rule": rule, "legs": list(legs)}
 
 
 @pytest.fixture
