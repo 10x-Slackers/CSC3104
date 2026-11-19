@@ -67,7 +67,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
-| Alert tiers ([case.md](case.md#cases-and-alerts)) | Cindy, Zane → Jia Rui | Rule-backed claim, Tier 1 vs Tier 2, promotion; thresholds come from the offline sweep | **draft**; the case tests check `m1` Tier 1 at B only, `o1` and `v1` Tier 2 at every bank | Wed 4 Nov |
+| Alert tiers ([case.md](case.md#cases-and-alerts)) | Cindy, Isaac → Jia Rui | Rule-backed claim, Tier 1 vs Tier 2, promotion; thresholds come from the offline sweep | **draft**; the case tests check `m1` Tier 1 at B only, `o1` and `v1` Tier 2 at every bank | Wed 4 Nov |
 | Case → summary service ([summary](case.md#summary-service)) | Jia Rui (both sides); the function URL: Isaac | JSON in and out, 2 s timeout, failure = no draft | **draft**; sample in `apps/summary/tests/test_summary.py` | Fri 6 Nov |
 
 Also part of: [Node → case service](protocol.md#interfaces), [`check_result`](security.md#interfaces).

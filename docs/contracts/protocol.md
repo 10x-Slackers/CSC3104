@@ -32,7 +32,7 @@ sequenceDiagram
   B->>C: Deliver(chain)
 ```
 
-Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. A detection with an intra-bank leg is not searched: intra-bank transfers have no pairwise token.
+Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. Intra-bank transfers have no pairwise token, so with `--valkey-url` a detection with an intra-bank leg is searched from the cross-bank payments its intra-bank hops lead to ([Searches from Valkey](#searches-from-valkey)); in CSV and integrated mode it is not searched.
 
 ## Messages
 
@@ -109,7 +109,7 @@ When results combine, the worst state wins, in this order: confirmed < partial <
 | no-match | A queried bank does not hold the token for that pair and direction (or the sender is not in the pair) |
 | partial | Cut by the hop limit or the branching cap. **Final**: stored and delivered as partial evidence |
 | failed | A peer rejected or failed the query (any gRPC error other than `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `ABORTED` or `DEADLINE_EXCEEDED`). Final, not retried, not stored |
-| pending | A needed bank was unreachable. Claims from available banks are kept; the search is retried by housekeeping |
+| pending | A needed bank was unreachable, or a peer had no match within the ingestion grace (`--ingestion-grace-seconds`). No claims are kept; housekeeping re-runs the whole search |
 | timed-out | The deadline passed. Retried by housekeeping |
 | invalid-claim | A signature, signer, token continuity, query ID or recipient check failed. Never stored as a chain or delivered; its search row keeps no digest |
 
@@ -129,7 +129,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 ## Failure contract
 
-- A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps the claims other banks gave, and no chain row is created. Searches that don't need that bank keep going.
+- A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps no claims and no chain row is created. Searches that don't need that bank keep going.
 - **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search that is due (see Retries), then redelivers every unacknowledged outbox row. An error in one search is logged and the pass carries on with the rest and with delivery. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
 - **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, since they are in PostgreSQL (`--db`).
 - **Dead letter:** a delivery the receiver rejects with `INVALID_ARGUMENT` is marked `dead` in the outbox and logged, instead of being resent every pass. Other errors stay in the outbox and are retried. A later upgrade of the same chain clears the mark, since it is a new message.
@@ -155,7 +155,7 @@ Own-leg details travel only inside the bank, never in a peer message. The case s
 
 ### Searches from Valkey
 
-With `--valkey-url` the node reads the scorer's keys ([streaming.md](streaming.md#valkey-layout-draft-cindy--zane)) and keeps no copy: `tok:` for peer lookups, `pay:` for the bank to ask next and for own legs, `link:` for onward and backward links. It reads the `hits` stream in the consumer group `privacy-node` (consumer name: the pod's hostname), so replicas share the hits; a hit is acknowledged only after its search and case messages are stored (a `local` message is queued later, after the ingestion grace). A consumer reads its own unacknowledged hits again first (left by an error), then claims (`XAUTOCLAIM`) any another consumer has left unacknowledged for 60 s, since a replaced pod gets a new name. A hit whose `hit:` or `pay:` entries have expired is logged and acknowledged, so it can't block the hits behind it. If Valkey can't be reached while answering a `Trace`, the node returns `UNAVAILABLE`, so the asker's search stays pending and is retried. Each `chain` hit starts a search from its link. If an end of the link doesn't yet reach a cross-bank payment, housekeeping looks again for the ingestion grace period: the intra-bank link it needs may be on another account, written later by another scorer replica, and such a link raises no hit. Known limitation: the hit is acknowledged while its recheck is only in memory, so a pod restart before the recheck starts a search, or posts its `local` message, drops it, even if the missing link has arrived; a later hit covering the path still starts the search. Searches start from chain hits only: the fast rule writes no hit, but every fast link between two cross-bank payments is also a chain link.
+With `--valkey-url` the node reads the scorer's keys ([streaming.md](streaming.md#valkey-layout-draft-cindy--isaac)) and keeps no copy: `tok:` for peer lookups, `pay:` for the bank to ask next and for own legs, `link:` for onward and backward links. It reads the `hits` stream in the consumer group `privacy-node` (consumer name: the pod's hostname), so replicas share the hits; a hit is acknowledged only after its search and case messages are stored (a `local` message is queued later, after the ingestion grace). A consumer reads its own unacknowledged hits again first (left by an error), then claims (`XAUTOCLAIM`) any another consumer has left unacknowledged for 60 s, since a replaced pod gets a new name. A hit whose `hit:` or `pay:` entries have expired is logged and acknowledged, so it can't block the hits behind it. If Valkey can't be reached while answering a `Trace`, the node returns `UNAVAILABLE`, so the asker's search stays pending and is retried. Each `chain` hit starts a search from its link. If an end of the link doesn't yet reach a cross-bank payment, housekeeping looks again for the ingestion grace period: the intra-bank link it needs may be on another account, written later by another scorer replica, and such a link raises no hit. Known limitation: the hit is acknowledged while its recheck is only in memory, so a pod restart before the recheck starts a search, or posts its `local` message, drops it, even if the missing link has arrived; a later hit covering the path still starts the search. Searches start from chain hits only: the fast rule writes no hit, but every fast link between two cross-bank payments is also a chain link.
 
 **Intra-bank hops:** when a link reaches an intra-bank payment, the node carries on from that payment's other leg, up to 4 internal hops, until it reaches a cross-bank payment. So B's one claim links the cross-bank payment in to the cross-bank payment out, and the internal hops never leave the bank. A chain hit whose money starts or stays inside the bank (no cross-bank payment at one end) starts no search; it is posted as a `local` message after the ingestion grace.
 

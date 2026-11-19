@@ -68,7 +68,7 @@ Examples: `866bab90f796f92f,1,0,FAN-OUT,,,` is in attempt 0; `0c0c5b0ee33a7df5,1
 
 ## Planted scenarios (fixture only)
 
-`prepare.py` no longer plants chains; the fixture's are hand-written. They **cross banks on every hop** and are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). **pending work:** with the alert tiers, a chain alerts (Tier 2) only when at least two banks' rules link its transfers, so a 2-transfer chain, which only the middle bank's rule links, is not a Tier 2 alert. Hits that link nothing, such as a new payee hit on a fixture payment (the fixture has no payment history), are Tier 1 cases at that bank.
+`prepare.py` no longer plants chains; the fixture's are hand-written. They **cross banks on every hop** and are the deterministic acceptance suite, never detection-quality evidence, because they use the fast rule's own band. The expected results are **draft**: they depend on decisions in [protocol.md](protocol.md) and [case.md](case.md). With the alert tiers, a chain alerts (Tier 2) only when at least two banks' rules link its transfers, so a 2-transfer chain, which only the middle bank's rule links, is not a Tier 2 alert. Hits that link nothing, such as a new payee hit on a fixture payment (the fixture has no payment history), are Tier 1 cases at that bank.
 
 | Scenario | Shape | Expected result |
 | --- | --- | --- |
