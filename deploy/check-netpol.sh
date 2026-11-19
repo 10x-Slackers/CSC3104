@@ -4,8 +4,11 @@
 # Probes wait 10 s: k3s and the VPC CNI apply a new pod's egress policy a few seconds after it starts.
 set -uo pipefail
 
-probe() { # <namespace> <host:port> <expect: open|blocked>
-  got=$(kubectl run "probe-$RANDOM" -n "$1" --rm -i --quiet --restart=Never --image=busybox:1.37 -- \
+probe() { # <namespace> <host:port> <expect: open|blocked>, from a pod the bank namespaces' restricted PSS admits
+  got=$(kubectl run "probe-$RANDOM" -n "$1" --rm -i --quiet --restart=Never --image=busybox:1.37 --override-type=json \
+    --overrides '[{"op": "add", "path": "/spec/containers/0/securityContext", "value": {"runAsNonRoot": true,
+      "runAsUser": 65532, "allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]},
+      "seccompProfile": {"type": "RuntimeDefault"}}}]' -- \
     sh -c "sleep 10; nc -z -w 3 ${2%:*} ${2#*:} && echo open || echo blocked" 2>/dev/null)
   check "$1" "$2" "$3"
 }

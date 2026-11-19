@@ -4,9 +4,11 @@ Owner: Isaac · Partners: every owner (per-service settings), Caleb (NetworkPoli
 
 > [!NOTE]
 > **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Hardening:** per-path and per-store NetworkPolicies; PSS `warn: restricted`; k3s secrets encryption.
+> - **Hardening:** per-path and per-store NetworkPolicies; k3s secrets encryption.
 
 **HA flag:** the chart's `ha` value runs a bank with replicas: Kafka 3 brokers (replication 3, `min.insync.replicas` 2, the offsets and transaction-state topics likewise), PostgreSQL 3 instances (a primary and two streaming replicas with automatic failover) and privacy node 2. `install.sh` sets it for the banks in `HA`: bank A on k3d (`k3d-up.sh`), which is one node, so failover there is pod-level only; every bank on EKS (`eks-up.sh`). Set it on a fresh bank: turning it on for a running one leaves the existing topics at replication 1, below `min.insync.replicas` 2, so every write fails.
+
+**Pod security:** `install.sh` labels each bank namespace with the restricted Pod Security Standard: `enforce`, so Kubernetes rejects a non-compliant pod, and `warn`, so `helm` says why for the chart's own Deployments. A rejected Kafka or PostgreSQL pod shows in its operator's events and logs (and, for Kafka, the `StrimziPodSet` status), and `install.sh` then waits out its 15-minute `kubectl wait`. The chart's pods take their settings from `_helpers.tpl`, CloudNativePG's comply as shipped, and Strimzi runs with `STRIMZI_POD_SECURITY_PROVIDER_CLASS=restricted`. `replay` isn't labelled: on k3d its Job mounts a `hostPath` volume, which the profile forbids, and EKS is left the same to keep one install path.
 
 **EKS:** the account is an AWS Academy Learner Lab, which can't create IAM roles, so everything runs as the pre-made `LabRole` and Pod Identity is dropped. Pods take the role from the node's metadata service instead. The bank namespaces' default-deny policy blocks it (probed in `check-netpol.sh`), though a new pod may get through in the seconds before its policy applies. `deploy/eks-up.sh` sets it all up with the same chart as k3d (Environments, below), passing each bank's AWS endpoints from Terraform's `bank_values` output (`--set-json aws=...`). A bank found there runs no ingestor, summary or Valkey pods: the ingestor and summary service are Lambda function URLs (zips built by `deploy/lambda-zips.sh`) and Valkey is ElastiCache (Platform components, below).
 
