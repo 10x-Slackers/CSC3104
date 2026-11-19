@@ -32,7 +32,7 @@ sequenceDiagram
   B->>C: Deliver(chain)
 ```
 
-Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. Intra-bank transfers have no pairwise token, so for a detection with an intra-bank leg the node first follows the intra-bank hops to the cross-bank payments beyond them and searches from those ([Searches from Valkey](#searches-from-valkey)).
+Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. Intra-bank transfers have no pairwise token, so with `--valkey-url` a detection with an intra-bank leg is searched from the cross-bank payments its intra-bank hops lead to ([Searches from Valkey](#searches-from-valkey)).
 
 ## Messages
 
@@ -129,7 +129,7 @@ Only `confirmed` and `partial` results become chain rows and are delivered. A la
 
 ## Failure contract
 
-- A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps no claims and no chain row is created, and housekeeping re-runs it from the start. Searches that don't need that bank keep going.
+- A missing bank can't confirm an unknown link. A search that needs it becomes **pending**; it keeps no claims and no chain row is created. Searches that don't need that bank keep going.
 - **Resuming after recovery:** housekeeping (every 10 s) re-runs every pending or timed-out search that is due (see Retries), then redelivers every unacknowledged outbox row. An error in one search is logged and the pass carries on with the rest and with delivery. Tested: C offline → pending; C back → confirmed and stored at A, B and C.
 - **Initiator restart:** pending searches and outbox rows are durable, so they resume after a restart, since they are in PostgreSQL (`--db`).
 - **Dead letter:** a delivery the receiver rejects with `INVALID_ARGUMENT` is marked `dead` in the outbox and logged, instead of being resent every pass. Other errors stay in the outbox and are retried. A later upgrade of the same chain clears the mark, since it is a new message.

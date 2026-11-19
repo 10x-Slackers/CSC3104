@@ -52,12 +52,6 @@ Each event that writes a link or a hit logs one JSON line to stdout, for latency
 `kafka_ts` is the record's Kafka timestamp, set when the ingestor wrote it, and `ts` is
 when the scorer's Valkey write finished. Errors are logged as `level: error` lines.
 
-The privacy node's integrated mode (`--bootstrap-servers`, [Search handoff](#search-handoff))
-still runs the older in-memory path in-process (`consume()` with `require_replay`): there,
-a restart needs a full replay with a fresh group, offsets commit synchronously, and
-assignment rejects resumed offsets or several partitions. The deployed node doesn't use
-it: it reads Valkey (`--valkey-url`).
-
 ## Detection rule
 
 The rule indicates suspicion, not proven laundering. Start with a single-currency linear-chain fixture, and label unsupported cases explicitly.
@@ -75,12 +69,12 @@ Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` 
 
 | Rule | Starting thresholds | Basis | Output |
 | --- | --- | --- | --- |
-| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link (no hit, so no search of its own) |
+| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link |
 | Chain (slow pass-through) | Bank transfer in and out of one account, out/in 0.90–1.10 within 72 h; at least one of the two payments is with another bank | B-4(i) "high velocity of funds", B-5(iv) "within a short period"; Altman's 90th-percentile hop delay is 69.7 h | Local link; starts a search |
 | New payee | A bank transfer to an account at another bank that this customer has never paid | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
 
-- Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag. The planted acceptance chains use its band, but their links are chain links too.
+- Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag.
 - Bank transfers carry 87% of Altman's laundering but 12% of transfers, a dataset artefact; the payment-type filter is reported as dev-tuned. Cheque, card and cash laundering, mostly from bank-70 hub accounts whose laundering payments look like their ordinary ones, is out of reach of any rule.
 - **Exploratory sweep** (Macarius, 31 Oct, re-run 7 Nov on the offline evaluator's definitions; a scratchpad script, not the offline evaluator; amounts in SGD, three banks, bank-transfer history, every hit counted as caught; comparisons on HI-Small's dev split):
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,877 to 796 a day) for 0.7 points of recall.
@@ -157,10 +151,6 @@ trip and writes 1,000 entries per `MULTI`/`EXEC`. A bank holds roughly 350,000�
 10 s per pass for a whole bank, which will show as lag in experiment 12 and stays well
 under librdkafka's `max.poll.interval.ms` (300 s).
 
-Integrated mode still keeps its own in-memory `TokenIndex` in the privacy node
-(`add()`/`lookup()` with references, `--max-token-references` as a fail-stop bound);
-the deployed node looks tokens up in Valkey.
-
 ## Search handoff
 
 Integrated mode runs Role 2's consumer inside the privacy-node process. Use
@@ -178,8 +168,10 @@ search loop starts each traceable candidate once per process using its stable
 gRPC messages contain tokens/claims, never these raw local references.
 
 Candidates and token/link state remain in memory, not in the node's SQLite
-protocol store. A crash after offset commit but before search requires full
-replay with a fresh group; there is no atomic durable handoff or exactly-once
+protocol store: its own `TokenIndex` (`add()`/`lookup()` with references,
+`--max-token-references` as a fail-stop bound). Offsets commit synchronously, and
+`consume()` with `require_replay` rejects resumed offsets or several partitions.
+A crash after offset commit but before search requires full replay with a fresh group; there is no atomic durable handoff or exactly-once
 guarantee. Role 3's existing pending/timed-out search retries and result outbox
 are unchanged.
 
@@ -202,7 +194,7 @@ The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`) and the privacy
 - **Repeats:** a resent event (same `ce_id`) builds the same `win:` member, so the scorer finds it in the window and skips it. No separate dedup key. `pay:`/`tok:` writes are idempotent.
 - **One transaction per event:** the scorer reads first, then writes all keys for the event in one `MULTI`/`EXEC`, then calls `store_offsets()`. A crash before `EXEC` writes nothing; after it, the redelivered event is a repeat. So `hits` gets one entry per hit, except after a full rebuild, when the node skips hit IDs it already has.
 - **Concurrency:** every key is per account or per payment, so partition ownership gives each one writer and replicas share no mutable state.
-- **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, through at most `MAX_INTERNAL_HOPS` (4) intra-bank hops. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
+- **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, up to `MAX_INTERNAL_HOPS` (4) intra-bank hops. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
 - **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `last:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
 - **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group into an empty Valkey. Over existing state a fresh group rewrites nothing, because every event is found in its window or is more than 72 h behind the watermark.
 

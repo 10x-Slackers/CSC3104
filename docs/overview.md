@@ -1,7 +1,7 @@
 # Overview
 
 > [!NOTE]
-> This is the target design decided on 30 Oct 2026. Most of it is built; each contract lists what's built and any pending work.
+> This is the target design decided on 30 Oct 2026. Most of it is built; each contract lists any pending work.
 
 ## Problem
 
