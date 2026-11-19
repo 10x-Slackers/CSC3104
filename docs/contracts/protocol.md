@@ -97,7 +97,7 @@ No regulator sets a hop count, so the value comes from the lengths of Altman's l
 | CYCLE (54 attempts) | 61% | 80% | 12 |
 | RANDOM (41 attempts) | 59% | 83% | 11 |
 
-A higher limit costs latency (hops run one after another within the deadline), message size (`visited` grows each hop) and disclosure. Longer chains aren't lost: overlapping searches started at different banks each return partial, the case service joins them into one case, and partial chains can still alert ([case.md](case.md)). Experiment 4 sweeps 4/6/8 ([evaluation.md](../evaluation.md#experiments)).
+A higher limit costs latency (hops run one after another within the deadline), message size (`visited` grows each hop) and disclosure. Longer chains aren't lost: overlapping searches started at different banks each return partial, the case service joins them into one case, and partial chains can still alert ([case.md](case.md)). Experiment 4 compares 4 and 8 ([evaluation.md](../evaluation.md#experiments)).
 
 ## Result states
 
