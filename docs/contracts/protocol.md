@@ -77,7 +77,7 @@ signed truncation force PARTIAL. Full security interfaces: [security.md](securit
 | --- | --- |
 | Query ID and idempotency | `query_id` is a UUID per leg. Each bank stores its reply under `(query_id, sender, ref)` and returns the stored reply to a retry. Only final states are stored; `PENDING` and `TIMED_OUT` are recomputed |
 | Search ID | `sha256("<bank>:<incoming payment>:<outgoing payment>")`, bank-local only. The same detection always maps to the same search row |
-| Hop accounting and limit | `HOP_LIMIT = 4`: a chain holds hops 0–4, so at most 5 transfers. The initiator already knows 2, so the legs share a budget of 3 extra transfers. The downstream leg runs first; the upstream leg gets what is left. `hops_remaining` drops by one each time a bank adds a transfer |
+| Hop accounting and limit | `HOP_LIMIT = 4`: a chain holds hops 0–4, so at most 5 transfers ([why 4](#why-the-hop-limit-is-4)). The initiator already knows 2, so the legs share a budget of 3 extra transfers. The downstream leg runs first; the upstream leg gets what is left. `hops_remaining` drops by one each time a bank adds a transfer |
 | Deadline | `SEARCH_SECONDS = 10`, relative. Only the initiator keeps a deadline, on its own monotonic clock. Each gRPC call's timeout is the time left, and a bank answering a `Trace` gives its onward call what is left of its caller's timeout (`context.time_remaining()`, at most `SEARCH_SECONDS`), less 0.25 s to send its own reply, so a slow bank further on costs only its own claims. No timestamp crosses banks, so clock skew can't expire a search. This is gRPC's own [deadline propagation](https://grpc.io/docs/guides/deadlines/#deadline-propagation): the timeout travels as the relative `grpc-timeout` header ([gRPC over HTTP/2](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests)), as in [Google SRE, ch. 22](https://sre.google/sre-book/addressing-cascading-failures/#xref_cascading-failure_latency-and-deadlines). A request that arrives with no time left gets `TIMED_OUT` |
 | Visited-token handling (loop prevention) | The request carries every token already in the search, including those found by the other leg. A bank whose next token is already visited signs the closing link and stops |
 | Branching cap | `BRANCH_CAP = 1`: linear chains only. If a bank's rule finds more than one onward link, it follows the first (lowest payment ID) and the result becomes `PARTIAL` |
@@ -85,6 +85,19 @@ signed truncation force PARTIAL. Full security interfaces: [security.md](securit
 | Which bank assembles the result | The initiator of that search: up-leg claims reversed, then its own claim, then down-leg claims |
 | Delivery to all involved banks without a global coordinator | Each initiator delivers its own results. The result row and one outbox row per other signer are written in one transaction; `Deliver` is sent once after a batch of searches and retried until acknowledged (housekeeping). The receiver re-verifies every claim, the digest, and that each leg's claims were signed for one query and the bank that asked; it accepts only confirmed or partial results, and stores a chain whose end is a cut as partial whatever the sender says. Any bank can be an initiator, so no single bank is a dependency for the whole system |
 | Chain identity | `chain_digest` = SHA-256 of sorted distinct `(pair, raw token)` identities, framing each UTF-8 pair and token with its four-byte big-endian length, including a transfer named at a cut. Searches started at different banks over the same transfers produce the same digest (tested on loop `o1`, started from B and C). Adopted as the case identity ([case.md](case.md)) |
+
+### Why the hop limit is 4
+
+The limit bounds the work one search can cause, like the IP time-to-live ([RFC 791](https://www.rfc-editor.org/rfc/rfc791.txt)). Without it, each nested `Trace` would hold a worker thread at every bank it visits, long chains would time out and be retried instead of stored as partial, one false positive could fan out into unbounded work, and what a search discloses would grow without bound.
+
+No regulator sets a hop count, so the value comes from the lengths of Altman's laundering attempts (`HI-Small_Patterns.txt`, transfers per attempt):
+
+| Altman pattern | ≤ 5 transfers (`HOP_LIMIT = 4`) | ≤ 8 transfers | Longest |
+| --- | --- | --- | --- |
+| CYCLE (54 attempts) | 61% | 80% | 12 |
+| RANDOM (41 attempts) | 59% | 83% | 11 |
+
+A higher limit costs latency (hops run one after another within the deadline), message size (`visited` grows each hop) and disclosure. Longer chains aren't lost: overlapping searches started at different banks each return partial, the case service joins them into one case, and partial chains can still alert ([case.md](case.md)). Experiment 4 sweeps 4/6/8 ([evaluation.md](../evaluation.md#experiments)).
 
 ## Result states
 
