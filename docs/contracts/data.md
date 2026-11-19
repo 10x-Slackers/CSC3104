@@ -86,6 +86,7 @@ Run each with `uv run python -m dataset.prepare <args>`. Outputs go to the git-i
 | --- | --- | --- | --- |
 | `fixtures/tiny` (committed) | `apps/dataset/fixtures/tiny --transfers apps/dataset/fixtures/tiny/transfers.csv` | 20 | Tests, acceptance suite |
 | `slice-6h` | `apps/dataset/out/slice-6h --start 2022-09-05 --hours 6` | 129,415 | Load tests, demo |
+| `slice-24h` | `apps/dataset/out/slice-24h --start 2022-09-05 --hours 24` | 472,251 | Load tests (experiments 5, 7, 12) |
 | `slice-48h` | `apps/dataset/out/slice-48h --start 2022-09-05 --hours 48` | 943,939 | Load tests |
 | `altman-small` | `apps/dataset/out/altman-small` (all of HI-Small) | 4,487,133 | Offline evaluation, dev and eval |
 | `altman-1-6sep` | `apps/dataset/out/altman-1-6sep --start 2022-09-01 --hours 144` | 2,696,535 | Offline = live (experiment 13) |
