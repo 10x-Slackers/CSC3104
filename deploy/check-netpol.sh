@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks that the cluster enforces the bank NetworkPolicies. Run after k3d-up.sh or eks-up.sh.
-# Each "blocked" target is first shown open from its own namespace, so a missing service can't pass.
+# Each "blocked" target is first shown open from a pod allowed to reach it, so a missing service can't pass.
 # Probes wait 10 s: k3s and the VPC CNI apply a new pod's egress policy a few seconds after it starts.
 set -uo pipefail
 
@@ -13,8 +13,9 @@ probe() { # <namespace> <host:port> <expect: open|blocked>, from a pod the bank 
   check "$1" "$2" "$3"
 }
 
-app() { # <bank> <deployment> <host:port> <expect>, from that bank's running pod
-  got=$(kubectl exec -n "bank-$1" "deploy/$2" -- python -c "import socket
+app() { # <bank> <deployment or pod/name> <host:port> <expect>, from that bank's running pod
+  [[ $2 == */* ]] && from=$2 || from=deploy/$2
+  got=$(kubectl exec -n "bank-$1" "$from" -- python -c "import socket
 try: socket.create_connection(('${3%:*}', ${3#*:}), 3); print('open')
 except OSError: print('blocked')" 2>/dev/null)
   check "bank-$1 $2" "$3" "$4"
@@ -26,27 +27,46 @@ check() {
 }
 
 failed=0
-probe bank-a postgres-rw.bank-a:5432 open
-probe bank-a kafka-kafka-bootstrap.bank-a:9092 open
+# Kubernetes API: open to bank pods, but the rule must not open other 443/6443 pods or the internet.
 probe bank-a kubernetes.default:443 open
-probe default keda-operator-metrics-apiserver.keda:443 open  # API-server rule must not open other 443/6443 pods
+probe default keda-operator-metrics-apiserver.keda:443 open
 probe bank-a keda-operator-metrics-apiserver.keda:443 blocked
-probe bank-b postgres-rw.bank-b:5432 open
-probe bank-c kafka-kafka-bootstrap.bank-c:9092 open
 probe default 1.1.1.1:443 open
-probe bank-a postgres-rw.bank-b:5432 blocked
-probe bank-b kafka-kafka-bootstrap.bank-c:9092 blocked
 probe bank-a 1.1.1.1:443 blocked
-probe default postgres-rw.bank-a:5432 blocked
+# Kafka: only its own bank's ingestor and scorer (and operators); an unlabelled pod, another app, another bank: blocked.
+app a scorer kafka-kafka-bootstrap.bank-a:9092 open
+app c scorer kafka-kafka-bootstrap.bank-c:9092 open
+probe bank-a kafka-kafka-bootstrap.bank-a:9092 blocked
+app a privacy-node kafka-kafka-bootstrap.bank-a:9092 blocked
+app b scorer kafka-kafka-bootstrap.bank-c:9092 blocked
 probe default kafka-kafka-bootstrap.bank-a:9092 blocked
-# Privacy node peers: only privacy-node pods, only to the other banks' privacy nodes.
+probe keda kafka-kafka-bootstrap.bank-a:9092 open  # KEDA reads the scorer's consumer lag
+probe strimzi kafka-kafka-bootstrap.bank-a:9091 open  # the Strimzi operator, on the brokers' internal port
+probe default kafka-kafka-bootstrap.bank-a:9091 blocked
+# PostgreSQL: only its own bank's privacy node and case service.
+app a privacy-node postgres-rw.bank-a:5432 open
+app b case postgres-rw.bank-b:5432 open
+probe bank-b postgres-rw.bank-b:5432 blocked
+app a scorer postgres-rw.bank-a:5432 blocked
+app a case postgres-rw.bank-b:5432 blocked
+probe default postgres-rw.bank-a:5432 blocked
+pg=$(kubectl get pod -n bank-a -l cnpg.io/cluster=postgres,role=primary -o jsonpath='{.items[0].status.podIP}')
+probe cnpg-system "$pg:8000" open  # the CloudNativePG operator, on the instance's status port
+probe default "$pg:8000" blocked
+# Case service: only its own bank's privacy node.
+app a privacy-node case.bank-a:8000 open
+app a scorer case.bank-a:8000 blocked
+probe default case.bank-a:8000 blocked  # the server's own rule: default has no egress policy
+# Privacy node peers: only privacy-node pods, only to the other banks' privacy nodes, not to one in their own bank
+# (bank A runs two under the HA flag; bank C's probe shows the second one listening).
+read -r n1 n2 < <(kubectl get pod -n bank-a -l app=privacy-node -o jsonpath='{.items[*].metadata.name}')
+n2=$(kubectl get pod -n bank-a "$n2" -o jsonpath='{.status.podIP}'):50051
 app a privacy-node privacy-node.bank-b:50051 open
-app c privacy-node privacy-node.bank-a:50051 open
+app c privacy-node "$n2" open
+app a scorer privacy-node.bank-a:50051 blocked
+app a "pod/$n1" "$n2" blocked
 probe bank-a privacy-node.bank-b:50051 blocked
 probe default privacy-node.bank-a:50051 blocked
-app a privacy-node kafka-kafka-bootstrap.bank-b:9092 blocked
-# The privacy node posts to its own bank's case service (the baseline keeps other banks out, probed above).
-app a privacy-node case.bank-a:8000 open
 if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
   # Pods could take LabRole from the node's metadata service; only the case service may, to sign summary calls.
   probe default 169.254.169.254:80 open
@@ -64,12 +84,22 @@ if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
   app c case "$valkey" blocked
   app a scorer "$valkey" blocked
 else
-  # k3d. Replay: only to each bank's ingestor HTTP port (on EKS replay calls the ingestor Lambdas instead).
+  # k3d. Valkey: only the scorer and privacy node of its own bank. Summary service: only the case service.
+  app a scorer valkey.bank-a:6379 open
+  app a privacy-node valkey.bank-a:6379 open
+  app a case valkey.bank-a:6379 blocked
+  app b scorer valkey.bank-a:6379 blocked
+  probe default valkey.bank-a:6379 blocked
+  app a case summary.bank-a:8080 open
+  app a privacy-node summary.bank-a:8080 blocked
+  probe default summary.bank-a:8080 blocked
+  # Ingestor: only the replay Job, HTTP port only (on EKS replay calls the ingestor Lambdas instead); it reaches Kafka.
   probe replay ingestor.bank-a:8080 open
   probe replay ingestor.bank-c:8080 open
-  probe bank-b ingestor.bank-b:8080 open
+  app b ingestor kafka-kafka-bootstrap.bank-b:9092 open
+  app a scorer ingestor.bank-a:8080 blocked
   probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
-  probe default ingestor.bank-b:8080 blocked
+  probe default ingestor.bank-a:8080 blocked
   # The API-server rule admits the server node only, not the rest of the k3d network (its load balancer serves 6443 too).
   lb=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' k3d-csc3104-serverlb)
   probe default "$lb:6443" open
