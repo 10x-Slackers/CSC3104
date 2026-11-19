@@ -69,7 +69,7 @@ Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` 
 
 | Rule | Starting thresholds | Basis | Output |
 | --- | --- | --- | --- |
-| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link |
+| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link; starts a search only in CSV and integrated mode (the deployed node searches from chain hits) |
 | Chain (slow pass-through) | Bank transfer in and out of one account, out/in 0.90–1.10 within 72 h; at least one of the two payments is with another bank | B-4(i) "high velocity of funds", B-5(iv) "within a short period"; Altman's 90th-percentile hop delay is 69.7 h | Local link; starts a search |
 | New payee | A bank transfer to an account at another bank that this customer has never paid | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
@@ -167,9 +167,9 @@ search loop starts each traceable candidate once per process using its stable
 `detection_id`; intra-bank legs have no peer token and are not searched. Existing
 gRPC messages contain tokens/claims, never these raw local references.
 
-Candidates and token/link state remain in memory, not in the node's SQLite
-protocol store: its own `TokenIndex` (`add()`/`lookup()` with references,
-`--max-token-references` as a fail-stop bound). Offsets commit synchronously, and
+Candidates and token/link state remain in memory, in the node's own `TokenIndex`
+(`add()`/`lookup()` with references, `--max-token-references` as a fail-stop bound),
+not in its protocol store (`--db`). Offsets commit synchronously, and
 `consume()` with `require_replay` rejects resumed offsets or several partitions.
 A crash after offset commit but before search requires full replay with a fresh group; there is no atomic durable handoff or exactly-once
 guarantee. Role 3's existing pending/timed-out search retries and result outbox
@@ -219,7 +219,7 @@ A KEDA `ScaledObject` on consumer-group lag (`deploy/charts/bank/templates/score
 - `offsetResetPolicy: earliest`: with the default `latest`, a fresh group reports lag 1, so the first replay would never scale.
 - `lagThreshold` 100 in the chart; the target is measured events/s per replica × acceptable delay.
 - `pollingInterval` 30 s and `cooldownPeriod` 300 s (defaults) bound the reaction time and are reported.
-- No account is hot: on `altman-small` (bank transfers only), the busiest account at any bank carries at most 0.04% of its events, so keying by account doesn't cap the speed-up.
+- No account is hot: on `altman-small` (bank transfers only, measured 20 Nov), the busiest account at any bank carries at most 0.04% of its events, so keying by account doesn't cap the speed-up.
 
 ## Local-only baseline
 

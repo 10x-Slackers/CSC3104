@@ -57,7 +57,7 @@ Security evidence (sentinel values never leave a bank; bad certificates and clai
 | Peer-trace latency | Search start → search result | Report separately |
 | Analyst load | Cases per bank per day, by tier | From the offline evaluator |
 
-**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. The scorer (each `payment_id`, with its Kafka timestamp) and the case service (each stored message's key, `chain_digest` for a chain) log JSON lines to stdout with their own timestamp (`ts`), and pandas joins them. The privacy node logs none yet, so peer-trace latency has no source until it does.
+**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. The scorer (each `payment_id` that writes a link or hit, with its Kafka timestamp) and the case service (each stored message's key, `chain_digest` for a chain) log JSON lines to stdout with their own timestamp (`ts`), and pandas joins them. The privacy node logs none yet, so peer-trace latency has no source until it does.
 
 **Metric sources** (no monitoring stack): `kubectl top`, `kubectl get hpa`, `kafka-consumer-groups.sh`, CloudWatch for Lambda, and JSON logs. Results are presented as RED (rate, errors, duration) and USE (utilisation, saturation, errors).
 

@@ -32,7 +32,7 @@ sequenceDiagram
   B->>C: Deliver(chain)
 ```
 
-Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. Intra-bank transfers have no pairwise token, so with `--valkey-url` a detection with an intra-bank leg is searched from the cross-bank payments its intra-bank hops lead to ([Searches from Valkey](#searches-from-valkey)).
+Searches start from the scorer's detection, wherever it is, because a chain is often detected in the middle. In the fixture, `m1` (A→B→C) is detected only at B. Intra-bank transfers have no pairwise token, so with `--valkey-url` a detection with an intra-bank leg is searched from the cross-bank payments its intra-bank hops lead to ([Searches from Valkey](#searches-from-valkey)); in CSV and integrated mode it is not searched.
 
 ## Messages
 
@@ -109,7 +109,7 @@ When results combine, the worst state wins, in this order: confirmed < partial <
 | no-match | A queried bank does not hold the token for that pair and direction (or the sender is not in the pair) |
 | partial | Cut by the hop limit or the branching cap. **Final**: stored and delivered as partial evidence |
 | failed | A peer rejected or failed the query (any gRPC error other than `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `ABORTED` or `DEADLINE_EXCEEDED`). Final, not retried, not stored |
-| pending | A needed bank was unreachable. No claims are kept; housekeeping re-runs the whole search |
+| pending | A needed bank was unreachable, or a peer had no match within the ingestion grace (`--ingestion-grace-seconds`). No claims are kept; housekeeping re-runs the whole search |
 | timed-out | The deadline passed. Retried by housekeeping |
 | invalid-claim | A signature, signer, token continuity, query ID or recipient check failed. Never stored as a chain or delivered; its search row keeps no digest |
 
