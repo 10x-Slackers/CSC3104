@@ -252,7 +252,7 @@ Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 
 ## Scorer as a library (**draft**, Cindy → Isaac)
 
-The offline evaluator runs the live rule code over bank files, with no Kafka or Valkey.
+Tests can run the live rule code over bank files with no Kafka or Valkey. The offline evaluator doesn't: it scores into a `ValkeyState` on fakeredis, so its node reads through `ValkeyBank` as live.
 
 ```python
 from scorer import score_file
@@ -261,7 +261,7 @@ state = score_file("apps/dataset/fixtures/tiny", "B")
 ```
 
 - `score_file(workload, bank)` reads `<workload>/bank_<bank>.csv` in file order, runs every rule (they skip anything but `GIRO` and `MEPS+`, as replay does) and returns a `MemoryState`. It writes no tokens; the node's CSV mode indexes its own.
-- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node and the evaluator read it with:
+- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node reads it with:
   - `links(payment_id, direction)`: the `link:in:` or `link:out:` payment IDs, sorted
   - `payment(payment_id, direction)`: the `pay:` entry, or `None`
   - `lookup(pair, key_version, token)`: the `tok:` entry, or `None` (live only: the scorer writes tokens when it has key files)

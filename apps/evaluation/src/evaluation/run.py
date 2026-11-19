@@ -87,6 +87,7 @@ def run(workload: str | Path) -> tuple[list[Case], dict[str, int]]:
         # stores the results the others delivered after its own pass
         for node in [*nodes.values()] * 2:
             node.housekeeping()
+        assert not any(node.store.pending_cases() for node in nodes.values())
         cases = [case for node in nodes.values() for case in bank_cases(node)]
     searches = Counter(
         pb.State.Name(state)  # each search's latest attempt
