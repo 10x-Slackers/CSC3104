@@ -8,7 +8,8 @@ cd "$(dirname "$0")"
 repo=$1 tag=$2; shift 2
 
 helm upgrade --install --wait strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator --version 1.2.0 \
-  -n strimzi --create-namespace --set watchAnyNamespace=true --set generateNetworkPolicy=false
+  -n strimzi --create-namespace --set watchAnyNamespace=true --set generateNetworkPolicy=false \
+  --set 'extraEnvs[0].name=STRIMZI_POD_SECURITY_PROVIDER_CLASS' --set 'extraEnvs[0].value=restricted'  # Kafka pods pass PSS
 helm upgrade --install --wait cnpg cloudnative-pg --repo https://cloudnative-pg.github.io/charts --version 0.29.1 \
   -n cnpg-system --create-namespace
 helm upgrade --install --wait keda keda --repo https://kedacore.github.io/charts --version 2.21.0 \
@@ -23,8 +24,10 @@ kubectl apply -f platform/ca.yaml
   python -c "from privacy_node.demo import prepare_demo_keys; prepare_demo_keys('/chart/keys')"
 
 kubectl create namespace replay --dry-run=client -o yaml | kubectl apply -f -
-for b in a b c; do
-  helm upgrade --install "bank-$b" charts/bank -n "bank-$b" --create-namespace \
+for b in a b c; do  # PSS rejects a bank pod that breaks the restricted profile; warn makes helm say so
+  kubectl create namespace "bank-$b" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl label namespace "bank-$b" --overwrite pod-security.kubernetes.io/{enforce,warn}=restricted
+  helm upgrade --install "bank-$b" charts/bank -n "bank-$b" \
     --set bank=${b^^} --set ha=$([[ ${HA:-} == *$b* ]] && echo true || echo false) \
     --set image.repository="$repo" --set image.tag="$tag" "$@"
 done
