@@ -237,5 +237,5 @@ def test_reconnects_after_postgresql_restarts(url):
     with psycopg.connect(url, autocommit=True) as admin:  # what a failover does to it
         admin.execute("SELECT pg_terminate_backend(%s, 5000)", (pid,))  # waits
     with pytest.raises(psycopg.OperationalError):
-        store.cases()  # the request in flight fails, and the node resends it
-    assert store.cases() == []  # the next one reconnects
+        store.record(message(o1()))  # the POST in flight fails; the node resends
+    assert store.get(store.record(message(o1())))  # the resend reconnects
