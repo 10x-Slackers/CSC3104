@@ -9,7 +9,7 @@ repo=$1 tag=$2; shift 2
 
 helm upgrade --install --wait strimzi oci://quay.io/strimzi-helm/strimzi-kafka-operator --version 1.2.0 \
   -n strimzi --create-namespace --set watchAnyNamespace=true --set generateNetworkPolicy=false \
-  --set 'extraEnvs[0].name=STRIMZI_POD_SECURITY_PROVIDER_CLASS' --set 'extraEnvs[0].value=restricted'  # Kafka pods pass PSS
+  --set-json 'extraEnvs=[{"name": "STRIMZI_POD_SECURITY_PROVIDER_CLASS", "value": "restricted"}]'  # Kafka pods pass PSS
 helm upgrade --install --wait cnpg cloudnative-pg --repo https://cloudnative-pg.github.io/charts --version 0.29.1 \
   -n cnpg-system --create-namespace
 helm upgrade --install --wait keda keda --repo https://kedacore.github.io/charts --version 2.21.0 \
