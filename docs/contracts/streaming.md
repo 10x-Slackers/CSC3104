@@ -3,10 +3,8 @@
 Owner: Cindy · Partners: Macarius (events), Isaac (search handoff, privacy node), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, needs review by Macarius and Zane
 
 > [!NOTE]
-> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; these items change it:
-> - **Topic:** a declared `KafkaTopic`, 6 partitions, key = account, `retention.ms -1`, replication 3 with `min.insync.replicas` 2 in the HA bank. Replicas own partitions, so they share no mutable state.
+> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; this item changes it:
 > - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
-> - KEDA scaling as in [Scaling](#scaling).
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
 
@@ -19,7 +17,7 @@ Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule
 | Record value | JSON with the nine fields of a [bank event](data.md#bank-event-files-bank_abccsv), including `counterparty_account`, the other side's account (never sent to peers). `amount` is a number in SGD; every other field is a nonempty string. The shared sample is [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json), the four records the ingestor writes for the batch in [data.md](data.md#ingestor) |
 | Record headers | CloudEvents in Kafka binary mode ([spec](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md)): `ce_specversion` `1.0`, `ce_id` `<payment_id>-<direction>`, `ce_source` `/bank/<X>/ingestor`, `ce_type` `payment.out` or `payment.in`, `ce_time` (the payment's `event_time`), `content-type` `application/json`. The Kafka record timestamp is when the ingestor produced it, the same for a whole batch and logged as its `ts`; latency is measured from it ([evaluation.md](../evaluation.md#metric-definitions)) |
 | Intra-bank transfers | Two records with the same `payment_id`: `p02` (B-bob → B-carol) is key `B-bob`, `ce_id` `p02-out`, and key `B-carol`, `ce_id` `p02-in`. The ingestor produces `out` first, but the keys differ, so the records usually land in different partitions and a consumer can read them in either order. Only the bank files keep `out` before `in`; consumers rely on `event_time`, which both records share |
-| Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. **pending work:** 6 partitions; the event-time window absorbs interleaving, so global order doesn't matter |
+| Partitioning key and ordering guarantee | Local `account`; preserves partition arrival order for that account, not event-time order. A declared `KafkaTopic` with 6 partitions, kept forever (`retention.ms -1`), replication 3 with `min.insync.replicas` 2 in the HA bank; replicas own partitions, so they share no mutable state; the event-time window absorbs interleaving, so global order doesn't matter |
 | Replay, late and out-of-order events | Match either arrival order within each account's event-time window; ignore events more than 72 h (the chain window) behind the latest event seen for that account. Events are kept for twice that, so an accepted late event still finds its partner |
 
 The [ingestor](data.md#ingestor) (`apps/ingestor/`) receives pacs.008 batches over
@@ -225,11 +223,11 @@ incoming transfer for an endpoint before its outgoing leg arrives.
 
 ## Scaling
 
-**pending work** (chart: Isaac): a KEDA `ScaledObject` on consumer-group lag.
+A KEDA `ScaledObject` on consumer-group lag (`deploy/charts/bank/templates/scorer.yaml`, chart: Isaac).
 
 - `maxReplicaCount` 6 (the partition count), `minReplicaCount` 1 on k3d.
 - `offsetResetPolicy: earliest`: with the default `latest`, a fresh group reports lag 1, so the first replay would never scale.
-- `lagThreshold` = measured events/s per replica × acceptable delay.
+- `lagThreshold` 100 in the chart; the target is measured events/s per replica × acceptable delay.
 - `pollingInterval` 30 s and `cooldownPeriod` 300 s (defaults) bound the reaction time and are reported.
 - Bank B's hot account carries 13% of its events, which caps its speed-up at about 3.7× with 6 replicas; report it as a measured limit.
 
