@@ -23,13 +23,18 @@ kubectl apply -f platform/ca.yaml
 [ -d charts/bank/keys ] || docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/charts/bank:/chart" "$repo/privacy-node:$tag" \
   python -c "from privacy_node.demo import prepare_demo_keys; prepare_demo_keys('/chart/keys')"
 
+# Bank pods may reach the API server only: the kubernetes Service and the addresses behind it (k3s's server node,
+# EKS's control-plane ENIs), not the node subnet or VPC around them.
+api=$(kubectl get endpointslice -l kubernetes.io/service-name=kubernetes \
+  -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}/32,{end}')$(kubectl get svc kubernetes -o jsonpath='{.spec.clusterIP}')/32
+
 kubectl create namespace replay --dry-run=client -o yaml | kubectl apply -f -
 for b in a b c; do  # PSS rejects a bank pod that breaks the restricted profile; warn makes helm say so
   kubectl create namespace "bank-$b" --dry-run=client -o yaml | kubectl apply -f -
   kubectl label namespace "bank-$b" --overwrite pod-security.kubernetes.io/{enforce,warn}=restricted
   helm upgrade --install "bank-$b" charts/bank -n "bank-$b" \
     --set bank=${b^^} --set ha=$([[ ${HA:-} == *$b* ]] && echo true || echo false) \
-    --set image.repository="$repo" --set image.tag="$tag" "$@"
+    --set image.repository="$repo" --set image.tag="$tag" --set "apiServerCIDRs={$api}" "$@"
 done
 kubectl wait -A --all --for=condition=Ready --timeout=15m kafka,clusters.postgresql.cnpg.io,certificates.cert-manager.io
 kubectl wait -A -l 'app in (ingestor,scorer,privacy-node,case,summary)' --for=condition=Ready --timeout=5m pod

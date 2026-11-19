@@ -5,9 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# The fixed subnet matches apiServerCIDRs in charts/bank/values.yaml. Workloads are mounted for replay.sh.
+# Workloads are mounted for replay.sh.
 mkdir -p ../apps/dataset/out  # else Docker creates the mount source as root
-k3d cluster create csc3104 --subnet 172.28.0.0/16 --wait \
+k3d cluster create csc3104 --wait \
   --volume "$PWD/../apps/dataset/out:/workloads@server:0" \
   --k3s-arg "--secrets-encryption@server:0"
 kubectl config use-context k3d-csc3104

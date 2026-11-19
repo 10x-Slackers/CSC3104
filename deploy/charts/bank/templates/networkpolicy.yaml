@@ -26,7 +26,7 @@ spec:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
     - to:
-        {{- range .Values.apiServerCIDRs }}
+        {{- range required "apiServerCIDRs: an empty list would allow every address" (.Values.apiServerCIDRs | default "") }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports:

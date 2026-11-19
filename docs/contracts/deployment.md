@@ -19,7 +19,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | | Local | Cloud |
 | --- | --- | --- |
 | Cluster | k3d, Secrets encrypted at rest (`--secrets-encryption`) | Amazon EKS |
-| Setup command | `deploy/k3d-up.sh`: the cluster and images, then `deploy/install.sh` (operators, lab CA, keys, the three bank releases) | `deploy/eks-up.sh`, with the Learner Lab's credentials in `~/.aws/credentials`: the Lambda zips, Terraform (cluster, ECR, ElastiCache, Lambdas), the workloads bucket, images pushed to ECR, then `deploy/install.sh` with every bank in HA, the EKS API server addresses and the `bank_values` output |
+| Setup command | `deploy/k3d-up.sh`: the cluster and images, then `deploy/install.sh` (operators, lab CA, keys, the three bank releases) | `deploy/eks-up.sh`, with the Learner Lab's credentials in `~/.aws/credentials`: the Lambda zips, Terraform (cluster, ECR, ElastiCache, Lambdas), the workloads bucket, images pushed to ECR, then `deploy/install.sh` with every bank in HA and the `bank_values` output |
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | The same command: an init container first copies `s3://csc3104-workloads-<account-id>/<workload>` into an `emptyDir`, as `LabRole`. Upload a workload once with `aws s3 sync apps/dataset/out/<workload> s3://csc3104-workloads-<account-id>/<workload>`. Replay sends to the ingestor Lambdas' function URLs (Terraform output `ingestor_urls`), signed as `LabRole` |
 | Teardown | `k3d cluster delete csc3104` | `deploy/eks-down.sh`: deletes the bank namespaces and waits for their EBS volumes to go, then `terraform destroy` (a plain destroy leaves the volumes behind) |
 | Check | `deploy/check-netpol.sh` | The same command, with the EKS paths instead of replay → ingestor: only the case service reaches the node's metadata service and HTTPS outside the VPC, and only the scorer and privacy node reach their own bank's ElastiCache |
@@ -65,7 +65,7 @@ Each owner sends Isaac their service's runtime contract by Wed 4 Nov: port, envi
 
 One namespace per bank: `bank-a`, `bank-b`, `bank-c`, each a release of the `deploy/charts/bank` Helm chart.
 
-Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443 to the chart's `apiServerCIDRs` only; `k3d-up.sh` pins the k3d node subnet to match; `eks-up.sh` passes the control plane's addresses and the `kubernetes` Service address, since pods share the VPC; `check-netpol.sh` probes that another 443 service stays blocked), and ingress from the `strimzi`, `cnpg-system` and `keda` operators. k3s applies a new pod's egress policy a few seconds after the pod starts, so its first connections can bypass it. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
+Current baseline (`bank-baseline` policy): deny all, then allow traffic within the bank's own namespace, DNS, the Kubernetes API (TCP 443/6443 to the chart's `apiServerCIDRs` only, which `install.sh` fills with the `kubernetes` Service address and the addresses behind it: k3s's server node, or EKS's control-plane ENIs; `check-netpol.sh` probes that another 443 service stays blocked), and ingress from the `strimzi`, `cnpg-system` and `keda` operators. k3s applies a new pod's egress policy a few seconds after the pod starts, so its first connections can bypass it. Strimzi's own generated policies are turned off so that they can't open Kafka to other namespaces. Cross-bank traffic is blocked.
 
 **pending work** (with Caleb): keep the default-deny baseline, add one small policy per store (Kafka, PostgreSQL, Valkey) allowing only labelled clients, and one allow rule per real path, each with an open/blocked probe pair in `check-netpol.sh`:
 
@@ -79,7 +79,7 @@ Current baseline (`bank-baseline` policy): deny all, then allow traffic within t
 | Privacy node → case service → summary service | Inside the bank, so the baseline allows it; `check-netpol.sh` probes the node → case path |
 | Analyst → web UI | `kubectl port-forward -n bank-a svc/case 8000` only, no Ingress; access control is cluster RBAC |
 
-The API-server rule should be narrowed from the whole k3d node subnet. On EKS the VPC CNI enforces the same policies and `check-netpol.sh` runs the same probes.
+On EKS the VPC CNI enforces the same policies and `check-netpol.sh` runs the same probes.
 
 ## Interfaces
 
