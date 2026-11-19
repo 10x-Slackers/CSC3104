@@ -130,11 +130,13 @@ class Store:
         state: pb.State,
         chain_digest: str,
         started: float | None = None,
-    ) -> None:
-        """Record a search's latest attempt and when it is next due, if it's pending."""
+    ) -> int:
+        """Record a search's latest attempt and when it is next due, if it's pending.
+        Returns the attempt's number, from 1."""
         t = now()
         rows = self._run("SELECT attempts FROM searches WHERE search_id=?", search_id)
-        wait = min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (rows[0][0] if rows else 0))
+        attempts = rows[0][0] if rows else 0
+        wait = min(BACKOFF_CAP, BACKOFF_BASE * 2**attempts)
         self._run(
             "INSERT INTO searches VALUES (?,?,?,?,?,1,?,?) ON CONFLICT (search_id) "
             "DO UPDATE SET state=excluded.state, chain_digest=excluded.chain_digest, "
@@ -147,6 +149,7 @@ class Store:
             t + random.random() * wait,
             t if started is None else started,  # kept from the first attempt
         )
+        return attempts + 1
 
     def search_started(self, search_id: str) -> float | None:
         """When the search's first attempt began, or None if it never ran."""
