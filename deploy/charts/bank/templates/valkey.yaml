@@ -21,7 +21,13 @@ spec:
             - containerPort: 6379
           readinessProbe:
             tcpSocket: {port: 6379}
-          {{- include "bank.container" . | nindent 10 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:  # not the bank's 128Mi: six days of a bank's state outgrew it and was OOM-killed
+            requests: {memory: 256Mi}
+            limits: {memory: 1Gi}
 ---
 apiVersion: v1
 kind: Service
