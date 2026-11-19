@@ -19,7 +19,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | The same command: an init container first copies `s3://csc3104-workloads-<account-id>/<workload>` into an `emptyDir`, as `LabRole`. Upload a workload once with `aws s3 sync apps/dataset/out/<workload> s3://csc3104-workloads-<account-id>/<workload>`. Replay sends to the ingestor Lambdas' function URLs (Terraform output `ingestor_urls`), signed as `LabRole` |
 | Teardown | `k3d cluster delete csc3104` | `deploy/eks-down.sh`: deletes the bank namespaces and waits for their EBS volumes to go, then `terraform destroy` (a plain destroy leaves the volumes behind) |
 | Check | `deploy/check-netpol.sh` | The same command, with the EKS paths instead of k3d's Valkey, summary and replay → ingestor paths: only the case service reaches the node's metadata service and HTTPS outside the VPC, and only the scorer and privacy node reach their own bank's ElastiCache |
-| Tested on | 4 CPU, 11 GB VM, Docker 29, bank A in HA (19 Nov): setup about 6 min; `tiny` all 200, cases 5/5/4; 24/24 policy probes | Learner Lab, 3 × `t3a.large`, Kubernetes 1.37, every bank in HA (19 Nov): setup 32 min; `tiny` through the ingestor Lambdas all 200, cases 5/5/4 as on k3d, drafts from the summary Lambdas; 28/28 policy probes; `slice-6h` at `--speed 0` in 22 s with no errors |
+| Tested on | 4 CPU, 11 GB VM, Docker 29, bank A in HA (20 Nov): setup about 6 min; `tiny` all 200, cases 5/5/4; 41/41 policy probes | Learner Lab, 3 × `t3a.large`, Kubernetes 1.37, every bank in HA (19 Nov): setup 32 min; `tiny` through the ingestor Lambdas all 200, cases 5/5/4 as on k3d, drafts from the summary Lambdas; 28/28 policy probes (before the per-store policies); `slice-6h` at `--speed 0` in 22 s with no errors |
 | Cost controls | — | The Learner Lab's fixed credit; it stops the nodes when a session ends, but the control plane keeps billing, so destroy after each run |
 
 ## Platform components
@@ -67,16 +67,16 @@ One small policy per store (Kafka, PostgreSQL, Valkey) admits only labelled clie
 
 | Path | Rule |
 | --- | --- |
-| Ingestor, scorer → Kafka | Pods labelled `strimzi.io/cluster: kafka` admit each other and the Strimzi operator on any port, and `app: ingestor` / `app: scorer` pods and the KEDA operator (consumer lag) on 9092 only (`kafka-clients`). Probed: the scorer gets through; an unlabelled pod, the privacy node and another bank's scorer don't |
-| Privacy node, case service → PostgreSQL | Pods labelled `cnpg.io/cluster: postgres` admit each other (replication) and the CloudNativePG operator on any port, and `app: privacy-node` / `app: case` pods on 5432 only (`postgres-clients`). Probed: the node and case service get through; an unlabelled pod, the scorer and another bank's case service don't |
-| Scorer, privacy node → Valkey (k3d) | `app: valkey` admits `app: scorer` and `app: privacy-node` on 6379 (`valkey-clients`). Probed: the case service, another bank's scorer and a pod outside the bank are blocked |
-| Privacy node → case service | `app: case` admits `app: privacy-node` on 8000 (`node-to-case`). Probed: the scorer and a pod outside the bank are blocked |
-| Case service → summary service (k3d) | `app: summary` admits `app: case` on 8080 (`case-to-summary`). Probed: the privacy node and a pod outside the bank are blocked |
-| Privacy node ↔ other banks' privacy nodes | Ingress from the other two bank namespaces **and** `app: privacy-node` pods, gRPC port only, with matching egress (`privacy-node-peers`). Probed: the bank's own scorer is blocked |
-| Replay → ingestor (k3d) | Ingress from the `replay` namespace to `app: ingestor` on its HTTP port (`replay-to-ingestor`); nothing inside the bank may call the ingestor. Probed |
+| Ingestor, scorer → Kafka | Pods labelled `strimzi.io/cluster: kafka` admit each other and the Strimzi operator on any port, and `app: ingestor` / `app: scorer` pods and the KEDA operator (consumer lag) on 9092 only (`kafka-clients`) |
+| Privacy node, case service → PostgreSQL | Pods labelled `cnpg.io/cluster: postgres` admit each other (replication) and the CloudNativePG operator on any port, and `app: privacy-node` / `app: case` pods on 5432 only (`postgres-clients`) |
+| Scorer, privacy node → Valkey (k3d) | `app: valkey` admits `app: scorer` and `app: privacy-node` on 6379 (`valkey-clients`) |
+| Privacy node → case service | `app: case` admits `app: privacy-node` on 8000 (`node-to-case`) |
+| Case service → summary service (k3d) | `app: summary` admits `app: case` on 8080 (`case-to-summary`) |
+| Privacy node ↔ other banks' privacy nodes | Ingress from the other two bank namespaces **and** `app: privacy-node` pods, gRPC port only, with matching egress (`privacy-node-peers`) |
+| Replay → ingestor (k3d) | Ingress from the `replay` namespace to `app: ingestor` on its HTTP port (`replay-to-ingestor`); nothing inside the bank may call the ingestor |
 | Ingestor Lambda → Kafka (EKS) | Ingress from the VPC's CIDR to the brokers' `vpc` listener (9094) (`lambda-to-kafka`). A NetworkPolicy can't name the Lambda's security group, and pods share the VPC, so this opens each bank's Kafka listener to every pod: Kafka is no longer namespace-private on EKS, a stated cost. The security groups do restrict the Lambdas: each bank's reaches only its own bank's node ports |
-| Scorer, privacy node → ElastiCache (EKS) | Egress on 6379 to this bank's two ElastiCache subnets only (Terraform's `bank_values` carries them as `valkeyCidrs`) (`valkey-clients`), probed, including that another bank's scorer is blocked |
-| Case service → summary Lambda (EKS) | Egress to 443 outside the VPC, and to the node's metadata service (`169.254.169.254:80`) from `app: case` only, so it can sign the call as `LabRole` (`case-to-summary`), probed. This hands that pod the whole role: an accepted limitation of the lab account |
+| Scorer, privacy node → ElastiCache (EKS) | Egress on 6379 to this bank's two ElastiCache subnets only (Terraform's `bank_values` carries them as `valkeyCidrs`) (`valkey-clients`) |
+| Case service → summary Lambda (EKS) | Egress to 443 outside the VPC, and to the node's metadata service (`169.254.169.254:80`) from `app: case` only, so it can sign the call as `LabRole` (`case-to-summary`). This hands that pod the whole role: an accepted limitation of the lab account |
 | Analyst → web UI | `kubectl port-forward -n bank-a svc/case 8000` only, no Ingress; access control is cluster RBAC |
 
 On EKS the VPC CNI enforces the same policies and `check-netpol.sh` runs the same probes.
