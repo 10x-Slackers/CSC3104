@@ -70,5 +70,9 @@ else
   probe bank-b ingestor.bank-b:8080 open
   probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
   probe default ingestor.bank-b:8080 blocked
+  # The API-server rule admits the server node only, not the rest of the k3d network (its load balancer serves 6443 too).
+  lb=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' k3d-csc3104-serverlb)
+  probe default "$lb:6443" open
+  probe bank-a "$lb:6443" blocked
 fi
 exit $failed

@@ -21,7 +21,4 @@ for app in scorer privacy-node case dataset; do  # the ingestor and summary serv
   docker push -q "$registry/$app:$tag"
 done
 
-# Bank pods reach the API server through the kubernetes Service and the control plane's ENIs; pods share the VPC, so not all of it.
-api=$(kubectl get endpointslice -l kubernetes.io/service-name=kubernetes -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}/32,{end}')
-HA=abc ./install.sh "$registry" "$tag" --set "apiServerCIDRs={${api}10.100.0.1/32}" \
-  --set-json "aws=$(terraform -chdir=terraform output -raw bank_values)"
+HA=abc ./install.sh "$registry" "$tag" --set-json "aws=$(terraform -chdir=terraform output -raw bank_values)"
