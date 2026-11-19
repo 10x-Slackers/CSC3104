@@ -1,0 +1,4 @@
+apiVersion: v2
+name: platform
+description: What the three banks share - their namespaces and the lab certificate authority
+version: 1.0.0

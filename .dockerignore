@@ -1,7 +1,5 @@
 *
 !pyproject.toml
 !uv.lock
-!.python-version
-!apps/*/pyproject.toml
-!apps/*/src
+!src
 **/__pycache__

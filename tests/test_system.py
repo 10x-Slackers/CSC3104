@@ -12,6 +12,7 @@ from conftest import cases, retry_now
 from mulechain.evaluate import Context, Refused, settle
 from mulechain.node import protocol_pb2 as pb
 from mulechain.node.claims import digest
+from mulechain.node.node import KEY_SETTLE_SECONDS
 
 EXPECTED = [
     ("A", 1, "p06"),
@@ -139,3 +140,14 @@ def test_a_refused_delivery_becomes_a_dead_letter_and_others_are_retried(nodes):
     nodes["A"].deliver()
     states = {row["key"]: row["state"] for row in store.db.all("SELECT * FROM outbox")}
     assert states == {"bad": "dead", "lost": "queued"}
+
+
+def test_a_key_change_is_published_only_after_it_has_settled(nodes):
+    node = nodes["B"]
+    (node.key_dir / "2").write_bytes(bytes(64))
+    node.refresh_keys()
+    assert len(node.own) == 2  # used here at once
+    assert len(node.Keys(pb.Empty(), None).keys) == 1  # but peers aren't told yet
+    node.latest_at -= KEY_SETTLE_SECONDS
+    node.refresh_keys()
+    assert len(node.Keys(pb.Empty(), None).keys) == 2

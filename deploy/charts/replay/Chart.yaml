@@ -1,0 +1,4 @@
+apiVersion: v2
+name: replay
+description: A Job that replays a workload into the three banks' ingestors
+version: 1.0.0

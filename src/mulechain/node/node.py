@@ -46,6 +46,7 @@ SEARCH_SECONDS = 10  # the whole search's deadline, set by the bank that starts 
 REPLY_MARGIN = 0.25  # seconds each bank keeps back to send its own reply
 CALL_SECONDS = 5  # for Deliver and Keys, which no search is waiting on
 KEY_SECONDS = 10  # how often peers' public keys are fetched again
+KEY_SETTLE_SECONDS = 120  # how long a change to this bank's keys waits before peers see it
 
 
 def identity(bank: str) -> str:
@@ -92,6 +93,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         self.grace = grace
         self.peers = [b for b in BANKS if b != self.name]
         self.own = crypto.load_keys(key_dir)
+        self.published = self.latest = [k.public for k in self.own]  # what Keys answers
+        self.latest_at = 0.0
         self.keys: dict[str, list[crypto.PublicKey]] = {}  # every bank's public keys
         self.keys_at = -KEY_SECONDS
         self.pool = ThreadPoolExecutor(max_workers=8)  # searches run side by side
@@ -99,9 +102,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
     # ---- keys -------------------------------------------------------------------
 
     def Keys(self, request: pb.Empty, context: grpc.ServicerContext) -> pb.PublicKeys:
-        public = [k.public for k in self.own]
         return pb.PublicKeys(
-            keys=[pb.PublicKey(agreement=k.agreement, signing=k.signing) for k in public]
+            keys=[pb.PublicKey(agreement=k.agreement, signing=k.signing) for k in self.published]
         )
 
     def refresh_keys(self) -> set[str]:
@@ -110,8 +112,18 @@ class Node(pb_grpc.PrivacyNodeServicer):
         They go to the store (so every replica has them after a restart) and to Valkey
         (where this bank's scorer derives its pair keys from them). Returns the peers
         that didn't answer.
+
+        A change to this bank's own keys is published only once it has lasted
+        KEY_SETTLE_SECONDS, because the bank's pods see a changed Secret up to a minute
+        apart. By then every scorer here indexes under a new key before a peer names a
+        transfer with it, and has stopped using a removed key before peers forget it.
         """
         self.own = crypto.load_keys(self.key_dir)
+        current = [k.public for k in self.own]
+        if crypto.encode(current) != crypto.encode(self.latest):
+            self.latest, self.latest_at = current, time.monotonic()
+        if time.monotonic() - self.latest_at >= KEY_SETTLE_SECONDS:
+            self.published = self.latest
         silent = set()
         for peer in self.peers:
             try:

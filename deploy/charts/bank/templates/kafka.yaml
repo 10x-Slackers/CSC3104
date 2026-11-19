@@ -1,5 +1,6 @@
-# Bank-local Kafka in KRaft mode (Strimzi): one node, or three under the HA flag with a majority of replicas per write.
-{{- $aws := get .Values.aws .Values.bank }}
+# The bank's Kafka (Strimzi, KRaft mode): the log every other piece of state is derived from.
+# One broker, or three with `ha`: then a write needs two in-sync replicas (acks=all with
+# min.insync.replicas 2), so losing one broker loses nothing and stops nothing.
 {{- $n := ternary 3 1 .Values.ha }}
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
@@ -20,9 +21,9 @@ spec:
   jvmOptions:
     -Xms: 256m
     -Xmx: 512m
-  {{- if $aws }}
+  {{- if .Values.aws }}
   template:
-    pod:  # EKS: one broker per node, so losing a node keeps a majority (k3d has one node)
+    pod:  # AWS: one broker per node, so losing a node keeps a majority (k3d has one node)
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -41,19 +42,19 @@ spec:
         port: 9092
         type: internal
         tls: false
-      {{- if $aws }}
-      # The ingestor Lambda's way in from the VPC: fixed node ports per bank (deploy/terraform/lambda.tf), and each
-      # broker advertised at its node's private address.
+      {{- with .Values.aws }}
+      # The ingestor Lambda's way in from the VPC: fixed node ports per bank
+      # (deploy/terraform/lambda.tf), each broker advertised at its node's private address.
       - name: vpc
         port: 9094
         type: nodeport
         tls: false
         configuration:
           preferredNodePortAddressType: InternalIP
-          bootstrap: {nodePort: {{ $aws.kafkaNodePort }}}
+          bootstrap: {nodePort: {{ .kafkaNodePort }}}
           brokers:
             {{- range until $n }}
-            - {broker: {{ . }}, nodePort: {{ add $aws.kafkaNodePort 1 . }}}
+            - {broker: {{ . }}, nodePort: {{ add $.Values.aws.kafkaNodePort 1 . }}}
             {{- end }}
       {{- end }}
     config:
@@ -66,8 +67,9 @@ spec:
   entityOperator:
     topicOperator: {jvmOptions: {"-Xmx": 128m}}
 ---
-# Declared rather than auto-created: 6 partitions keyed by account, so up to 6 scorer replicas each own
-# some; kept forever, since Kafka is the source of truth and Valkey is rebuilt from it.
+# The bank's one topic, declared rather than auto-created.
+# - 6 partitions, keyed by account: up to 6 scorer workers, each owning some accounts.
+# - Kept forever: Kafka is the source of truth, and Valkey is rebuilt from it.
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:

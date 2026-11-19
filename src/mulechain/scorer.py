@@ -5,13 +5,15 @@
 The patterns this file shows (docs/patterns.md):
 
 - The log is the source of truth. Kafka keeps every event; everything in Valkey is
-  derived from it and can be rebuilt by reading the topic again from the start.
+  derived from it. Valkey also holds how far into each partition its state goes, and
+  a worker starts reading there, so an emptied Valkey is rebuilt from the start of
+  the topic with no other step.
 - Partition ownership. Events are keyed by account, so each account lives in one
   partition and one worker owns it at a time. Workers share no account state, and
   KEDA adds workers as consumer lag grows, up to one per partition.
-- At-least-once, made safe by idempotent writes. An event's offset is stored only
-  after its Valkey writes commit (one MULTI/EXEC), so a crash replays the event, and
-  replaying rewrites the same keys.
+- State and position move together. An event's writes and its partition's next
+  offset commit in one MULTI/EXEC, so a crash can't leave one without the other.
+  Scoring an event again rewrites the same keys, so a replay is harmless too.
 - Event time. Windows use the payment's own time, not arrival time, so replay speed
   and late events don't change what is detected.
 
@@ -24,6 +26,7 @@ Valkey layout (everything a rule or the privacy node needs, nothing else):
     link:out:<payment>        payments a rule links into this outgoing one (set)
     last:<account>:<payee>    "<unix seconds>:<flagged>", the last payment to that payee
     hits                      stream of rule hits, read by the privacy node
+    offsets                   the next Kafka offset to score, per partition (hash)
     keys                      peers' public keys, written by the privacy node (hash)
 """
 
@@ -37,7 +40,7 @@ from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 
-from confluent_kafka import Consumer, KafkaException
+from confluent_kafka import OFFSET_BEGINNING, Consumer, KafkaException
 from valkey import Valkey
 
 from mulechain import crypto, log
@@ -57,11 +60,15 @@ class Scorer:
         """`db` needs decode_responses=True. `pair_keys(peer)` gives the keys shared with a peer."""
         self.bank, self.db, self.pair_keys = bank, db, pair_keys
 
-    def process(self, e: dict) -> dict:
-        """Score one event and write its state. Returns the links and hits it made."""
+    def process(self, e: dict, partition: int = 0, offset: int = 0) -> dict:
+        """Score one event and write its state. Returns the links and hits it made.
+
+        `partition` and `offset` say where the event sits in Kafka.
+        """
         made = {"links": [], "hits": []}
         tx = self.db.pipeline(transaction=True)  # MULTI ... EXEC: all or nothing
         self._score(e, tx, made)
+        tx.hset("offsets", partition, offset + 1)
         tx.execute()
         return made
 
@@ -186,11 +193,9 @@ def main() -> None:
     consumer = Consumer(
         {
             "bootstrap.servers": os.environ["KAFKA_BOOTSTRAP_SERVERS"],
-            # A fresh group reads the topic from the start: that is how Valkey is rebuilt.
-            "group.id": os.environ.get("KAFKA_GROUP", f"scorer-{bank}"),
-            "auto.offset.reset": "earliest",
-            # At-least-once: an offset is stored only after its event's writes,
-            # and the background commit sends only stored offsets.
+            "group.id": f"scorer-{bank}",
+            # Offsets are committed to Kafka only so that KEDA can see the lag: the
+            # background commit sends the offsets stored below, after each event.
             "enable.auto.offset.store": False,
             "queued.max.messages.kbytes": 16384,  # 16 MiB prefetch, not the 64 MiB default
         }
@@ -198,7 +203,15 @@ def main() -> None:
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
-    consumer.subscribe([topic(bank)])
+
+    def resume(_, partitions: list) -> None:
+        """Start each partition where Valkey's state ends, or at the start of the topic."""
+        done = db.hgetall("offsets")
+        for p in partitions:
+            p.offset = int(done.get(str(p.partition), OFFSET_BEGINNING))
+        consumer.assign(partitions)
+
+    consumer.subscribe([topic(bank)], on_assign=resume)
     try:
         while not stop.is_set():
             message = consumer.poll(1)
@@ -210,7 +223,7 @@ def main() -> None:
                 log("scorer", bank=bank, error=str(message.error()))  # the client retries
                 continue
             event = json.loads(message.value())
-            made = scorer.process(event)
+            made = scorer.process(event, message.partition(), message.offset())
             if made["links"] or made["hits"]:
                 kafka_ts = message.timestamp()[1] / 1000  # when the ingestor accepted it
                 log("scorer", bank=bank, payment_id=event["payment_id"], kafka_ts=kafka_ts, **made)

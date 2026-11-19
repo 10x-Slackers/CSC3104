@@ -1,14 +1,16 @@
-# This release's bank: A, B or C (install.sh sets it per namespace).
+# Which bank this release is: A, B or C.
 bank: A
-# High availability: Kafka 3 brokers with min.insync.replicas 2, PostgreSQL 3 instances, privacy node 2 replicas.
+# Run with replicas: Kafka 3 brokers (a write needs 2 of them), PostgreSQL 3 instances
+# with automatic failover, privacy node 2. Set it on a fresh bank, not a running one.
 ha: false
-# Images built from the root Dockerfile, one per service: <repository>/<package>:<tag>.
+# The one image every service runs (the root Dockerfile).
 image:
-  repository: csc3104
+  repository: mulechain
   tag: dev
-# Kubernetes API server addresses that bank pods may reach (CloudNativePG instances need the API). install.sh looks them up.
+# Addresses of the Kubernetes API server, which bank pods may reach. Looked up from the
+# cluster when empty; set it only to render the chart without a cluster (CI).
 apiServerCIDRs: []
-# EKS only: each bank's AWS endpoints from Terraform's bank_values output, keyed by bank (eks-up.sh sets it).
-# A bank found here uses ElastiCache and the summary Lambda, and the ingestor Lambda produces through a Kafka
-# VPC listener; without it (k3d) the ingestor, summary service and Valkey run in the bank.
+# AWS only (from Terraform): this bank's ElastiCache and Lambdas. When set, the bank
+# runs no ingestor, summary or Valkey pods of its own.
+#   valkeyUrl, valkeyCidrs, summaryUrl, vpcCidr, kafkaNodePort
 aws: {}

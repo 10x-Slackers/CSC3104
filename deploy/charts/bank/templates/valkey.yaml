@@ -1,6 +1,7 @@
-# The scorer's state as a materialised view of Kafka (docs/contracts/streaming.md): no persistence,
-# rebuilt from the topic.
-{{- if not (get .Values.aws .Values.bank) }}  # EKS: ElastiCache instead
+# Valkey: the scorer's state, a view of the Kafka log. No persistence on purpose: if it
+# is lost, a scorer with a new consumer group rebuilds it from the topic. On AWS it is
+# the bank's ElastiCache instead.
+{{- if not .Values.aws }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,7 +22,7 @@ spec:
             - containerPort: 6379
           readinessProbe:
             tcpSocket: {port: 6379}
-          # Not the bank's 128Mi: six days of a bank's state outgrew it and was OOM-killed.
+          # six days of one bank's state peaked at 272Mi
           {{- include "bank.container" (dict "request" "256Mi" "limit" "1Gi") | nindent 10 }}
 ---
 apiVersion: v1

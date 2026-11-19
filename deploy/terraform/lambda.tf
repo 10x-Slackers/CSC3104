@@ -1,16 +1,16 @@
 # Each bank's serverless edge: the ingestor and the summary service as Lambda function URLs with AWS_IAM, run as
-# LabRole (docs/contracts/deployment.md). eks-up.sh builds the zips into build/ before applying;
-# try() lets eks-down.sh destroy without them.
+# LabRole. `make lambda` builds the zips into build/ before applying; try() lets a destroy run without them.
 locals {
   banks = { A = 0, B = 1, C = 2 }
   # Each bank's Kafka VPC listener: bootstrap on this node port, broker n on port + 1 + n (charts/bank/templates/kafka.yaml).
-  kafka_port = { for b, i in local.banks : b => 32090 + 10 * i }
+  kafka_port       = { for b, i in local.banks : b => 32090 + 10 * i }
+  workloads_bucket = "csc3104-workloads-${data.aws_caller_identity.me.account_id}"
 }
 
 data "aws_vpc" "default" { default = true }
 
 # Node IPs for the ingestor's Kafka bootstrap: every node forwards the bank's bootstrap node port. Read at apply time,
-# so rerun eks-up.sh after the node group replaces its nodes.
+# so rerun `make eks` after the node group replaces its nodes.
 data "aws_instances" "nodes" {
   instance_tags = { "eks:nodegroup-name" = aws_eks_node_group.nodes.node_group_name }
   depends_on    = [aws_eks_node_group.nodes] # read after the nodes exist, not at plan time
@@ -43,7 +43,7 @@ resource "aws_lambda_function" "ingestor" {
   function_name    = "csc3104-ingestor-${lower(each.key)}"
   role             = data.aws_iam_role.lab.arn
   runtime          = "python3.12"
-  handler          = "ingestor.app.lambda_handler"
+  handler          = "mulechain.ingestor.lambda_handler"
   filename         = "build/ingestor.zip"
   source_code_hash = try(filebase64sha256("build/ingestor.zip"), null)
   timeout          = 30 # message.timeout.ms is 25 s
@@ -54,7 +54,7 @@ resource "aws_lambda_function" "ingestor" {
   }
   environment {
     variables = {
-      INGESTOR_BANK           = each.key
+      BANK                    = each.key
       KAFKA_BOOTSTRAP_SERVERS = join(",", [for ip in sort(data.aws_instances.nodes.private_ips) : "${ip}:${local.kafka_port[each.key]}"])
     }
   }
@@ -66,7 +66,7 @@ resource "aws_lambda_function" "summary" {
   function_name    = "csc3104-summary-${lower(each.key)}"
   role             = data.aws_iam_role.lab.arn
   runtime          = "python3.12"
-  handler          = "summary.app.lambda_handler"
+  handler          = "mulechain.summary.lambda_handler"
   filename         = "build/summary.zip"
   source_code_hash = try(filebase64sha256("build/summary.zip"), null)
   timeout          = 5
@@ -84,15 +84,20 @@ resource "aws_lambda_function_url" "summary" {
   authorization_type = "AWS_IAM"
 }
 
-# Per-bank chart values for install.sh (--set-json aws=...): the chart drops the in-cluster ingestor, summary and Valkey.
-output "bank_values" {
-  value = jsonencode({ for b, _ in local.banks : b => {
-    summaryUrl    = aws_lambda_function_url.summary[b].function_url
-    valkeyUrl     = "valkey://${aws_elasticache_replication_group.valkey[b].primary_endpoint_address}:6379"
-    vpcCidr       = data.aws_vpc.default.cidr_block
-    valkeyCidrs   = [for z in [0, 1] : aws_subnet.valkey["${b}${z}"].cidr_block]
-    kafkaNodePort = local.kafka_port[b]
-  } })
+# What Helm needs to know about AWS, written to deploy/eks-values.yaml by `make eks`: the image, every bank with
+# replicas, and each bank's own ElastiCache and Lambdas (the chart then runs no ingestor, summary or Valkey pods).
+output "helm_values" {
+  value = jsonencode({
+    image           = { repository = aws_ecr_repository.image.repository_url }
+    ha              = ["a", "b", "c"]
+    workloadsBucket = local.workloads_bucket
+    ingestorUrls    = { for b, _ in local.banks : b => aws_lambda_function_url.ingestor[b].function_url }
+    aws = { for b, _ in local.banks : b => {
+      summaryUrl    = aws_lambda_function_url.summary[b].function_url
+      valkeyUrl     = "valkey://${aws_elasticache_replication_group.valkey[b].primary_endpoint_address}:6379"
+      valkeyCidrs   = [for z in [0, 1] : aws_subnet.valkey["${b}${z}"].cidr_block]
+      vpcCidr       = data.aws_vpc.default.cidr_block
+      kafkaNodePort = local.kafka_port[b]
+    } }
+  })
 }
-
-output "ingestor_urls" { value = { for b, _ in local.banks : b => aws_lambda_function_url.ingestor[b].function_url } }

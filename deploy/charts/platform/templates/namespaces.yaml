@@ -1,0 +1,18 @@
+# One namespace per bank: the unit of isolation. Kubernetes rejects any pod there that
+# breaks the restricted Pod Security Standard (and `warn` makes helm say why).
+{{- range list "bank-a" "bank-b" "bank-c" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+{{- end }}
+# The replay Job stands in for the payment network, outside every bank. It isn't
+# restricted: on k3d it mounts the workloads from the host.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: replay

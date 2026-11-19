@@ -1,0 +1,55 @@
+# Privacy node: the only pod that talks to other banks (gRPC over mTLS). With `ha`, two
+# replicas share the store in PostgreSQL, and an advisory lock lets one at a time do
+# the background work.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: privacy-node
+spec:
+  replicas: {{ ternary 2 1 .Values.ha }}
+  selector:
+    matchLabels: {app: privacy-node}
+  template:
+    metadata:
+      labels: {app: privacy-node}
+    spec:
+      {{- include "bank.pod" . | nindent 6 }}
+      containers:
+        - name: privacy-node
+          image: {{ include "bank.image" . }}
+          args: [python, -m, mulechain.node.node]
+          env:
+            - {name: BANK, value: {{ .Values.bank }}}
+            - {name: VALKEY_URL, value: {{ include "bank.valkeyUrl" . | quote }}}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: postgres-app, key: uri}
+            - name: PEERS
+              value: {{ range $i, $peer := include "bank.peers" . | fromJsonArray }}{{ if $i }},{{ end }}{{ upper $peer }}=privacy-node.bank-{{ $peer }}.svc:50051{{ end }}
+            - {name: CASE_URL, value: "http://case:8000"}
+            - {name: KEY_DIR, value: /keys}
+            - {name: TLS_DIR, value: /tls}
+            # how long a peer may take to ingest its side of a transfer before "no match" is final
+            - {name: INGESTION_GRACE_SECONDS, value: "60"}
+          ports:
+            - containerPort: 50051
+          readinessProbe:
+            tcpSocket: {port: 50051}
+          volumeMounts:  # whole directories, not subPath, so renewals and rotations show up
+            - {name: keys, mountPath: /keys}
+            - {name: tls, mountPath: /tls}
+          {{- include "bank.container" (dict "limit" "256Mi") | nindent 10 }}
+      volumes:
+        - name: keys
+          secret: {secretName: bank-keys}
+        - name: tls
+          secret: {secretName: privacy-node-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: privacy-node
+spec:
+  selector: {app: privacy-node}
+  ports:
+    - port: 50051
