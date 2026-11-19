@@ -84,7 +84,7 @@ spec:
   policyTypes: [Egress]
   egress:
     - to:
-        {{- range .valkeyCidrs }}
+        {{- range required "aws.<bank>.valkeyCidrs: an empty list would allow every address" .valkeyCidrs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{protocol: TCP, port: 6379}]
