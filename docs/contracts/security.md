@@ -215,14 +215,17 @@ Live evidence (Isaac, k3d with bank A in HA, 20 Nov 2026; EKS not yet run):
 
 - Each bank's `privacy-node` Certificate is Ready from `ClusterIssuer/bank-ca`, carries
   exactly its DNS and URI SAN with server and client auth, verifies against the lab CA,
-  and is mounted read-only at `/tls` with no `subPath`.
+  and each node pod mounts that Secret (read-only, as all Secret volumes are) at `/tls`
+  with no `subPath`.
 - Each node (A→B, B→C, C→A) calling the next bank's node with its own certificate gets a
-  Trace answer (NO_MATCH). The same call is rejected with PERMISSION_DENIED when `sender`
-  names another bank; UNAUTHENTICATED for a lab-CA certificate with no bank URI SAN; and
-  fails the handshake (UNAVAILABLE) with no client certificate or a self-signed
+  Trace answer (NO_MATCH). The same call is rejected with PERMISSION_DENIED ("sender
+  differs from bank URI SAN") when `sender` names another bank. Right after another
+  accepted A→B call each time, it is rejected with UNAUTHENTICATED ("trusted bank URI
+  SAN required") for a lab-CA certificate with no bank URI SAN, and the server closes the
+  handshake (UNAVAILABLE, "Socket closed") with no client certificate or a self-signed
   certificate carrying bank A's URI SAN.
 - Renewing bank A's certificate (cert-manager's `Issuing` condition, as `cmctl renew`
-  sets it) issues a new key and certificate into the same Secret; within about a minute
+  sets it) issues a new certificate into the same Secret; within about a minute
   both of bank A's pods serve the new serial in a real handshake, all three calls keep
   succeeding, and pod UIDs and restart counts are unchanged.
 

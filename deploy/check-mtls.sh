@@ -20,7 +20,7 @@ channel = grpc.secure_channel(target, grpc.ssl_channel_credentials(open("/tls/ca
 request = pb.TraceRequest(query_id=f"mtls-check-{uuid.uuid4()}", sender=sender, key_version="k1",
     ref=pb.TokenRef(pair="X-Y", token=bytes(16)))
 try: print("OK", pb.State.Name(rpc.PrivacyNodeStub(channel).Trace(request, timeout=5).state))
-except grpc.RpcError as error: print(error.code().name)'
+except grpc.RpcError as error: print(error.code().name, error.details().rsplit(": ", 1)[-1])'  # drops the address
 
 trace() { # <label> <from bank> <to bank> <sender> <expect> [client PEM]
   got=$(kubectl exec -n "bank-$2" deploy/privacy-node -- python -c "$TRACE" "privacy-node.bank-$3.svc:50051" "$4" \
@@ -28,11 +28,13 @@ trace() { # <label> <from bank> <to bank> <sender> <expect> [client PEM]
   check "$1: bank-$2 -> bank-$3 as sender $4" "$5"
 }
 
+twin() { trace "own certificate (control)" a b A "OK NO_MATCH"; trace "$@"; } # a rejection right after its passing twin
+
 ring() { # every node calls the next bank's node with its own certificate, then claiming to be the bank it calls
   for pair in "a b" "b c" "c a"; do
     read -r from to <<<"$pair"
     trace "own certificate${1:-}" "$from" "$to" "${from^^}" "OK NO_MATCH"
-    [ -z "${1:-}" ] && trace "wrong-bank sender" "$from" "$to" "${to^^}" PERMISSION_DENIED
+    [ -z "${1:-}" ] && trace "wrong-bank sender" "$from" "$to" "${to^^}" "PERMISSION_DENIED sender differs from bank URI SAN"
   done
 }
 
@@ -53,8 +55,8 @@ pods() { kubectl get pod -n "bank-$1" -l app=privacy-node \
 failed=0
 echo "== Issued certificates and mounts"
 for b in a b c; do
-  got=$(kubectl get certificate -n "bank-$b" privacy-node -o jsonpath='{.spec.issuerRef.kind}/{.spec.issuerRef.name} {.status.conditions[?(@.type=="Ready")].status}')
-  check "bank-$b Certificate issuer, Ready" "ClusterIssuer/bank-ca True"
+  got=$(kubectl get certificate -n "bank-$b" privacy-node -o jsonpath='{.spec.secretName} {.spec.issuerRef.kind}/{.spec.issuerRef.name} {.status.conditions[?(@.type=="Ready")].status}')
+  check "bank-$b Certificate Secret, issuer, Ready" "privacy-node-tls ClusterIssuer/bank-ca True"
   crt=$(secret "bank-$b")
   got=$(openssl x509 -noout -ext subjectAltName <<<"$crt" | tail -1 | xargs)
   check "bank-$b SANs" "DNS:privacy-node.bank-$b.svc, URI:spiffe://csc3104/bank/${b^^}/privacy-node"
@@ -62,18 +64,16 @@ for b in a b c; do
   check "bank-$b usages" "TLS Web Server Authentication, TLS Web Client Authentication"
   got=$(openssl verify -CAfile <(secret cert-manager bank-ca) <(echo "$crt") 2>&1 | sed 's/.*: //')
   check "bank-$b certificate verifies against the lab CA (cert-manager/bank-ca)" "OK"
-  got=$(kubectl get deploy -n "bank-$b" privacy-node -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[?(@.name=="tls")]}')
-  check "bank-$b /tls mount" '{"mountPath":"/tls","name":"tls"}'
-  while read -r pod _; do
-    got=$(kubectl exec -n "bank-$b" "$pod" -- sh -c 'ls /tls | xargs; touch /tls/x 2>/dev/null && echo writable' 2>/dev/null)
-    check "bank-$b $pod /tls files, read-only" "ca.crt tls.crt tls.key"
+  while read -r pod _; do # the whole mount (no subPath) and its source; Secret volumes are always read-only
+    got="$(kubectl get pod -n "bank-$b" "$pod" -o jsonpath='{.spec.containers[0].volumeMounts[?(@.name=="tls")]} {.spec.volumes[?(@.name=="tls")].secret.secretName}') $(kubectl exec -n "bank-$b" "$pod" -- ls /tls | xargs)"
+    check "bank-$b $pod /tls mount, Secret, files" '{"mountPath":"/tls","name":"tls"} privacy-node-tls ca.crt tls.crt tls.key'
   done < <(pods "$b")
 done
 
 echo "== Peer calls"
 ring
-trace "no client certificate" a b A UNAVAILABLE none
-trace "self-signed certificate with bank A's URI SAN" a b A UNAVAILABLE "$(openssl req -x509 -newkey ec \
+twin "no client certificate" a b A "UNAVAILABLE Socket closed" none  # the server ends the handshake
+twin "self-signed certificate with bank A's URI SAN" a b A "UNAVAILABLE Socket closed" "$(openssl req -x509 -newkey ec \
   -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=impostor -days 1 \
   -addext subjectAltName=URI:spiffe://csc3104/bank/A/privacy-node -keyout /dev/stdout -out /dev/stdout 2>/dev/null)"
 kubectl apply -n bank-a -f - >/dev/null <<'EOF'
@@ -87,7 +87,7 @@ spec:
   issuerRef: {name: bank-ca, kind: ClusterIssuer}
 EOF
 kubectl wait -n bank-a certificate/mtls-check-no-uri --for=condition=Ready --timeout=60s >/dev/null
-trace "lab-CA certificate without a bank URI SAN" a b A UNAUTHENTICATED \
+twin "lab-CA certificate without a bank URI SAN" a b A "UNAUTHENTICATED trusted bank URI SAN required" \
   "$(secret bank-a mtls-check-no-uri tls.key; secret bank-a mtls-check-no-uri)"
 kubectl delete -n bank-a certificate/mtls-check-no-uri secret/mtls-check-no-uri >/dev/null
 
@@ -96,7 +96,7 @@ before=$(pods a) old=$(serial a)
 kubectl patch certificate privacy-node -n bank-a --subresource=status --type=json -p "[{\"op\": \"add\", \
   \"path\": \"/status/conditions/-\", \"value\": {\"type\": \"Issuing\", \"status\": \"True\", \
   \"reason\": \"ManuallyTriggered\", \"message\": \"check-mtls.sh\", \"lastTransitionTime\": \"$(date -u +%FT%TZ)\"}}]" \
-  >/dev/null  # what cmctl renew does: cert-manager issues a new key and certificate into the same Secret
+  >/dev/null  # what cmctl renew does: cert-manager issues a new certificate into the same Secret
 for _ in $(seq 60); do new=$(serial a); [ -n "$new" ] && [ "$new" != "$old" ] && break; sleep 2; done
 got=$([ -n "$new" ] && [ "$new" != "$old" ] && echo renewed)
 check "bank-a certificate $old -> $new" renewed
