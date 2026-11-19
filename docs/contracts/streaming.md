@@ -35,7 +35,7 @@ the topic exists: non-fatal Kafka errors are logged and retried. A scorer test l
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
 The live scorer keeps its state in the bank's Valkey (`ValkeyState`, [Valkey layout](#valkey-layout-draft-cindy--zane));
-tests and the offline evaluator use a `MemoryState` with the same methods
+tests use a `MemoryState` with the same methods, and the offline evaluator a `ValkeyState` on fakeredis
 ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)). The window is trimmed by
 event time per account, with no count cap; an account's watermark is its latest kept
 event. In a `MemoryState` the other entries (`pay`, links, hits, `last`) last for the
@@ -252,7 +252,7 @@ Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 
 ## Scorer as a library (**draft**, Cindy → Isaac)
 
-The offline evaluator runs the live rule code over bank files, with no Kafka or Valkey.
+Tests can run the live rule code over bank files with no Kafka or Valkey. The offline evaluator doesn't: it scores into a `ValkeyState` on fakeredis, so its node reads through `ValkeyBank` as live.
 
 ```python
 from scorer import score_file
@@ -261,10 +261,10 @@ state = score_file("apps/dataset/fixtures/tiny", "B")
 ```
 
 - `score_file(workload, bank)` reads `<workload>/bank_<bank>.csv` in file order, runs every rule (they skip anything but `GIRO` and `MEPS+`, as replay does) and returns a `MemoryState`. It writes no tokens; the node's CSV mode indexes its own.
-- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node and the evaluator read it with:
+- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node reads it with:
   - `links(payment_id, direction)`: the `link:in:` or `link:out:` payment IDs, sorted
   - `payment(payment_id, direction)`: the `pay:` entry, or `None`
-  - `lookup(pair, key_version, token)`: the `tok:` entry, or `None` (live only: the scorer writes tokens when it has key files)
+  - `lookup(pair, key_version, token)`: the `tok:` entry, or `None` (populated when the scorer has key files)
   - `hits()`: every hit as `{rule, account, payments, hit_id}`, in the order written
 - Sample: [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json), every bank's links and hits on the tiny fixture. It matches issue #27's fixture table and was generated from #27's reference script (chain, new payee, quick repeat) plus the fast rule; `test_score_file_matches_library_sample` checks the scorer against it. The fixture has no quick repeat.
 

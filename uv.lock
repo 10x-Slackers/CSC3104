@@ -498,6 +498,8 @@ name = "evaluation"
 version = "0.1.0"
 source = { editable = "apps/evaluation" }
 dependencies = [
+    { name = "case" },
+    { name = "fakeredis" },
     { name = "ingestor" },
     { name = "privacy-node" },
     { name = "scorer" },
@@ -506,6 +508,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "case", editable = "apps/case" },
+    { name = "fakeredis", specifier = ">=2.40" },
     { name = "ingestor", editable = "apps/ingestor" },
     { name = "privacy-node", editable = "apps/privacy_node" },
     { name = "scorer", editable = "apps/scorer" },

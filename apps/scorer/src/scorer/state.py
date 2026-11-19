@@ -1,7 +1,7 @@
 """A bank's scorer state, with the entries of streaming.md's Valkey layout.
 
-MemoryState keeps them in dicts (tests and the offline evaluator); ValkeyState keeps
-them in the bank's Valkey (live). Both have the same methods.
+MemoryState keeps them in dicts (tests); ValkeyState keeps them in the bank's Valkey
+(live, and the offline evaluator's fakeredis). Both have the same methods.
 """
 
 import json
@@ -71,7 +71,7 @@ class MemoryState:
     def commit(self) -> None:
         pass  # every write above is already in place
 
-    # read by the node and the offline evaluator
+    # read by the node
 
     def links(self, payment_id: str, direction: Direction) -> list[str]:
         return sorted(self.link.get((direction, payment_id), ()))
@@ -173,7 +173,7 @@ class ValkeyState:
     def commit(self) -> None:
         self.tx.execute()  # the pipeline empties itself, even on failure
 
-    # read by the node and the offline evaluator
+    # read by the node
 
     def links(self, payment_id: str, direction: Direction) -> list[str]:
         return sorted(self.db.smembers(f"link:{direction}:{payment_id}"))
