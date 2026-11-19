@@ -194,7 +194,7 @@ class Scorer:
 
 
 def score_file(workload: str | Path, bank: str) -> MemoryState:
-    """Run the live rules over one bank file, as the offline evaluator does."""
+    """Run the live rules over one bank file, in memory."""
     scorer = Scorer(bank)
     for e in read_events(Path(workload) / f"bank_{bank}.csv"):
         scorer.process(e)

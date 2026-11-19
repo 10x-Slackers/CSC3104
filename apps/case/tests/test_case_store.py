@@ -225,3 +225,17 @@ def test_no_other_banks_data_in_any_stored_table(store):
     )
     assert "B-m1" in dump  # B's own legs are stored
     assert leaks(dump, foreign("B")) == set()
+
+
+def test_reconnects_after_postgresql_restarts(url):
+    if not url.startswith("postgres"):
+        pytest.skip("needs CASE_TEST_DATABASE_URL")
+    import psycopg
+
+    store = CaseStore(url)
+    pid = store.db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+    with psycopg.connect(url, autocommit=True) as admin:  # what a failover does to it
+        admin.execute("SELECT pg_terminate_backend(%s, 5000)", (pid,))  # waits
+    with pytest.raises(psycopg.OperationalError):
+        store.record(message(o1()))  # the POST in flight fails; the node resends
+    assert store.get(store.record(message(o1())))  # the resend reconnects
