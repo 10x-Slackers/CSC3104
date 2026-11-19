@@ -153,7 +153,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
         """One timestamped JSON line to stdout with the ms since start (evaluation.md)."""
         ms = round((time.monotonic() - start) * 1000, 1)
         line = {"ts": time.time(), "service": "privacy_node", "bank": self.bank}
-        print(json.dumps(line | fields | {"ms": ms}), flush=True)
+        # one write per line, so lines from concurrent threads can't interleave
+        sys.stdout.write(json.dumps(line | fields | {"ms": ms}) + "\n")
+        sys.stdout.flush()
 
     # ---- outgoing calls -------------------------------------------------
 
