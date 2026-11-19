@@ -1,6 +1,6 @@
 # Evaluation
 
-Owner: Isaac · Evidence supplied by every owner · Status: offline evaluator built; **pending work**: the evaluation runs
+Owner: Isaac · Evidence supplied by every owner · Status: offline evaluator built and matched to the cluster (experiment 13, 19 Nov); **pending work**: the other evaluation runs
 
 Every claim needs a measured indicator, and the main results need graphs. Detection quality is measured **offline**, and the system (latency, scaling, failures) on the **cluster**.
 
@@ -13,7 +13,7 @@ Every claim needs a measured indicator, and the main results need graphs. Detect
 - **Sound benchmarking** (Hoefler and Belli, SC'15): run each configuration at least 5 times and report the median and p95 with min/max, documenting every factor that varies.
 - **Open-loop load:** replay at fixed rates (`--rate`, events/s) for load tests, which avoids coordinated omission; `--speed 60` is for the demo only.
 - **Failures as RTO and RPO** (MAS TRM §8.2.1): RTO = time to the next alert, RPO = alerts lost. Define the steady state before injecting a fault. Faults: `kubectl delete pod`, `kubectl scale --replicas=0`, a temporary deny-all NetworkPolicy. k3d is one node, so failover there is pod-level only.
-- Explain trade-offs and bottlenecks, including any case where scaling doesn't help (e.g. bank B's hot account, which carries 13% of its events).
+- Explain trade-offs and bottlenecks, including any case where scaling doesn't help.
 
 ## Offline detection evaluation
 
@@ -33,7 +33,7 @@ Experiments 2–4 and 14 run offline; the rest run on k3d, and 10 on AWS.
 | # | Question | Setup | Report |
 | --- | --- | --- | --- |
 | 1 | Does tracing work? | Fixture scenarios (`m1`, `l1`, `o1`, `x1`, `v1`) end to end | Every expected link, state and tier |
-| 2 | Detection vs Altman | Rules tuned on dev, eval run once | Per pattern type: Tier 1 vs Tier 2 recall (attempts), payment-level recall, precision, cases per bank per day |
+| 2 | Detection vs Altman | Rules tuned on dev, eval run once | Per pattern type: recall at any tier vs at Tier 2 (attempts), payment-level recall, precision, cases per bank per day |
 | 3 | Thresholds | Dev only: chain ratio band and window, the quick-repeat window, amount floor, rule-backed banks for Tier 2 (1/2/3) (exploratory starting point: 0.90–1.10, 72 h, 24 h, no floor) | False positives vs recall; the chosen point |
 | 4 | Hop limit | `HOP_LIMIT` 4/6/8 | Chain recall on Altman cycles vs search latency |
 | 5 | Does scaling help? | Fixed low and high rates; fixed replicas vs KEDA; 6 partitions | Throughput, lag, replicas, CPU/memory, p50/p95 latency; KEDA reaction time (polling 30 s, cooldown 300 s) |
@@ -57,7 +57,7 @@ Security evidence (sentinel values never leave a bank; bad certificates and clai
 | Peer-trace latency | Search start → search result | Report separately |
 | Analyst load | Cases per bank per day, by tier | From the offline evaluator |
 
-**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. Each service logs `payment_id` or `chain_digest` with its own timestamp as JSON to stdout, and pandas joins them. Pending work for every owner, by Fri 6 Nov.
+**Clocks:** latency is measured on k3d, where every pod shares the host clock, and from ingestion to an alert at the same bank, so no cross-machine clocks are compared. The scorer logs each `payment_id` with its Kafka timestamp and the case service each stored message's key (`chain_digest` for a chain), as JSON lines to stdout with their own timestamp (`ts`), and pandas joins them. The privacy node logs no JSON lines yet.
 
 **Metric sources** (no monitoring stack): `kubectl top`, `kubectl get hpa`, `kafka-consumer-groups.sh`, CloudWatch for Lambda, and JSON logs. Results are presented as RED (rate, errors, duration) and USE (utilisation, saturation, errors).
 

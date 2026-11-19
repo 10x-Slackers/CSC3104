@@ -1,10 +1,6 @@
 # Streaming and scoring contract
 
-Owner: Cindy · Partners: Macarius (events), Isaac (search handoff, privacy node), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, needs review by Macarius and Zane
-
-> [!NOTE]
-> **Pending work (decided 30 Oct 2026).** The sections below describe what exists today; this item changes it:
-> - **Alert tiers** replace the minimum chain length ([case.md](case.md#cases-and-alerts)).
+Owner: Cindy · Partners: Macarius (events), Isaac (search handoff, privacy node), Caleb (tokens), Isaac (scaling, baseline comparison) · Code: `apps/scorer/` · Status: **draft**, needs review by Macarius and Isaac
 
 Scope: bank-local Kafka, the ingestor, token-index population, the scorer's rule windows, KEDA scaling and the local-only baseline.
 
@@ -33,7 +29,7 @@ because the broker advertises in-cluster addresses. The consumer may start befor
 the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
 
-The live scorer keeps its state in the bank's Valkey (`ValkeyState`, [Valkey layout](#valkey-layout-draft-cindy--zane));
+The live scorer keeps its state in the bank's Valkey (`ValkeyState`, [Valkey layout](#valkey-layout-draft-cindy--isaac));
 tests use a `MemoryState` with the same methods, and the offline evaluator a `ValkeyState` on fakeredis
 ([Scorer as a library](#scorer-as-a-library-draft-cindy--isaac)). The window is trimmed by
 event time per account, with no count cap; an account's watermark is its latest kept
@@ -56,10 +52,11 @@ Each event that writes a link or a hit logs one JSON line to stdout, for latency
 `kafka_ts` is the record's Kafka timestamp, set when the ingestor wrote it, and `ts` is
 when the scorer's Valkey write finished. Errors are logged as `level: error` lines.
 
-The privacy node still runs the older in-memory path in-process (`consume()` with
-`require_replay`): there, a restart needs a full replay with a fresh group, offsets
-commit synchronously, and assignment rejects resumed offsets or several partitions.
-That path goes once the node reads Valkey.
+The privacy node's integrated mode (`--bootstrap-servers`, [Search handoff](#search-handoff))
+still runs the older in-memory path in-process (`consume()` with `require_replay`): there,
+a restart needs a full replay with a fresh group, offsets commit synchronously, and
+assignment rejects resumed offsets or several partitions. The deployed node doesn't use
+it: it reads Valkey (`--valkey-url`).
 
 ## Detection rule
 
@@ -69,7 +66,7 @@ The rule indicates suspicion, not proven laundering. Start with a single-currenc
 | --- | --- | --- |
 | Incoming-to-outgoing value ratio | Outgoing / incoming: 0.90–0.98 inclusive | `--min-ratio`, `--max-ratio`; draft defaults pending team approval |
 | Time window | 1–30 minutes inclusive, using transaction timestamps | `--min-delay` (60 seconds), `--window` (1800 seconds) |
-| Minimum chain length | Replaced by the alert tiers | **pending work:** [case.md](case.md#cases-and-alerts) |
+| Minimum chain length | Replaced by the alert tiers | [case.md](case.md#cases-and-alerts) |
 | Hop limit | 4 (`HOP_LIMIT`, up to 5 transfers) | Shared with [protocol.md](protocol.md#why-the-hop-limit-is-4); checked by a 4/6/8 sweep |
 | Branching cap | 1 (`BRANCH_CAP`): linear chains | The new payee rule flags the payments of fans instead |
 | Fees, currencies, insufficient history | Uses Role 1's data, all amounts in SGD ([data.md](data.md#preparation-rules-preparepy)); no separate fee model. Missing or trimmed history produces no local match | History is bounded by the event-time trim, not a count |
@@ -78,12 +75,12 @@ Four rules, at every bank, on **cross-bank bank transfers**: `GIRO` and `MEPS+` 
 
 | Rule | Starting thresholds | Basis | Output |
 | --- | --- | --- | --- |
-| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link; starts a search |
+| Fast pass-through | out/in 0.90–0.98 within 1–30 min (today's rule) | Guidelines to MAS Notice 626 B-2(iii), "withdrawn immediately after being deposited" | Local link (no hit, so no search of its own) |
 | Chain (slow pass-through) | Bank transfer in and out of one account, out/in 0.90–1.10 within 72 h; at least one of the two payments is with another bank | B-4(i) "high velocity of funds", B-5(iv) "within a short period"; Altman's 90th-percentile hop delay is 69.7 h | Local link; starts a search |
 | New payee | A bank transfer to an account at another bank that this customer has never paid | TODO (Cindy): cite the red flag. Covers fan-in, fan-out, scatter/gather and bipartite patterns, which create first-time payer–payee pairs | Hit |
 | Quick repeat | Another bank transfer to the same payee at another bank within 24 h of a flagged payment to it | TODO (Cindy): cite the red flag | Hit |
 
-- Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag and the planted acceptance chains depend on it.
+- Chain, new payee and quick repeat each write a hit; how hits become cases and alerts is in [case.md](case.md#cases-and-alerts). The fast rule writes no hit (on Altman's dev days it found 1 laundering link in 4,278), but it stays because it's the cited "immediately" flag. The planted acceptance chains use its band, but their links are chain links too.
 - Bank transfers carry 87% of Altman's laundering but 12% of transfers, a dataset artefact; the payment-type filter is reported as dev-tuned. Cheque, card and cash laundering, mostly from bank-70 hub accounts whose laundering payments look like their ordinary ones, is out of reach of any rule.
 - **Exploratory sweep** (Macarius, 31 Oct, re-run 7 Nov on the offline evaluator's definitions; a scratchpad script, not the offline evaluator; amounts in SGD, three banks, bank-transfer history, every hit counted as caught; comparisons on HI-Small's dev split):
   - **Chain band 0.90–1.10:** laundering forwards about the same amount (median 1.00). Compared with 0.50–1.50 it cut this rule's ordinary flags by about 80% (3,877 to 796 a day) for 0.7 points of recall.
@@ -116,7 +113,7 @@ it is not an approved peer payload.
 The live scorer writes a token for every cross-bank bank transfer it sees, flagged or
 not, and late or repeated ones too: a `tok:<pair>:<version>:<token>` entry for every
 active key version, and the query version's token in the payment's `pay:` entry
-([Valkey layout](#valkey-layout-draft-cindy--zane)). Same-bank events get no token.
+([Valkey layout](#valkey-layout-draft-cindy--isaac)). Same-bank events get no token.
 Tokens come from Role 4's `TokenIndex.tokens()` (`canonical_pair`, `derive_token`,
 pair keys from X25519 files); see [security.md](security.md) for the token and
 key-file contract. A peer looks a token up with `lookup(pair, version, token)`, and
@@ -160,9 +157,9 @@ trip and writes 1,000 entries per `MULTI`/`EXEC`. A bank holds roughly 350,000�
 10 s per pass for a whole bank, which will show as lag in experiment 12 and stays well
 under librdkafka's `max.poll.interval.ms` (300 s).
 
-The privacy node's in-process path still keeps its own in-memory `TokenIndex`
+Integrated mode still keeps its own in-memory `TokenIndex` in the privacy node
 (`add()`/`lookup()` with references, `--max-token-references` as a fail-stop bound);
-that goes once the node reads Valkey.
+the deployed node looks tokens up in Valkey.
 
 ## Search handoff
 
@@ -186,7 +183,7 @@ replay with a fresh group; there is no atomic durable handoff or exactly-once
 guarantee. Role 3's existing pending/timed-out search retries and result outbox
 are unchanged.
 
-### Valkey layout (**draft**, Cindy → Zane)
+### Valkey layout (**draft**, Cindy → Isaac)
 
 The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`) and the privacy node reads from it (`privacy_node/valkey_bank.py`), so they run in separate pods. One Valkey per bank, so keys carry no bank prefix. Only the scorer and the privacy node connect ([security.md](security.md#mtls-and-networkpolicy)). Client: [valkey-py](https://github.com/valkey-io/valkey-py).
 
@@ -205,7 +202,7 @@ The scorer writes to Valkey (`ValkeyState` in `scorer/state.py`) and the privacy
 - **Repeats:** a resent event (same `ce_id`) builds the same `win:` member, so the scorer finds it in the window and skips it. No separate dedup key. `pay:`/`tok:` writes are idempotent.
 - **One transaction per event:** the scorer reads first, then writes all keys for the event in one `MULTI`/`EXEC`, then calls `store_offsets()`. A crash before `EXEC` writes nothing; after it, the redelivered event is a repeat. So `hits` gets one entry per hit, except after a full rebuild, when the node skips hit IDs it already has.
 - **Concurrency:** every key is per account or per payment, so partition ownership gives each one writer and replicas share no mutable state.
-- **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, within `HOP_LIMIT`. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
+- **Intra-bank hops (draft):** links include intra-bank legs, and the node follows them when it answers, until it reaches a cross-bank payment, through at most `MAX_INTERNAL_HOPS` (4) intra-bank hops. The two legs of an internal hop are on different accounts and partitions, so collapsing them when writing would depend on which replica runs first.
 - **TTL (garbage collection only):** 7 days, refreshed on write, for every key except `last:`. It must exceed 2 × 72 h of event time, or a quiet account loses chain state in live running.
 - **Loss:** Valkey is derived state. Rebuild it by replaying from `earliest` with a fresh group into an empty Valkey. Over existing state a fresh group rewrites nothing, because every event is found in its window or is more than 72 h behind the watermark.
 
@@ -230,7 +227,7 @@ A KEDA `ScaledObject` on consumer-group lag (`deploy/charts/bank/templates/score
 - `offsetResetPolicy: earliest`: with the default `latest`, a fresh group reports lag 1, so the first replay would never scale.
 - `lagThreshold` 100 in the chart; the target is measured events/s per replica × acceptable delay.
 - `pollingInterval` 30 s and `cooldownPeriod` 300 s (defaults) bound the reaction time and are reported.
-- Bank B's hot account carries 13% of its events, which caps its speed-up at about 3.7× with 6 replicas; report it as a measured limit.
+- No account is hot: on `altman-small` (bank transfers only), the busiest account at any bank carries at most 0.04% of its events, so keying by account doesn't cap the speed-up.
 
 ## Local-only baseline
 
@@ -247,7 +244,7 @@ Verified tiny-fixture local pairs (stable IDs reproduce on replay):
 | B | 4 | p06 → p07; p10 → p11; p15 → p16; p18 → p19 |
 | C | 3 | p11 → p12; p16 → p17; p19 → p20 |
 
-**pending work:** the offline evaluator ([evaluation.md](../evaluation.md#offline-detection-evaluation)) supersedes this as the local-only vs cross-bank comparison, running the same scorer code.
+The offline evaluator ([evaluation.md](../evaluation.md#offline-detection-evaluation)) supersedes this as the local-only vs cross-bank comparison, running the same scorer code.
 
 ## Scorer as a library (**draft**, Cindy → Isaac)
 
@@ -260,7 +257,7 @@ state = score_file("apps/dataset/fixtures/tiny", "B")
 ```
 
 - `score_file(workload, bank)` reads `<workload>/bank_<bank>.csv` in file order, runs every rule (they skip anything but `GIRO` and `MEPS+`, as replay does) and returns a `MemoryState`. It writes no tokens; the node's CSV mode indexes its own.
-- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--zane), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node reads it with:
+- `MemoryState` (`scorer/state.py`) holds the same entries as the [Valkey layout](#valkey-layout-draft-cindy--isaac), in dicts, and the live `ValkeyState` has the same methods, so the rules are one piece of code. `test_valkey.py` runs the tiny fixture through both and checks they agree. The node reads it with:
   - `links(payment_id, direction)`: the `link:in:` or `link:out:` payment IDs, sorted
   - `payment(payment_id, direction)`: the `pay:` entry, or `None`
   - `lookup(pair, key_version, token)`: the `tok:` entry, or `None` (populated when the scorer has key files)
@@ -274,7 +271,7 @@ Agreed contract first ([conventions](../README.md#conventions)): the producer ad
 | Interface | From → to | Pins down | Status | Agree by |
 | --- | --- | --- | --- | --- |
 | Kafka transaction event ([streaming.md](streaming.md#kafka-events)) | Macarius → Cindy | Topic, key, JSON fields, CloudEvents headers, two events per intra-bank transfer | **agreed** (Cindy, 3 Nov), sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json) | Mon 2 Nov |
-| Valkey layout ([streaming.md](streaming.md#valkey-layout-draft-cindy--zane)) | Cindy → Isaac (privacy node) | Key names, token-index value, local links (including intra-bank legs), `hit:` keys, windows, TTL and trim | **agreed** (Isaac, 18 Nov; the node reads it), sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json) | Wed 4 Nov |
+| Valkey layout ([streaming.md](streaming.md#valkey-layout-draft-cindy--isaac)) | Cindy → Isaac (privacy node) | Key names, token-index value, local links (including intra-bank legs), `hit:` keys, windows, TTL and trim | **agreed** (Isaac, 18 Nov; the node reads it), sample [`valkey_state.json`](../../apps/scorer/fixtures/valkey_state.json) | Wed 4 Nov |
 | Scorer as a library ([streaming.md](streaming.md#scorer-as-a-library-draft-cindy--isaac)) | Cindy → Isaac | Entry point over one bank file, in-memory state store | **draft**, sample [`tiny_expected.json`](../../apps/scorer/fixtures/tiny_expected.json); Isaac to approve | Wed 4 Nov |
 
 Also part of: [Token and key API](security.md#interfaces), [Alert tiers](case.md#interfaces).
