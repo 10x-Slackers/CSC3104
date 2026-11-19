@@ -53,6 +53,13 @@ class OfflineContext:
         raise RuntimeError(f"peer rejected a call: {code} {details}")
 
 
+class OfflineState(ValkeyState):
+    """The live scorer state without its TTLs: a run ends long before they would."""
+
+    def _expire(self, key: str) -> None:
+        pass  # about a sixth of the scorer's time through fakeredis
+
+
 def start_nodes(workload: str | Path, key_dir: str) -> dict[str, OfflineNode]:
     """Score each bank's file into its own Valkey, then start a node on it."""
     prepare_demo_keys(key_dir)
@@ -61,7 +68,7 @@ def start_nodes(workload: str | Path, key_dir: str) -> dict[str, OfflineNode]:
         db = fakeredis.FakeValkey(decode_responses=True)
         paths = pair_paths(key_dir, bank)
         index = TokenIndex(bank, KEY_VERSION, paths)
-        scorer = Scorer(bank, state=ValkeyState(db), token_index=index)
+        scorer = Scorer(bank, state=OfflineState(db), token_index=index)
         for event in read_events(Path(workload) / f"bank_{bank}.csv"):
             scorer.process(event)  # it skips all but bank transfers, as replay does
         nodes[bank] = OfflineNode(
