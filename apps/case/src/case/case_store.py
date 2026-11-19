@@ -181,13 +181,9 @@ class Db:
     """One connection; SQL uses ? placeholders for both SQLite and PostgreSQL."""
 
     def __init__(self, url: str) -> None:
-        self.pg = url.startswith("postgres")
+        self.url, self.pg = url, url.startswith("postgres")
         if self.pg:
-            import psycopg
-            from psycopg.rows import dict_row
-
-            self.conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
-            self.conn.execute(SCHEMA)
+            self._connect()
         else:
             self.conn = sqlite3.connect(url, isolation_level=None, timeout=30)
             self.conn.row_factory = lambda cur, row: {
@@ -196,10 +192,23 @@ class Db:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
 
+    def _connect(self) -> None:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        self.conn = psycopg.connect(self.url, autocommit=True, row_factory=dict_row)
+        self.conn.execute(SCHEMA)
+
+    def _reconnect_if_broken(self) -> None:
+        if self.pg and self.conn.broken:  # PostgreSQL restarted or failed over
+            self._connect()
+
     def execute(self, sql: str, args=()):
+        self._reconnect_if_broken()
         return self.conn.execute(sql.replace("?", "%s") if self.pg else sql, args)
 
     def executemany(self, sql: str, rows) -> None:
+        self._reconnect_if_broken()
         if self.pg:
             self.conn.cursor().executemany(sql.replace("?", "%s"), rows)
         else:
@@ -208,6 +217,7 @@ class Db:
     @contextmanager
     def write(self):
         """One transaction; concurrent writers queue, so a merge sees every case."""
+        self._reconnect_if_broken()
         if self.pg:
             with self.conn.transaction():
                 self.conn.execute("LOCK TABLE cases IN SHARE ROW EXCLUSIVE MODE")
