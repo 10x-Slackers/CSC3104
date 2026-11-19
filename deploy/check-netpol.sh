@@ -39,6 +39,7 @@ probe bank-a kafka-kafka-bootstrap.bank-a:9092 blocked
 app a privacy-node kafka-kafka-bootstrap.bank-a:9092 blocked
 app b scorer kafka-kafka-bootstrap.bank-c:9092 blocked
 probe default kafka-kafka-bootstrap.bank-a:9092 blocked
+probe keda kafka-kafka-bootstrap.bank-a:9092 open  # KEDA reads the scorer's consumer lag
 # PostgreSQL: only its own bank's privacy node and case service.
 app a privacy-node postgres-rw.bank-a:5432 open
 app b case postgres-rw.bank-b:5432 open

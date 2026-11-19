@@ -27,7 +27,8 @@ account key. Run the scorer with
 `SCORER_BANK=B VALKEY_URL=valkey://valkey:6379 uv run python -m scorer.stream`; the
 settings are in [deployment.md](deployment.md#per-service-settings), and a flag overrides
 each one (`--help`). The k3d Kafka has only an in-cluster listener, so run it
-inside the cluster with `kafka-kafka-bootstrap:9092`; a port-forward does not work
+inside the cluster with `kafka-kafka-bootstrap:9092`, in a pod labelled `app: scorer`
+(the bank's NetworkPolicies let only the ingestor and scorer reach Kafka); a port-forward does not work
 because the broker advertises in-cluster addresses. The consumer may start before
 the topic exists: non-fatal Kafka errors are logged and retried. A scorer test loads
 the shared sample [`kafka_events.json`](../../apps/ingestor/fixtures/kafka_events.json).
