@@ -57,13 +57,14 @@ probe default "$pg:8000" blocked
 app a privacy-node case.bank-a:8000 open
 app a scorer case.bank-a:8000 blocked
 probe default case.bank-a:8000 blocked  # the server's own rule: default has no egress policy
-# Privacy node peers: only privacy-node pods, only to the other banks' privacy nodes.
-app a privacy-node privacy-node.bank-b:50051 open
-app c privacy-node privacy-node.bank-a:50051 open
-app a scorer privacy-node.bank-a:50051 blocked
-# Nor a privacy node in its own bank (bank A runs two under the HA flag).
+# Privacy node peers: only privacy-node pods, only to the other banks' privacy nodes, not to one in their own bank
+# (bank A runs two under the HA flag; bank C's probe shows the second one listening).
 read -r n1 n2 < <(kubectl get pod -n bank-a -l app=privacy-node -o jsonpath='{.items[*].metadata.name}')
-app a "pod/$n1" "$(kubectl get pod -n bank-a "$n2" -o jsonpath='{.status.podIP}'):50051" blocked
+n2=$(kubectl get pod -n bank-a "$n2" -o jsonpath='{.status.podIP}'):50051
+app a privacy-node privacy-node.bank-b:50051 open
+app c privacy-node "$n2" open
+app a scorer privacy-node.bank-a:50051 blocked
+app a "pod/$n1" "$n2" blocked
 probe bank-a privacy-node.bank-b:50051 blocked
 probe default privacy-node.bank-a:50051 blocked
 if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
