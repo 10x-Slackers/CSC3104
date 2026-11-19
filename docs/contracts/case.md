@@ -2,10 +2,6 @@
 
 Owner: Jia Rui · Partners: Isaac (node → case messages, deployment), Cindy, Caleb (own-leg data, summary input) · Code: `apps/case/`, `apps/summary/` · Status: **draft**, needs review by Isaac and Caleb
 
-> [!NOTE]
-> **Pending work (decided 30 Oct 2026).** The case service and summary service below are built; these items, owned by others, are still needed to run them end to end:
-> - **Deployment (Isaac):** the summary service as a Lambda function URL on EKS. The `cases` database and both Deployments are in the bank chart ([deployment.md](deployment.md#per-service-settings)).
-
 Scope: the bank-local case schema, alert tiers, canonical chain identity, durable alert uniqueness, the read-only analyst UI and the summary service.
 
 ## Cases and alerts
@@ -63,7 +59,7 @@ Tracked here and by the `DEPENDS ON` comments in `apps/case/`.
 | The privacy node posts its messages to `POST /results` | Role 3 (privacy node) | Done (Isaac, 18 Nov); a `local` message waits out the ingestion grace in memory, so a pod restart in that window drops it ([protocol.md](protocol.md#searches-from-valkey)) | `apps/case/src/case/app.py` (`results`), `evidence.py` (`parse`) | `apps/privacy_node/src/privacy_node/store.py` (`save_chain`, outbox) |
 | Rule-backed claims and tiers | Roles 2 and 3 | **draft**: same definition as the offline evaluator | `apps/case/src/case/evidence.py` (`tier`) | `apps/evaluation/src/evaluation/run.py` (`chain_tier`) |
 | Own-leg data and the summary input fields | Role 4 (security and privacy) | **draft**, Caleb to review | `apps/case/src/case/report.py` (`report_input`) | `docs/contracts/security.md` |
-| A `cases` database, Deployments and the summary Lambda | Isaac (deployment) | Database and Deployments in the chart; **pending work**: the summary Lambda | `apps/case/src/case/app.py`, `apps/summary/src/summary/app.py` | `deploy/charts/bank/` |
+| A `cases` database, Deployments and the summary Lambda | Isaac (deployment) | Database and Deployments in the chart; the summary Lambda per bank on EKS (`deploy/terraform/lambda.tf`) | `apps/case/src/case/app.py`, `apps/summary/src/summary/app.py` | `deploy/charts/bank/` |
 
 ## Interfaces
 

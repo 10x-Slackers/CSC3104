@@ -1,5 +1,5 @@
 resource "aws_ecr_repository" "image" {
-  for_each     = toset(["ingestor", "scorer", "privacy-node", "case", "summary", "dataset"])
+  for_each     = toset(["scorer", "privacy-node", "case", "dataset"]) # the ingestor and summary service ship as zips
   name         = "csc3104/${each.key}"
   force_delete = true
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs onto the current cluster: platform operators, lab CA, lab keys, the replay namespace and one bank release per namespace.
-# Usage: install.sh <image repository> <tag> [helm flags for every bank]. Called by k3d-up.sh and eks-up.sh once the images are in place.
+# Usage: [HA=<banks, e.g. abc>] install.sh <image repository> <tag> [helm flags for every bank]. Called by k3d-up.sh and
+# eks-up.sh once the images are in place; HA lists the banks run with replicas (the chart's ha flag).
 # Safe to rerun, so a failed eks-up.sh can be run again to resume.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -24,7 +25,8 @@ kubectl apply -f platform/ca.yaml
 kubectl create namespace replay --dry-run=client -o yaml | kubectl apply -f -
 for b in a b c; do
   helm upgrade --install "bank-$b" charts/bank -n "bank-$b" --create-namespace \
-    --set bank=${b^^} --set image.repository="$repo" --set image.tag="$tag" "$@"
+    --set bank=${b^^} --set ha=$([[ ${HA:-} == *$b* ]] && echo true || echo false) \
+    --set image.repository="$repo" --set image.tag="$tag" "$@"
 done
 kubectl wait -A --all --for=condition=Ready --timeout=15m kafka,clusters.postgresql.cnpg.io,certificates.cert-manager.io
 kubectl wait -A -l 'app in (ingestor,scorer,privacy-node,case,summary)' --for=condition=Ready --timeout=5m pod

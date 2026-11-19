@@ -1,5 +1,6 @@
 # The scorer's state as a materialised view of Kafka (docs/contracts/streaming.md): no persistence,
-# rebuilt from the topic. ElastiCache on EKS.
+# rebuilt from the topic.
+{{- if not (get .Values.aws .Values.bank) }}  # EKS: ElastiCache instead
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,3 +31,4 @@ spec:
   selector: {app: valkey}
   ports:
     - port: 6379
+{{- end }}

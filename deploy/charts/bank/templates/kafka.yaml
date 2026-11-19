@@ -1,4 +1,6 @@
-# Bank-local single-node Kafka in KRaft mode (Strimzi).
+# Bank-local Kafka in KRaft mode (Strimzi): one node, or three under the HA flag with a majority of replicas per write.
+{{- $aws := get .Values.aws .Values.bank }}
+{{- $n := ternary 3 1 .Values.ha }}
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
@@ -6,7 +8,7 @@ metadata:
   labels:
     strimzi.io/cluster: kafka
 spec:
-  replicas: 1
+  replicas: {{ $n }}
   roles: [controller, broker]
   storage:
     type: jbod
@@ -30,12 +32,27 @@ spec:
         port: 9092
         type: internal
         tls: false
+      {{- if $aws }}
+      # The ingestor Lambda's way in from the VPC: fixed node ports per bank (deploy/terraform/lambda.tf), and each
+      # broker advertised at its node's private address.
+      - name: vpc
+        port: 9094
+        type: nodeport
+        tls: false
+        configuration:
+          preferredNodePortAddressType: InternalIP
+          bootstrap: {nodePort: {{ $aws.kafkaNodePort }}}
+          brokers:
+            {{- range until $n }}
+            - {broker: {{ . }}, nodePort: {{ add $aws.kafkaNodePort 1 . }}}
+            {{- end }}
+      {{- end }}
     config:
-      offsets.topic.replication.factor: 1
-      transaction.state.log.replication.factor: 1
-      transaction.state.log.min.isr: 1
-      default.replication.factor: 1
-      min.insync.replicas: 1
+      offsets.topic.replication.factor: {{ $n }}
+      transaction.state.log.replication.factor: {{ $n }}
+      transaction.state.log.min.isr: {{ ternary 2 1 .Values.ha }}
+      default.replication.factor: {{ $n }}
+      min.insync.replicas: {{ ternary 2 1 .Values.ha }}
       auto.create.topics.enable: false
   entityOperator:
     topicOperator: {jvmOptions: {"-Xmx": 128m}}
