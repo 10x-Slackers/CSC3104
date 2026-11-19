@@ -18,7 +18,7 @@ Scope: one-command k3d setup, the per-bank Helm chart, image builds, EKS, monito
 
 | | Local | Cloud |
 | --- | --- | --- |
-| Cluster | k3d, with Secrets encrypted at rest in the k3s datastore (`--secrets-encryption`) | Amazon EKS |
+| Cluster | k3d, Secrets encrypted at rest (`--secrets-encryption`) | Amazon EKS |
 | Setup command | `deploy/k3d-up.sh`: the cluster and images, then `deploy/install.sh` (operators, lab CA, keys, the three bank releases) | `deploy/eks-up.sh`, with the Learner Lab's credentials in `~/.aws/credentials`: the Lambda zips, Terraform (cluster, ECR, ElastiCache, Lambdas), the workloads bucket, images pushed to ECR, then `deploy/install.sh` with every bank in HA, the EKS API server addresses and the `bank_values` output |
 | Replay | `deploy/replay.sh <workload> [--speed N \| --rate N]`: a Job in the `replay` namespace reading `apps/dataset/out/<workload>` | The same command: an init container first copies `s3://csc3104-workloads-<account-id>/<workload>` into an `emptyDir`, as `LabRole`. Upload a workload once with `aws s3 sync apps/dataset/out/<workload> s3://csc3104-workloads-<account-id>/<workload>`. Replay sends to the ingestor Lambdas' function URLs (Terraform output `ingestor_urls`), signed as `LabRole` |
 | Teardown | `k3d cluster delete csc3104` | `deploy/eks-down.sh`: deletes the bank namespaces and waits for their EBS volumes to go, then `terraform destroy` (a plain destroy leaves the volumes behind) |
