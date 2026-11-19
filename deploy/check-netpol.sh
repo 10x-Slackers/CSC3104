@@ -10,11 +10,11 @@ probe() { # <namespace> <host:port> <expect: open|blocked>
   check "$1" "$2" "$3"
 }
 
-peer() { # <bank> <host:port> <expect>, from that bank's running privacy-node pod
-  got=$(kubectl exec -n "bank-$1" deploy/privacy-node -- python -c "import socket
-try: socket.create_connection(('${2%:*}', ${2#*:}), 3); print('open')
+app() { # <bank> <deployment> <host:port> <expect>, from that bank's running pod
+  got=$(kubectl exec -n "bank-$1" "deploy/$2" -- python -c "import socket
+try: socket.create_connection(('${3%:*}', ${3#*:}), 3); print('open')
 except OSError: print('blocked')" 2>/dev/null)
-  check "bank-$1 privacy-node" "$2" "$3"
+  check "bank-$1 $2" "$3" "$4"
 }
 
 check() {
@@ -37,22 +37,34 @@ probe bank-a 1.1.1.1:443 blocked
 probe default postgres-rw.bank-a:5432 blocked
 probe default kafka-kafka-bootstrap.bank-a:9092 blocked
 # Privacy node peers: only privacy-node pods, only to the other banks' privacy nodes.
-peer a privacy-node.bank-b:50051 open
-peer c privacy-node.bank-a:50051 open
+app a privacy-node privacy-node.bank-b:50051 open
+app c privacy-node privacy-node.bank-a:50051 open
 probe bank-a privacy-node.bank-b:50051 blocked
 probe default privacy-node.bank-a:50051 blocked
-peer a kafka-kafka-bootstrap.bank-b:9092 blocked
-# Replay: only to each bank's ingestor HTTP port.
-probe replay ingestor.bank-a:8080 open
-probe replay ingestor.bank-c:8080 open
-probe bank-b ingestor.bank-b:8080 open
-probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
-probe default ingestor.bank-b:8080 blocked
+app a privacy-node kafka-kafka-bootstrap.bank-b:9092 blocked
 # The privacy node posts to its own bank's case service (the baseline keeps other banks out, probed above).
-peer a case.bank-a:8000 open
-# EKS: pods could take LabRole from the node's metadata service; bank pods must not.
+app a privacy-node case.bank-a:8000 open
 if [[ $(kubectl config current-context) == arn:aws:eks:* ]]; then
+  # Pods could take LabRole from the node's metadata service; only the case service may, to sign summary calls.
   probe default 169.254.169.254:80 open
   probe bank-a 169.254.169.254:80 blocked
+  app a case 169.254.169.254:80 open
+  app a privacy-node 169.254.169.254:80 blocked
+  # The case service reaches HTTPS outside the VPC (function URLs); other bank pods don't.
+  app b case lambda.us-east-1.amazonaws.com:443 open
+  app b privacy-node lambda.us-east-1.amazonaws.com:443 blocked
+  # The scorer and privacy node reach ElastiCache; the case service doesn't.
+  valkey=$(kubectl get deploy scorer -n bank-c -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="VALKEY_URL")].value}')
+  valkey=${valkey#valkey://}
+  app c scorer "$valkey" open
+  app c privacy-node "$valkey" open
+  app c case "$valkey" blocked
+else
+  # k3d. Replay: only to each bank's ingestor HTTP port (on EKS replay calls the ingestor Lambdas instead).
+  probe replay ingestor.bank-a:8080 open
+  probe replay ingestor.bank-c:8080 open
+  probe bank-b ingestor.bank-b:8080 open
+  probe replay kafka-kafka-bootstrap.bank-a:9092 blocked
+  probe default ingestor.bank-b:8080 blocked
 fi
 exit $failed

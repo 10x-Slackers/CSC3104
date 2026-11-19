@@ -27,7 +27,12 @@ spec:
               valueFrom:
                 secretKeyRef: {name: postgres-app, key: password}
             - {name: CASE_KEY_DIRECTORY, value: /keys}
+            {{- with get .Values.aws .Values.bank }}
+            - {name: CASE_SUMMARY_URL, value: {{ .summaryUrl | quote }}}
+            - {name: CASE_SUMMARY_REGION, value: us-east-1}  # signs as LabRole from the node's metadata service
+            {{- else }}
             - {name: CASE_SUMMARY_URL, value: "http://summary:8080/"}
+            {{- end }}
           ports:
             - containerPort: 8000
           readinessProbe:
