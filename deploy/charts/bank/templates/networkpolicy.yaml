@@ -1,7 +1,6 @@
-# Zero trust inside the cluster: every bank pod starts with no network access (only DNS
-# and the Kubernetes API server), and
-# each path a service needs is then allowed by name, at both ends (the client may send,
-# the server may receive). Nothing is opened by a broad rule.
+# Zero trust inside the cluster: every bank pod starts with no network access, and each
+# path a service needs is then allowed by name, at both ends (the client may send, the
+# server may receive).
 #
 # The paths, per bank:   replay -> ingestor -> kafka <- scorer -> valkey <- privacy-node
 #                        privacy-node -> postgres <- case -> summary;  privacy-node -> case

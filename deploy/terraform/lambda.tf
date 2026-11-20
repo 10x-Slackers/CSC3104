@@ -84,8 +84,7 @@ resource "aws_lambda_function_url" "summary" {
   authorization_type = "AWS_IAM"
 }
 
-# What Helm needs to know about AWS, written to deploy/eks-values.yaml by `make eks`: the image, every bank with
-# replicas, and each bank's own ElastiCache and Lambdas (the chart then runs no ingestor, summary or Valkey pods).
+# What Helm needs to know about AWS, written to deploy/eks-values.yaml by `make eks`.
 output "helm_values" {
   value = jsonencode({
     image           = { repository = aws_ecr_repository.image.repository_url }
