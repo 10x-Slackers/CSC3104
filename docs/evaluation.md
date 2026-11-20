@@ -66,7 +66,7 @@ Measured on 20 Nov 2026. The cluster is k3d (k3s, one node) in a VM with 8 vCPUs
 | Run | Result |
 | --- | --- |
 | `make k3d` from nothing, images cached | Ready in 3 min 43 s |
-| Tiny workload, then `make cluster-check` | 14 cases (A 5, B 5, C 4), equal to offline; all 57 checks pass (the cases, 45 network paths, 11 mTLS checks) |
+| Tiny workload at the default 60× speed, then `make cluster-check` | 14 cases (A 5, B 5, C 4), equal to offline; all 57 checks pass (the cases, 45 network paths, 11 mTLS checks) |
 | `slice-6h` at `--speed 0` (17,295 bank transfers) | Replayed in 11 to 13 s; scorers scale 1 → 6 on lag in every bank |
 | The same replay with bank C's privacy node off, C restored afterwards, and both of bank A's node pods deleted during recovery | Pending cases show "Waiting for bank C"; after recovery 11,291 cases, identical to offline (none lost, none extra) |
 | Valkey loss: bank A's Valkey pod deleted, then `make rebuild` for A and B (30,669 and 35,176 keys) | Lag back to 0 within 45 s; key counts, hits, offsets and cases identical; no duplicate searches or messages |
@@ -74,7 +74,7 @@ Measured on 20 Nov 2026. The cluster is k3d (k3s, one node) in a VM with 8 vCPUs
 
 ### Detection, offline (experiment 2)
 
-`altman-small`, one run per split, about 8 minutes each on a laptop. Ranges are over the three banks.
+`altman-small`, one run per split, about 8 minutes each (8 cores). Ranges are over the three banks.
 
 | Split | Attempts caught, any tier | Attempts reaching Tier 2 | Payment recall (in scope) | Ordinary payments flagged | Precision | Cases per bank per day, Tier 1 / Tier 2 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -89,7 +89,7 @@ Attempts caught by pattern, as caught / attempts (reaching Tier 2):
 | Eval | 21 / 23 (12) | 18 / 26 (9) | 19 / 23 (1) | 20 / 26 (1) | 16 / 20 (0) | 18 / 23 (1) | 20 / 24 (0) | 14 / 19 (0) |
 
 - Cross-bank chains (Tier 2) are almost all cycles and random walks, the patterns that pass money on from bank to bank. The fan and scatter patterns are caught by the single-bank rules at Tier 1.
-- Dev's lower precision comes from 1 and 2 Sep, which have no payment history, so every payee is new.
-- Most false positives come from the new payee rule, which is why Tier 1 cases are shown but never pushed.
+- The dev days start with no payment history, so the new payee rule fires on every first payment. The eval run has 1 to 5 Sep as history.
 - Laundering outside the scope on the eval days: 941 transfers inside one bank, 220 by cheque, card, cash or Bitcoin, and 399 after ordinary activity stops.
+
 Results for experiments 5, 6, 8, 9, 10 and 14 are not recorded here.

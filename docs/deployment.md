@@ -155,4 +155,5 @@ There is no monitoring stack. Look at:
 ## Things to expect
 
 - A new privacy-node pod may restart once: its first connection to PostgreSQL can be refused in the seconds before its NetworkPolicy takes effect.
+- During the first install the privacy-node and case pods restart a few times until their bank's PostgreSQL is up. `make deploy` waits for them.
 - The default cluster name is `csc3104`: `make k3d CLUSTER=<name>` avoids a clash with an existing cluster, and the same `CLUSTER` is then needed for `make load` and `make k3d-down`.
