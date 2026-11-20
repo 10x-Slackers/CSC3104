@@ -60,7 +60,8 @@ replay:  ## replay a workload into the banks: make replay WORKLOAD=slice-6h ARGS
 	@# Follow the log until the Job ends: the stream fails or ends early while the pod starts.
 	@until kubectl get job replay -n replay -o jsonpath='{.status.conditions[*].type}' | grep -Eq 'Complete|Failed'; do \
 	  kubectl logs -n replay -f job/replay 2>/dev/null || kubectl get pods -n replay --no-headers; sleep 2; done
-	kubectl wait -n replay --for=condition=complete job/replay --timeout=10s
+	@kubectl wait -n replay --for=condition=complete job/replay --timeout=10s \
+	  || { kubectl logs -n replay job/replay --tail=20; exit 1; }  # a failed Job: show why
 
 cases:  ## each bank's cases as "bank tier payments", to compare with `python -m mulechain.evaluate --cases`
 	@set -e; for bank in a b c; do kubectl exec -n bank-$$bank deploy/case -- python -c \

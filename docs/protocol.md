@@ -75,7 +75,7 @@ Any bank can start a search, and each delivers its own chains, so no bank is a h
 
 The hop limit bounds the work and the disclosure one search can cause, like the time-to-live of an IP packet ([RFC 791](https://www.rfc-editor.org/rfc/rfc791.txt)). Longer chains aren't lost: searches started at different banks each return a partial chain, and the case service joins them into one case.
 
-**Deadline propagation** ([gRPC](https://grpc.io/docs/guides/deadlines/), [patterns.md](patterns.md#4-deadline-propagation)). Every call's timeout is what is left of the starting bank's 10 seconds. A bank answering a `Trace` reads its caller's remaining time (`time_left`) and gives its own onward call that, minus `REPLY_MARGIN = 0.25` s to send its reply. gRPC carries the timeout as a duration, not a clock time, so banks need not agree on the time. `Keys` and `Deliver` use a fixed 5 s (`CALL_SECONDS`), since no search waits on them.
+**Deadline propagation** ([gRPC](https://grpc.io/docs/guides/deadlines/), [patterns.md](patterns.md#4-deadline-propagation)). Every call's timeout is what is left of the starting bank's 10 seconds. A bank answering a `Trace` reads its caller's remaining time (`time_left`) and gives its own onward call that, minus `REPLY_MARGIN = 0.25` s to send its reply. gRPC carries the timeout as a duration, not a clock time, so banks need not agree on the time. The 10 seconds cover the `Trace` calls; checking the signatures on the answer afterwards is the starting bank's own work. `Keys` and `Deliver` use a fixed 5 s (`CALL_SECONDS`), since no search waits on them.
 
 ### Search states
 
