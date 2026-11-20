@@ -157,5 +157,6 @@ There is no monitoring stack. Look at:
 
 ## Things to expect
 
-- A privacy-node or case pod that starts before its bank's PostgreSQL waits for it, and a scorer waits for the peers' keys (it logs `waiting_for_keys_of`). `make deploy` waits for all of them.
-- Scorer pods restart once after their Valkey is lost. That restart is the rebuild.
+- A privacy-node or case pod that starts before its bank's PostgreSQL waits for it. A scorer restarts until its Valkey answers (once or twice in a new install, sometimes once when KEDA adds a pod), then waits for the peers' keys and logs `waiting_for_keys_of`. `make deploy` waits for all of them.
+- Scorer pods restart after their Valkey is lost. That restart is the rebuild.
+- A deleted PostgreSQL pod serves its open connections for up to 180 seconds and refuses new ones before it stops (CloudNativePG's [smart shutdown](https://cloudnative-pg.io/documentation/current/instance_manager/)). A service that restarts in that time waits until PostgreSQL is back.

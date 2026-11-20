@@ -130,7 +130,7 @@ The node prints one JSON line per search attempt and per `Deliver` call, for tim
 ## Known limits
 
 - A case that says "Waiting for bank X" keeps saying so if its search later ends without a chain: failed, or no longer tried after 24 h. Nothing tells the case service that the wait is over. The bank named is the one that was silent on the first attempt; a later attempt that waits for another bank doesn't change it.
-- A chain can't be stored while Valkey has lost a payment it names (during a rebuild). `Deliver` then fails and the sender tries again later; in that pass the sender's other chains for the same bank wait behind it.
+- A chain can't be stored while this bank's Valkey lacks a payment it names: during a rebuild, or for good once the payment has expired. `Deliver` then fails and the sender keeps trying; in each pass its other chains for the same bank wait behind that one.
 - Keys are fetched from one peer after another, so a peer that doesn't answer holds up each refresh for up to 5 seconds (`CALL_SECONDS`), and with it a signature check that needed new keys.
 - During a key rotation the two banks on a transfer can name it by different tokens ([security.md](security.md)). Loop detection compares tokens, so it can miss a loop then; the hop limit still bounds the chain.
 - A search follows one of the transfers a bank's rules link onward. The others are found by the searches their own hits start.
