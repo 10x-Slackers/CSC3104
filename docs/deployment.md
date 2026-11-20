@@ -107,7 +107,7 @@ Workloads are described in [data.md](data.md).
 
 ## Operations
 
-**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again, which read the topic from the start. Run it while the bank is idle. A Valkey pod that is lost needs no command: the scorers notice, restart and rebuild it ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
+**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again, which read the topic from the start. Run it while the bank is idle. A Valkey pod that is lost needs no command: on their next event the scorers notice, restart and rebuild it ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
 
 **Rotate a bank's keys.** `make key-add BANK=b KEY=2`, wait five minutes, `make key-drop BANK=b KEY=1` ([security.md](security.md#key-rotation) says why). `KEY` is the version number; `key-add` refuses a version that exists. Don't restart the bank's privacy node in the two minutes after either step.
 

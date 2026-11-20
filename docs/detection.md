@@ -71,19 +71,19 @@ One Valkey per bank (ElastiCache on AWS), so keys carry no bank name. Only the s
 | `offsets` | hash | The next Kafka offset to score, per partition | Scorer |
 | `keys` | hash | The other banks' public keys, written by the privacy node; the scorer derives its token keys from them and re-reads them every 10 s (`PairKeys`) | Scorer |
 
-Every key except `last:`, `offsets` and `keys` expires 7 days after its last write (`TTL`). That is garbage collection only; it has to stay above the 144-hour window. `last:` entries are the payee history and are kept, and the `hits` stream is never trimmed (every new hit renews it), so both grow with the workload.
+Every key except `last:`, `offsets` and `keys` expires 7 days after its last write (`TTL`). That is garbage collection only; it has to stay above the 144-hour window. `last:` entries are the payee history and are kept, so they grow with the workload. The `hits` stream holds only what the privacy node has not stored yet, plus its last batch.
 
 ## Rebuilding Valkey from the log
 
 Valkey is not persisted, and it holds its own position in the topic: the `offsets` hash, written with each event's state ([pattern 1](patterns.md#1-the-log-is-the-source-of-truth)). Workers that start on an empty Valkey therefore read the whole topic again and rebuild every key.
 
-**A lost Valkey rebuilds itself.** Before a worker scores an event, it compares the partition's offset in Valkey with the one it last wrote there (`Scorer.process`). If they differ, Valkey has restarted empty. The worker stops without writing, Kubernetes restarts it, and it reads the partition from the start of the topic. The peers' public keys were in Valkey too, so a starting worker first waits until the privacy node has written them again, which takes up to 10 seconds.
+**A lost Valkey rebuilds itself.** Before a worker scores an event, it compares the partition's offset in Valkey with the one it last wrote there (`Scorer.process`). If they differ, Valkey has restarted empty. The worker stops without writing, Kubernetes restarts it, and it reads the partition from the start of the topic. An idle bank therefore rebuilds when its next event arrives. The peers' public keys were in Valkey too, so a starting worker first waits until the privacy node has written them again, which takes up to 10 seconds.
 
 ```sh
 make rebuild BANK=a     # the same on purpose: pause the scorers, empty Valkey, start the scorers again
 ```
 
-A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)). The node removes hits from the stream once it has stored them, so the stream holds only what is not yet read.
+A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)). The node removes hits from the stream once it has stored them, one batch behind its position.
 
 Limits:
 

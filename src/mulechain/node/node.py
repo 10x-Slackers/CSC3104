@@ -337,7 +337,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
         in the same transaction as the stream position, so a crash repeats nothing and
         skips nothing.
         """
-        hits = self.bank.hits(self.store.cursor(), block_ms)
+        read = self.store.cursor()
+        hits = self.bank.hits(read, block_ms)
         if not hits:
             return 0
         with self.store.transaction():
@@ -353,7 +354,9 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 if hit["rule"] == "chain":
                     self.store.add_search(hit["incoming"], hit["outgoing"])
             self.store.set_cursor(hits[-1][0])
-        self.bank.drop_hits(hits[-1][0])  # stored, so the stream need not keep them
+        # Earlier batches are stored. This one stays until the next pass, in case
+        # PostgreSQL fails over to a replica that doesn't have it yet.
+        self.bank.drop_hits(read)
         return len(hits)
 
     def run_searches(self) -> int:
