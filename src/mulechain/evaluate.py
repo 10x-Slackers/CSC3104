@@ -236,7 +236,8 @@ def main() -> None:
     with redirect_stdout(sys.stderr):
         found, searches = run(args.workload)
     if args.cases:  # one "bank tier payments" line per case, as `make cases` prints them
-        print(*sorted(" ".join([c.bank, str(c.tier), *sorted(c.ids)]) for c in found), sep="\n")
+        for line in sorted(" ".join([c.bank, str(c.tier), *sorted(c.ids)]) for c in found):
+            print(line)
         return
     report = {"split": args.split, "searches": searches}
     report |= score(found, *load(args.workload), args.split)

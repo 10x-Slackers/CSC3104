@@ -17,7 +17,7 @@ Payment IDs, accounts and amounts are read from Valkey by the node ([bank.py](..
 
 ## Tokens
 
-A token is `HMAC-SHA256(pair key, "mulechain token " + payment ID)`, cut to 16 bytes (`token` in [crypto.py](../src/mulechain/crypto.py)). Both banks on a transfer know its payment ID and hold the same pair key, so both compute the same token. A third bank holds neither, so it cannot compute the token or turn one back into a payment ID. The scorer writes each cross-bank transfer's token to Valkey as it scores it ([detection.md](detection.md)).
+A token is `HMAC-SHA256(pair key, "mulechain token " + payment ID)` ([RFC 2104](https://www.rfc-editor.org/rfc/rfc2104)), cut to 16 bytes (`token` in [crypto.py](../src/mulechain/crypto.py)). Both banks on a transfer know its payment ID and hold the same pair key, so both compute the same token. A third bank holds neither, so it cannot compute the token or turn one back into a payment ID. The scorer writes each cross-bank transfer's token to Valkey as it scores it ([detection.md](detection.md)).
 
 ## Key agreement with no dealer
 
@@ -25,7 +25,7 @@ No party hands out keys. Each bank makes its own and shares only the public halv
 
 1. Each bank's Helm release generates 64 random bytes per key version into the Secret `bank-keys` ([keys.yaml](../deploy/charts/bank/templates/keys.yaml)): 32 for key agreement (X25519) and 32 for signing (Ed25519). Files are named `1`, `2`, ... oldest first (`load_keys`).
 2. A node answers the `Keys` call with its public keys. Every node asks its peers every 10 seconds (`refresh_keys` in [node.py](../src/mulechain/node/node.py)), stores the answers in PostgreSQL (`peer_keys`) so a restart has them, and mirrors them to the Valkey hash `keys` for its scorer.
-3. Each side derives the pair key on its own: `HKDF(X25519(my private key, your public key))`, with both bank names in the HKDF context (`pair_keys`). The scorer re-derives them every 10 seconds (`PairKeys` in [scorer.py](../src/mulechain/scorer.py)).
+3. Each side derives the pair key on its own: `HKDF(X25519(my private key, your public key))` ([RFC 7748](https://www.rfc-editor.org/rfc/rfc7748), [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)), with both bank names in the HKDF context (`pair_keys`). The scorer re-derives them every 10 seconds (`PairKeys` in [scorer.py](../src/mulechain/scorer.py)).
 
 `test_two_banks_derive_the_same_token_and_a_third_cannot` ([test_crypto.py](../tests/test_crypto.py)) shows the result.
 
@@ -51,13 +51,14 @@ Tests: `test_a_rotation_never_leaves_a_token_the_peer_has_not_indexed` ([test_cr
 
 Limits:
 
+- Both banks on a transfer must score it under overlapping key sets, which the waits above give when they score it well under a minute apart. If one bank scores it later than that across a key change, or a bank's Valkey is rebuilt after its peer rotated, the bank's name for an older transfer can be a token the peer never indexed. A search through that transfer stays pending and expires.
 - The settle timer is in memory. A node that restarts inside the two minutes publishes the changed keys at once, so a transfer scored in that window may get a token the peer has not indexed.
 - Once a key is dropped and unpublished, a chain signed with it can no longer be verified. A delivery of such a chain that is still being retried is refused for good.
 - During the overlap the two banks on a transfer may name it with different tokens, so the same chain can be stored under more than one ID. Each bank's case service merges them by payment ID ([cases.md](cases.md)). Loop detection compares tokens, so it can miss a loop then; the hop limit still bounds the chain ([protocol.md](protocol.md#known-limits)).
 
 ## Signed link claims
 
-Each bank on a chain signs one claim with Ed25519: "I received `in_token` from `in_from`, and my rule links it to `out_token`, which I sent to `out_to`". The signature covers every field, each length-prefixed (`claim_bytes` in [claims.py](../src/mulechain/node/claims.py)).
+Each bank on a chain signs one claim with Ed25519 ([RFC 8032](https://www.rfc-editor.org/rfc/rfc8032)): "I received `in_token` from `in_from`, and my rule links it to `out_token`, which I sent to `out_to`". The signature covers every field, each length-prefixed (`claim_bytes` in [claims.py](../src/mulechain/node/claims.py)).
 
 `valid_chain` accepts a chain only if every claim verifies under its signer's published keys and each transfer is confirmed from both ends: the sender's claim and the receiver's claim must name each other and the same token. One bank cannot vouch for both sides. A chain's ID is a hash of its claims (`digest`), so no bank can relabel it.
 
@@ -69,7 +70,7 @@ A signature proves who made a claim and that nobody altered it. It does not prov
 
 Every call between nodes uses mutual TLS: both sides present a certificate.
 
-- **Certificates.** cert-manager issues one per bank from the lab CA ([ca.yaml](../deploy/charts/platform/templates/ca.yaml), [certificate.yaml](../deploy/charts/bank/templates/certificate.yaml)) with a DNS name, `privacy-node.bank-<x>.svc`, and a URI, `spiffe://csc3104/bank/<X>/privacy-node`.
+- **Certificates.** cert-manager issues one per bank from the lab CA ([ca.yaml](../deploy/charts/platform/templates/ca.yaml), [certificate.yaml](../deploy/charts/bank/templates/certificate.yaml)) with a DNS name, `privacy-node.bank-<x>.svc`, and a URI in the form of a [SPIFFE ID](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md), `spiffe://csc3104/bank/<X>/privacy-node`.
 - **Identity.** The URI is the bank's identity. `caller()` in [node.py](../src/mulechain/node/node.py) reads it from the client certificate and refuses a `Trace` or `Deliver` call as `UNAUTHENTICATED` unless it names exactly one bank. `Keys` returns only public keys and answers any certificate from the lab CA. No message has a sender field, so a bank cannot claim to be another.
 - **Renewal.** `Mtls` reads the certificate files again for every connection, as client and as server, so a renewed certificate is used without a restart.
 
@@ -99,7 +100,7 @@ Every bank namespace starts with no network access in either direction, apart fr
 
 ## Pod hardening
 
-- Bank namespaces enforce the **restricted Pod Security Standard** ([namespaces.yaml](../deploy/charts/platform/templates/namespaces.yaml)): Kubernetes rejects a pod that is not non-root, drops all capabilities and uses the default seccomp profile. The shared settings are in [_helpers.tpl](../deploy/charts/bank/templates/_helpers.tpl), with a read-only root filesystem.
+- Bank namespaces enforce the **restricted [Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/)** ([namespaces.yaml](../deploy/charts/platform/templates/namespaces.yaml)): Kubernetes rejects a pod that is not non-root, drops all capabilities and uses the default seccomp profile. The shared settings are in [_helpers.tpl](../deploy/charts/bank/templates/_helpers.tpl), with a read-only root filesystem.
 - None of the chart's service pods mounts a Kubernetes API token.
 - Keys and certificates are mounted from Secrets as whole directories. On k3d, Secrets are encrypted at rest (`--secrets-encryption` in [k3d.yaml](../deploy/k3d.yaml)); the Terraform for EKS configures no Secrets encryption of its own.
 - The image runs as user 65532 and holds no state.

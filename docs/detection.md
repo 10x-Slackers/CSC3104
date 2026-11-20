@@ -28,8 +28,8 @@ A **link** says "this incoming payment and this outgoing payment on one account 
 
 | Rule | Fires when | Basis | Produces |
 | --- | --- | --- | --- |
-| Fast pass-through | Money in, then 90–98 % of it out of the same account 1 to 30 minutes later (`FAST_RATIO`, `FAST_DELAY`) | Guidelines to MAS Notice 626, B-2(iii): funds "withdrawn immediately after being deposited" | A link |
-| Chain | Money in, then 90–110 % of it out of the same account between 1 minute and 72 hours later, and at least one of the two payments is with another bank (`CHAIN_RATIO`, `CHAIN_DELAY`) | Same guidelines, B-4(i) "high velocity of funds" and B-5(iv) "within a short period"; 90 % of Altman's laundering hops follow within about 70 hours | A link, a `chain` hit, and a cross-bank search |
+| Fast pass-through | Money in, then 90–98 % of it out of the same account 1 to 30 minutes later (`FAST_RATIO`, `FAST_DELAY`) | [Guidelines to MAS Notice 626](https://www.mas.gov.sg/regulation/guidelines/guidelines-to-notice-626-on-prevention-of-money-laundering-and-cft-for-banks), Appendix B, B-2(iii): assets "withdrawn immediately after being deposited" | A link |
+| Chain | Money in, then 90–110 % of it out of the same account between 1 minute and 72 hours later, and at least one of the two payments is with another bank (`CHAIN_RATIO`, `CHAIN_DELAY`) | Same guidelines, B-4(i): "high velocity of funds through an account"; 90 % of Altman's laundering hops follow within about 70 hours | A link, a `chain` hit, and a cross-bank search |
 | New payee | A transfer to an account at another bank that this customer has never paid | No published red flag is cited. Fan-in, fan-out and scatter-gather laundering all create first-time payer and payee pairs | A `new_payee` hit |
 | Quick repeat | A transfer to a payee at another bank whose previous payment from this account was flagged (new payee or chain) at most 24 hours earlier (`REPEAT_WINDOW`) | No published red flag is cited. It catches the first payment that follows a flagged one to the same payee | A `quick_repeat` hit |
 
@@ -92,13 +92,13 @@ Limits:
 
 ## Autoscaling on lag
 
-A KEDA `ScaledObject` in [scorer.yaml](../deploy/charts/bank/templates/scorer.yaml) sizes the scorer Deployment from the consumer group's lag, the number of events written but not yet scored.
+A KEDA `ScaledObject` (the [Apache Kafka scaler](https://keda.sh/docs/2.21/scalers/apache-kafka/)) in [scorer.yaml](../deploy/charts/bank/templates/scorer.yaml) sizes the scorer Deployment from the consumer group's lag, the number of events written but not yet scored.
 
 | Setting | Value |
 | --- | --- |
 | Workers | 1 to 6 (`minReplicaCount`, `maxReplicaCount`): at most one per partition |
 | `lagThreshold` | 100: one more worker per 100 events waiting |
 | `offsetResetPolicy` | `earliest`, so a group that has committed nothing yet shows the whole topic as lag |
-| Reaction time | The defaults: KEDA polls the lag every 30 s, and Kubernetes removes workers about 5 minutes after the lag has gone |
+| Reaction time | The defaults: KEDA polls the lag every 30 s ([ScaledObject](https://keda.sh/docs/2.21/reference/scaledobject-spec/)), and Kubernetes removes workers about 5 minutes after the lag has gone ([HorizontalPodAutoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)) |
 
 When workers are added or removed, Kafka moves partitions between them. A worker taking over a partition starts at the offset in Valkey, so it continues exactly where the last one stopped. Watch it with `kubectl get hpa -A` during a replay.

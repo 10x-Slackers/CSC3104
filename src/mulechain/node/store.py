@@ -88,9 +88,13 @@ class Store:
         )
 
     def finish_search(self, search: dict, state: str) -> None:
-        """Record an attempt's outcome; `pending` means try again after a backoff."""
+        """Record an attempt's outcome; `pending` means try again after a backoff.
+
+        A finished search stays finished, whichever replica reports last.
+        """
         self.db.run(
-            "UPDATE searches SET state = ?, attempts = attempts + 1, next_at = ? WHERE id = ?",
+            "UPDATE searches SET state = ?, attempts = attempts + 1, next_at = ?"
+            " WHERE id = ? AND state = 'pending'",
             state,
             time.time() + backoff(search["attempts"]),
             search["id"],

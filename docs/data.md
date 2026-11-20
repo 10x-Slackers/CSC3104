@@ -8,7 +8,7 @@ IBM AML dataset → prepare.py → workloads/<name>/ → replay.py → pacs.008 
 
 ## Source
 
-The IBM AML synthetic dataset (Altman et al., NeurIPS 2023 Datasets and Benchmarks): Kaggle `ealtman2019/ibm-transactions-for-anti-money-laundering-aml`, version 8, files `HI-Small_Trans.csv` (the transfers) and `HI-Small_Patterns.txt` (the laundering attempts). It needs no Kaggle login. The first run downloads about 476 MB to `~/.cache/kagglehub`.
+The IBM AML synthetic dataset (Altman et al., [Realistic Synthetic Financial Transactions for Anti-Money Laundering Models](https://arxiv.org/abs/2306.16424), NeurIPS 2023 Datasets and Benchmarks): Kaggle `ealtman2019/ibm-transactions-for-anti-money-laundering-aml`, version 8, files `HI-Small_Trans.csv` (the transfers) and `HI-Small_Patterns.txt` (the laundering attempts). It needs no Kaggle login. The first run downloads about 476 MB to `~/.cache/kagglehub`.
 
 | Fact | Value |
 | --- | --- |
@@ -51,7 +51,7 @@ A workload is a directory under `workloads/`. Only `workloads/tiny` is committed
 | `bank` | `B` | This bank |
 | `direction` | `in` | `out` at the sender's bank, `in` at the receiver's |
 | `account` | `B-m1` | This bank's customer |
-| `counterparty_account` | `A-m0` | The other side's account, which Singapore wires carry (MAS Notice 626 ¶11.4). Used by two rules; never sent to another bank |
+| `counterparty_account` | `A-m0` | The other side's account, which a wire transfer must carry ([MAS Notice 626](https://www.mas.gov.sg/regulation/notices/notice-626) ¶11.4). Used by two rules; never sent to another bank |
 | `counterparty_bank` | `A` | Which bank to ask about this transfer |
 | `amount` | `10000.0` | SGD |
 | `payment_format` | `MEPS+` | `GIRO`, `MEPS+`, `Cheque`, `Credit Card`, `Cash` or `Bitcoin` |
@@ -144,7 +144,7 @@ In the cluster, `make replay` runs it as a Job in the `replay` namespace ([job.y
  "amount": 10000.0, "payment_format": "MEPS+"}
 ```
 
-Each record also carries CloudEvents headers (`headers`): `ce_id` is `<payment_id>-<direction>`, `ce_type` is `payment.in` or `payment.out`, `ce_source` is `/bank/<X>/ingestor`, and `ce_time` is the event time. The Kafka timestamp is when the ingestor took the batch, the point latency is measured from.
+Each record also carries CloudEvents headers (`headers`, the [Kafka binding](https://github.com/cloudevents/spec/blob/main/cloudevents/bindings/kafka-protocol-binding.md) in binary mode): `ce_id` is `<payment_id>-<direction>`, `ce_type` is `payment.in` or `payment.out`, `ce_source` is `/bank/<X>/ingestor`, and `ce_time` is the event time. The Kafka timestamp is when the ingestor took the batch, the point latency is measured from.
 
 | Reply | When |
 | --- | --- |
@@ -154,7 +154,7 @@ Each record also carries CloudEvents headers (`headers`): `ce_id` is `<payment_i
 | `GET` → `200 {"ok": true}` | The readiness probe |
 
 - **Validate at the boundary.** Every check is here, so every event in Kafka is well formed and the scorer trusts its fields (`test_one_bad_transfer_rejects_the_whole_batch`).
-- **Acknowledge only after a durable write.** `handle` produces every event, calls `flush()`, and only then answers `200` (`test_a_batch_is_acknowledged_only_once_kafka_has_it`). The producer is idempotent, which also means `acks=all`.
+- **Acknowledge only after a durable write.** `handle` produces every event, calls `flush()`, and only then answers `200` (`test_a_batch_is_acknowledged_only_once_kafka_has_it`). The producer is [idempotent](https://docs.confluent.io/platform/current/clients/librdkafka/html/md_INTRODUCTION.html#idempotent-producer), which also means `acks=all`.
 - **A resent batch can write an event twice.** That is safe: the scorer recognises the repeat and changes nothing ([detection.md](detection.md#event-time-repeats-and-late-events)).
 - **Round trip.** `test_replay_and_the_ingestor_rebuild_each_banks_events` checks that workload → pacs.008 → events gives each bank its own file's bank transfers back.
 - **Settings:** `BANK`, `KAFKA_BOOTSTRAP_SERVERS`, `PORT` (8080). One JSON log line per batch with its status, milliseconds, Kafka timestamp and payment IDs.

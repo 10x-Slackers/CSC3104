@@ -96,7 +96,7 @@ Only its own bank's privacy node. NetworkPolicy lets nothing else reach port 800
 
 ## Storage and limits
 
-- Cases live in the bank's PostgreSQL database (SQLite in tests and the offline evaluator), in the tables `cases`, `refs`, `messages` and `legs`. They are never deleted: a bank must keep the results of its analysis.
+- Cases live in the bank's PostgreSQL database (SQLite in tests and the offline evaluator), in the tables `cases`, `refs`, `messages` and `legs`. They are never deleted: a bank must keep the "results of any analysis undertaken" for at least five years ([MAS Notice 626](https://www.mas.gov.sg/regulation/notices/notice-626) ¶12.3).
 - The disclosure boundary is between banks, not inside one. Bank B's analyst sees B's own customers' accounts and amounts; other banks' parts of a chain stay tokens.
 - A case keeps saying "Waiting for bank X" if its search ends without a chain ([protocol.md](protocol.md#known-limits)).
 - On a cluster, searches run while payments still arrive, so overlapping searches can finish in a different order from one run to the next. Which payments a case lists can depend on that order, since each bank joins what it receives ([evaluation.md](evaluation.md)).

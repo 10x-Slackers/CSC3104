@@ -57,13 +57,15 @@ replay:  ## replay a workload into the banks: make replay WORKLOAD=slice-6h ARGS
 	helm template replay deploy/charts/replay $(EKS) --set workload=$(WORKLOAD) --set-string args='$(ARGS)' \
 	  --set image=$$(kubectl get deployment scorer -n bank-a -o jsonpath='{..image}') \
 	  | kubectl replace --force --cascade=foreground -f -
-	until kubectl logs -n replay -f job/replay 2>/dev/null; do sleep 2; done  # fails until the pod runs
-	kubectl wait -n replay --for=condition=complete job/replay --timeout=2m
+	@# Follow the log until the Job ends: the stream fails or ends early while the pod starts.
+	@until kubectl get job replay -n replay -o jsonpath='{.status.conditions[*].type}' | grep -Eq 'Complete|Failed'; do \
+	  kubectl logs -n replay -f job/replay 2>/dev/null || kubectl get pods -n replay --no-headers; sleep 2; done
+	kubectl wait -n replay --for=condition=complete job/replay --timeout=10s
 
 cases:  ## each bank's cases as "bank tier payments", to compare with `python -m mulechain.evaluate --cases`
-	@for bank in a b c; do kubectl exec -n bank-$$bank deploy/case -- python -c \
-	  "import json, urllib.request as u; [print('$$bank'.upper(), c['tier'], *c['payments']) for c in json.load(u.urlopen('http://localhost:8000/api/cases'))]"; done \
-	  | LC_ALL=C sort
+	@set -e; for bank in a b c; do kubectl exec -n bank-$$bank deploy/case -- python -c \
+	  "import json, urllib.request as u; cases = json.load(u.urlopen('http://localhost:8000/api/cases')); \
+	  [print(line) for line in sorted(' '.join(['$$bank'.upper(), str(c['tier']), *sorted(c['payments'])]) for c in cases)]"; done
 
 ui:  ## open a bank's analyst page on http://localhost:8000: make ui BANK=b
 	kubectl port-forward -n bank-$(BANK) deploy/case 8000
