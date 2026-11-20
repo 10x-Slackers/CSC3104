@@ -1,9 +1,8 @@
 # Which bank this release is: A, B or C.
 bank: A
-# Run with replicas: Kafka 3 brokers (a write needs 2 of them), PostgreSQL 3 instances
-# with automatic failover, privacy node 2. Set it on a fresh bank, not a running one.
+# Run with replicas: 3 Kafka brokers, 3 PostgreSQL instances, 2 privacy nodes. Set it on
+# a fresh bank, not a running one.
 ha: false
-# The one image every service runs (the root Dockerfile).
 image:
   repository: mulechain
   tag: dev

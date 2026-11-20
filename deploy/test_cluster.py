@@ -263,7 +263,6 @@ def test_a_self_signed_certificate_naming_bank_a_cannot_connect():
 
 
 def test_a_lab_certificate_that_names_no_bank_is_unauthenticated():
-    """Signed by the right CA is not enough: the certificate must say which bank it is."""
     manifest = {
         "apiVersion": "cert-manager.io/v1",
         "kind": "Certificate",

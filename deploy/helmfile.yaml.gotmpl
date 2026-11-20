@@ -1,8 +1,6 @@
 # Everything that runs in the cluster, in dependency order: the operators, the shared
 # platform (namespaces and the lab CA), then one release of the same chart per bank.
-#
-#   helmfile -e k3d sync      (make deploy)
-#   helmfile -e eks sync      (make eks)
+# `make deploy` syncs it for k3d or EKS.
 environments:
   k3d:
     values:
