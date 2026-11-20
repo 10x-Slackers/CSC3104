@@ -2,6 +2,10 @@
 
 PostgreSQL in the cluster (a `postgresql://` URL), SQLite in tests and the offline
 evaluator. The same SQL runs on both: `?` placeholders, rows as dicts.
+
+The advisory-lock pattern (docs/patterns.md) starts here: `try_lock` lets one of
+several replicas do a job, and `transaction(lock=...)` makes a check-then-insert
+safe between writers. Both are PostgreSQL advisory locks, and no-ops on SQLite.
 """
 
 import sqlite3

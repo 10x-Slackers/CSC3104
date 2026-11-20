@@ -6,7 +6,8 @@
 Messages that share a transfer belong to one case, so a rule hit, a pending search
 and the chain that later confirms it all land on the same case, and overlapping
 chains merge. The node may send a message more than once; the store keeps the first
-copy and ignores the rest (an idempotent receiver).
+copy and ignores the rest (an idempotent receiver). Each batch is stored under an
+advisory lock (`JOIN_LOCK`), so two writers can't both open a case for one transfer.
 
 Other banks' transfers appear only as tokens. This bank's own payments are copied in
 when they arrive, because cases are kept long after Valkey has expired them.

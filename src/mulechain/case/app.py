@@ -5,6 +5,9 @@
 The bank's privacy node posts its messages to POST /messages. Analysts can read a
 case, bookmark it and mark it reviewed. What the bank then does about a case is its
 own process, so there is no free text and no decision here.
+
+The bulkhead pattern (docs/patterns.md): the summary service gets two seconds
+(`summarizer`), and a slow or broken one costs the page only its draft.
 """
 
 import json

@@ -1,4 +1,5 @@
-# Zero trust inside the cluster: every bank pod starts with no network access at all, and
+# Zero trust inside the cluster: every bank pod starts with no network access (only DNS
+# and the Kubernetes API server), and
 # each path a service needs is then allowed by name, at both ends (the client may send,
 # the server may receive). Nothing is opened by a broad rule.
 #

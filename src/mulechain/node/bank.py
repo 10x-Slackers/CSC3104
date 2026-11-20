@@ -3,7 +3,8 @@
 The node keeps no copy, so it starts with the bank's full state and a restart loses
 nothing. Payment IDs, accounts and amounts read here stay inside the bank: only
 tokens go to peers, and own-leg details go to this bank's case service. The one
-thing the node writes is `keys`, the peers' public keys the scorer needs.
+thing the node writes is `keys`, the peers' public keys the scorer needs. `lookup`
+answers only the bank on the other side of a transfer (zero trust, docs/patterns.md).
 
 A transfer between two accounts of this bank has no token and no peer to ask, so the
 node walks through such intra-bank hops until it reaches a payment that crosses banks.

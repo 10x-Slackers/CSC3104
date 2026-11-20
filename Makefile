@@ -67,12 +67,12 @@ cases:  ## each bank's cases as "bank tier payments", to compare with `python -m
 ui:  ## open a bank's analyst page on http://localhost:8000: make ui BANK=b
 	kubectl port-forward -n bank-$(BANK) deploy/case 8000
 
-cluster-check:  ## check NetworkPolicies and mTLS on the running cluster (after `make replay`)
+cluster-check:  ## check the tiny cases, NetworkPolicies and mTLS on the running cluster (after `make replay`)
 	uv run pytest deploy/test_cluster.py -v
 
 key-add:  ## rotation step 1: give a bank a new key version: make key-add BANK=b KEY=2
 	@! kubectl get secret bank-keys -n bank-$(BANK) -o jsonpath='{.data.$(KEY)}' | grep -q . \
-	  || { echo "bank $(BANK) already has a key $(KEY)"; exit 1; }
+	  || { echo "bank $(BANK) already has a key $(KEY): give KEY=<a new number>"; exit 1; }
 	kubectl patch secret bank-keys -n bank-$(BANK) --type merge \
 	  -p "{\"data\": {\"$(KEY)\": \"$$(head -c 64 /dev/urandom | base64 -w0)\"}}"
 

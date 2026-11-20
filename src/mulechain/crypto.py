@@ -11,9 +11,10 @@ on a transfer compute the same token and no third bank can.
 
 Rotation needs no coordination either. A bank lists its keys oldest first. It indexes
 each transfer under every (own key, peer key) pair, and names it to the peer with its
-own oldest key and the peer's newest. So a bank adds a new key, waits until its peers
-have fetched it, and then removes the old one: at every step each side asks with a
-token the other side has indexed.
+own oldest key and the peer's newest. So a bank adds a new key, waits five minutes
+(its node publishes the change two minutes late, then the peers fetch it), and then
+removes the old one: at every step each side asks with a token the other side has
+indexed.
 """
 
 import hashlib

@@ -271,7 +271,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         moved      the link is inside this bank; another search took over from the
                    cross-bank transfers around it
         local      the money starts or stays inside this bank: a case for this bank only
-        no_match   a neighbouring bank has no rule link for the transfer
+        no_match   a bank on the path doesn't hold its side of the transfer
         confirmed  a complete chain, signed by every bank on it
         partial    a chain that some bank cut short (hop limit or a branch)
         failed     the answers didn't verify, or the payments have expired
@@ -362,7 +362,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             start = time.monotonic()
             try:
                 state = self.attempt(search)
-            except (KeyError, TypeError, ValueError):  # its payments expired from Valkey
+            except (KeyError, TypeError, ValueError):  # its payments are gone from Valkey
                 state = "failed"
             self.store.finish_search(search, state)
             log(

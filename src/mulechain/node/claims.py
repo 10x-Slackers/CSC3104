@@ -3,6 +3,10 @@
 A chain is nothing more than its signed claims. Its ID and its state (complete or cut)
 are computed from the claims, so every bank that receives the same chain reaches the
 same answers without coordinating. So is its tier, in each bank's case store.
+
+Two patterns (docs/patterns.md): zero trust, because `valid_chain` checks every
+signature and takes nothing a peer says on trust; and idempotency, because `digest`
+gives the same chain the same ID at every bank, so a repeat is recognised.
 """
 
 import hashlib

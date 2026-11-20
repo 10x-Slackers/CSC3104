@@ -1,6 +1,6 @@
 """Replay: send a workload to each bank's ingestor as pacs.008 batches, like a payment network.
 
-    python -m mulechain.replay workloads/tiny --url A=http://localhost:8081 --url B=... --url C=...
+    python -m mulechain.replay workloads/tiny --url A=http://localhost:8080 --url B=... --url C=...
     python -m mulechain.replay workloads/slice-6h --url ... --speed 0     # as fast as it is taken
     python -m mulechain.replay workloads/slice-6h --url ... --rate 2000   # a fixed events/s
 
