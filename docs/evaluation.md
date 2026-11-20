@@ -39,7 +39,7 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 | 8 | Clock skew | One bank's node with a shifted clock | Searches still complete: deadlines are durations |
 | 9 | Bulkhead | `kubectl scale deploy/summary -n bank-a --replicas=0` | Alerts still arrive; case pages show no draft |
 | 10 | Lambda | Ingestor and summary under load on AWS | Cold and warm latency; CloudWatch invocations, errors, duration |
-| 11 | Valkey loss | `kubectl delete pod -l app=valkey -n bank-c` during a replay, and `make rebuild BANK=a` | Time until lag is 0 (RTO); state and cases unchanged (RPO 0) |
+| 11 | Valkey loss | `kubectl delete pod -l app=valkey -n bank-c` during a replay, and `make rebuild BANK=a` | Time until lag, which rises when the scorers start again from the topic's start, is back to 0 (RTO); state and cases unchanged (RPO 0) |
 | 12 | Key rotation | `make key-add`, five minutes, `make key-drop`, with replays between and during | No missed links: cases equal offline |
 | 13 | Offline = cluster | Replay a workload with `--speed 0`, then `diff` the output of `make cases` and of `evaluate --cases` | Identical cases and tiers |
 | 14 | Out of sample | Rules frozen, run once on a larger Altman dataset | Recall and false-positive rate |
@@ -51,7 +51,7 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 | End-to-end detection latency | Kafka record timestamp at ingestion → case stored at the same bank | The scorer's log line per payment that made a link or hit (`payment_id`, `kafka_ts`) and the case service's `stored` lines (`payments`, `ts`), matched by payment ID: from the last of a case's payments to the case's first stored message |
 | Peer-trace latency | Search attempt start → its result | The node's `"event": "search"` lines (`ms`, `state`, `attempt`) |
 | Delivery | One `Deliver` call | The node's `"event": "deliver"` lines |
-| RTO | Fault → service again | The longest gap between accepted replay batches (replay's log) and between `stored` lines at the faulted bank; for Valkey loss, until lag is 0 |
+| RTO | Fault → service again | The longest gap between accepted replay batches (replay's log) and between `stored` lines at the faulted bank; for Valkey loss, until lag has risen and is back to 0 |
 | RPO | Cases lost | `make cases` against `evaluate --cases` |
 | Analyst load | Cases per bank per day, by tier | The offline evaluator |
 

@@ -56,12 +56,16 @@ def test_a_message_bridging_two_cases_merges_them_into_the_older():
     store = CaseStore(":memory:", "A")
     first = record(store, hit("h1", leg("p1")))
     second = record(store, hit("h2", leg("p2")))
+    third = record(store, hit("h3", leg("p3")))
     store.toggle(second["id"], "bookmarked")
-    merged = record(store, hit("h3", leg("p1"), leg("p2"), rule="chain"))
+    record(store, hit("h4", leg("p2"), leg("p3"), rule="chain"))  # third joins second
+    merged = record(store, hit("h5", leg("p1"), leg("p2"), rule="chain"))  # then both join first
     assert merged["id"] == first["id"] and merged["bookmarked"] == 1
     assert [c["id"] for c in store.cases()] == [first["id"]]
     assert store.get(second["id"])["merged_into"] == first["id"]
-    assert store.payments() == {first["id"]: ["p1", "p2"]}
+    assert store.payments() == {first["id"]: ["p1", "p2", "p3"]}
+    store.toggle(third["id"], "reviewed")  # a flag set on a merged-away case
+    assert store.get(first["id"])["reviewed"] == 1
 
 
 def test_cases_are_listed_alerts_first_then_by_rules_and_amount():

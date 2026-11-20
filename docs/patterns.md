@@ -106,7 +106,7 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **See it.** Bank A runs two privacy nodes on k3d. Delete either pod and the other takes over the background work on its next pass.
 
-**Limit.** The locks exist only on PostgreSQL. The unit tests and the offline evaluator use SQLite with one process, where they always succeed.
+**Limit.** The locks exist only on PostgreSQL. The unit tests and the offline evaluator use SQLite with one process, where they always succeed. A session's lock ends with its connection: a node that reconnects after a PostgreSQL failover finishes its pass without the lock, while the other replica may start one. The two then repeat each other's work for that pass, and the stored result is the same, because every write of the pass is keyed.
 
 ## 8. Key agreement with no dealer
 

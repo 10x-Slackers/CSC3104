@@ -83,7 +83,7 @@ def headline(case: dict) -> str:
             " chain: the other banks hold the transfers, but their rules didn't fire"
         )
     if any(m["kind"] == "local" for m in messages):
-        reasons.append("the money started or stayed inside this bank, so no other bank is involved")
+        reasons.append("one search ended inside this bank, where the money started or stayed")
     return f"Low priority: {'; '.join(reasons)}."
 
 

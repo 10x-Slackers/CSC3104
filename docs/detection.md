@@ -54,7 +54,7 @@ All of an event's writes, plus its partition's next offset, go to Valkey in one 
 - **Event time, not arrival time.** Windows use the payment's own `event_time`, so replay speed doesn't change what is detected, and an `in` that arrives after its `out` is still paired (`test_event_time_decides_not_arrival_order`).
 - **Repeats.** An event already in its account's window (same payment and direction) writes nothing new, and a hit's ID is a hash of the bank, the rule and the payments (`hit_identity`), so scoring an event twice is harmless (`test_a_replayed_event_changes_nothing`).
 - **Late events.** An event more than 72 hours (`WINDOW`) behind the newest event seen on its account is recorded but not scored (`test_an_event_later_than_the_allowed_lateness_is_not_scored`). The window keeps twice that, 144 hours, so an accepted late event still finds its partner.
-- **One arrival-order effect.** If a chain's outgoing payment arrives before its incoming one, the link and the hit are still written, but that outgoing payment doesn't count as flagged for a later quick repeat.
+- **Two arrival-order effects.** If a chain's outgoing payment arrives before its incoming one, the link and the hit are still written, but that outgoing payment doesn't count as flagged for a later quick repeat. And quick repeat compares a payment with the newest one to that payee scored so far, so when payments to one payee arrive out of order, a different one of them can be the quick repeat.
 
 ### Valkey layout
 
@@ -88,6 +88,7 @@ A rebuild writes every hit to the stream again. The privacy node reads them agai
 Limits:
 
 - **A bank answers from partial state while it rebuilds.** The privacy node keeps running. A search of its own whose payments are missing stays pending and is tried again. A peer that asks about a transfer not yet rebuilt gets an empty answer and also tries again. But a peer that asks about a transfer whose onward link is not yet rebuilt gets a chain that ends at this bank. Run `make rebuild` while the bank is idle.
+- **The check and the write are two round trips.** A Valkey that is replaced in the fraction of a millisecond between a worker's check and its write goes unnoticed for that partition, which then holds only the events from there on. `make rebuild` repairs it.
 - **Workers wait for keys.** A worker scores nothing until Valkey holds every peer's public keys, because a transfer to that bank would get no token. A bank whose privacy node has never reached one of its peers therefore doesn't start scoring. After the first contact the node keeps the keys in PostgreSQL, so a peer that is down later doesn't stop the scorers.
 
 ## Autoscaling on lag
