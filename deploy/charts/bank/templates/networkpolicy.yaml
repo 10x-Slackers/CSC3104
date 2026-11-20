@@ -5,14 +5,12 @@
 # The paths, per bank:   replay -> ingestor -> kafka <- scorer -> valkey <- privacy-node
 #                        privacy-node -> postgres <- case -> summary;  privacy-node -> case
 #                        privacy-node <-> the other banks' privacy nodes
-{{- $api := .Values.apiServerCIDRs }}
-{{- if not $api }}
-  {{- with lookup "v1" "Service" "default" "kubernetes" }}
-    {{- $api = append $api (printf "%s/32" .spec.clusterIP) }}
-  {{- end }}
-  {{- range (lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes").endpoints }}
-    {{- $api = append $api (printf "%s/32" (first .addresses)) }}
-  {{- end }}
+{{- $api := list }}  {{- /* the Kubernetes API server's addresses, looked up from the cluster */}}
+{{- with lookup "v1" "Service" "default" "kubernetes" }}
+  {{- $api = append $api (printf "%s/32" .spec.clusterIP) }}
+{{- end }}
+{{- range (lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes").endpoints }}
+  {{- $api = append $api (printf "%s/32" (first .addresses)) }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -28,7 +26,7 @@ spec:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
     - to:  # the operators' pods (Kafka, PostgreSQL) need the API; an empty list would allow every address
-        {{- range required "no API server address found: set apiServerCIDRs" $api }}
+        {{- range required "no API server address found" $api }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports:

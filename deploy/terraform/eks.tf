@@ -16,7 +16,7 @@ resource "aws_eks_cluster" "csc3104" {
 }
 
 # Hop limit 2 lets pods take LabRole from the node's metadata service: the lab has no Pod Identity, and the
-# EBS driver and the replay Job need AWS credentials. Bank pods can't reach it (default-deny NetworkPolicy).
+# EBS driver, the replay Job and the case service need AWS credentials. Other bank pods can't reach it (NetworkPolicy).
 resource "aws_launch_template" "nodes" {
   name = "csc3104-nodes"
   metadata_options {

@@ -64,7 +64,6 @@ Values ([values.yaml](../deploy/charts/bank/values.yaml)):
 | `bank` | `A`, `B` or `C` |
 | `ha` | Run with replicas: Kafka 3 brokers (a write needs 2 in sync), PostgreSQL 3 instances with automatic failover, privacy node 2. On k3d only bank A has it, because a laptop has room for one; on AWS every bank does. Set it on a fresh bank, not a running one |
 | `image.repository`, `image.tag` | The one image |
-| `apiServerCIDRs` | The Kubernetes API server's addresses, looked up from the cluster when empty. Set it only to render the chart without a cluster |
 | `aws` | AWS only, from Terraform: this bank's ElastiCache and Lambda endpoints |
 
 What each release runs:
@@ -157,6 +156,5 @@ There is no monitoring stack. Look at:
 
 ## Things to expect
 
-- A privacy-node or case pod that starts before its bank's PostgreSQL waits for it. A scorer restarts until its Valkey answers (once or twice in a new install, sometimes once when KEDA adds a pod), then waits for the peers' keys and logs `waiting_for_keys_of`. `make deploy` waits for all of them.
-- Scorer pods restart after their Valkey is lost. That restart is the rebuild.
+- A privacy-node or case pod that starts before its bank's PostgreSQL waits for it. A scorer restarts until its Valkey answers (once or twice in a new install, sometimes once when KEDA adds a pod), then waits for the peers' keys and logs `waiting_for_keys_of`.
 - A deleted PostgreSQL pod serves its open connections for up to 180 seconds and refuses new ones before it stops (CloudNativePG's [smart shutdown](https://cloudnative-pg.io/documentation/current/instance_manager/)). A service that restarts in that time waits until PostgreSQL is back.

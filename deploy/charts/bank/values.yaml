@@ -6,9 +6,6 @@ ha: false
 image:
   repository: mulechain
   tag: dev
-# Addresses of the Kubernetes API server, which bank pods may reach. Looked up from the
-# cluster when empty; set it only to render the chart without a cluster (CI).
-apiServerCIDRs: []
 # AWS only (from Terraform): this bank's ElastiCache and Lambdas. When set, the bank
 # runs no ingestor, summary or Valkey pods of its own.
 #   valkeyUrl, valkeyCidrs, summaryUrl, vpcCidr, kafkaNodePort

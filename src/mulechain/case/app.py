@@ -115,11 +115,11 @@ def create_app(store: CaseStore, summarize: Callable[[dict], str | None]) -> Fas
         store.toggle(case_id, flag)
         return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/")
     def index(request: Request):
         return page(request, "cases.html", cases=store.cases(limit=200))
 
-    @app.get("/cases/{case_id}", response_class=HTMLResponse)
+    @app.get("/cases/{case_id}")
     def detail(request: Request, case_id: str):
         case = load(case_id)
         return page(request, "case.html", case=case, draft=summarize(case))

@@ -35,11 +35,14 @@ class Bank:
         self.db.hset("keys", mapping=keys)
 
     def peer(self, payment: str, direction: str) -> str:
-        """The bank on the other side of one of this bank's payments."""
-        return self.db.hget(f"pay:{payment}:{direction}", "counterparty_bank")
+        """The bank on the other side of one of this bank's payments.
+
+        Like every read of a payment here, a KeyError means Valkey doesn't hold it.
+        """
+        return self.db.hgetall(f"pay:{payment}:{direction}")["counterparty_bank"]
 
     def token(self, payment: str, direction: str) -> bytes:
-        return bytes.fromhex(self.db.hget(f"pay:{payment}:{direction}", "token"))
+        return bytes.fromhex(self.db.hgetall(f"pay:{payment}:{direction}")["token"])
 
     def held(self, token: bytes) -> tuple[str, str]:
         """(payment, direction) of this bank's payment behind a token; empty strings if none."""

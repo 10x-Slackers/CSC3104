@@ -8,7 +8,7 @@ One process feeds all three banks. Every transfer goes to each bank on it, once.
 
 Patterns (docs/patterns.md): each bank has its own queue and sender, so a slow bank
 delays only itself; a failed batch is sent again with capped exponential backoff and
-full jitter; and with --speed 0 the queues are bounded, which is back-pressure.
+full jitter. With --speed 0 the queues are bounded, which is back-pressure (docs/data.md).
 
 A Lambda function URL works too: those requests are signed (mulechain/serverless.py).
 """

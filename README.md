@@ -22,14 +22,14 @@ Each box in the diagram is one module in [src/mulechain/](src/mulechain) and one
 | Privacy node | [node/](src/mulechain/node): `node.py` (the search and the gRPC service), `bank.py`, `claims.py`, `store.py`, `protocol.proto` | [node.yaml](deploy/charts/bank/templates/node.yaml) | [whitechoco05](https://github.com/whitechoco05), [commit2main](https://github.com/commit2main) |
 | Keys, tokens and mTLS | [crypto.py](src/mulechain/crypto.py), `Mtls` in [node/node.py](src/mulechain/node/node.py) | [certificate.yaml](deploy/charts/bank/templates/certificate.yaml), [keys.yaml](deploy/charts/bank/templates/keys.yaml) | [CalebWee](https://github.com/CalebWee) |
 | Durable state (PostgreSQL) | [node/store.py](src/mulechain/node/store.py), [case/store.py](src/mulechain/case/store.py), through [db.py](src/mulechain/db.py) | [postgres.yaml](deploy/charts/bank/templates/postgres.yaml) | [commit2main](https://github.com/commit2main) |
-| Case service | [case/](src/mulechain/case): `app.py` (the analyst page), `store.py` | [case.yaml](deploy/charts/bank/templates/case.yaml) | [mykacx](https://github.com/mykacx) |
+| Case service | [case/](src/mulechain/case): `app.py` (routes), `templates/` (the analyst pages), `store.py` | [case.yaml](deploy/charts/bank/templates/case.yaml) | [mykacx](https://github.com/mykacx) |
 | Summary service | [summary.py](src/mulechain/summary.py) | [summary.yaml](deploy/charts/bank/templates/summary.yaml); on AWS a Lambda, [lambda.tf](deploy/terraform/lambda.tf) | [mykacx](https://github.com/mykacx) |
 | Bank B, Bank C | The same code, with another `BANK` | One release of the same chart per bank, in [helmfile.yaml.gotmpl](deploy/helmfile.yaml.gotmpl) | [commit2main](https://github.com/commit2main) |
 | The dashed namespace border |  | [networkpolicy.yaml](deploy/charts/bank/templates/networkpolicy.yaml) | [commit2main](https://github.com/commit2main) |
 | `prepare.py` | [prepare.py](src/mulechain/prepare.py) | Run by hand ([docs/data.md](docs/data.md)) | [cthyuiii](https://github.com/cthyuiii) |
 | Offline evaluator | [evaluate.py](src/mulechain/evaluate.py) | Run by hand ([docs/evaluation.md](docs/evaluation.md)) | [commit2main](https://github.com/commit2main) |
 
-Two more modules are shared: [db.py](src/mulechain/db.py) (PostgreSQL, or SQLite in tests) and [serverless.py](src/mulechain/serverless.py) (one handler as a container or a Lambda). Deployment, the evaluation runs and the rewrite into one package are by [commit2main](https://github.com/commit2main).
+Two more modules are shared: [db.py](src/mulechain/db.py) (PostgreSQL, or SQLite in tests) and [serverless.py](src/mulechain/serverless.py) (one handler as a container or a Lambda). Deployment, the evaluation runs and the one-package layout are by [commit2main](https://github.com/commit2main).
 
 ## Quick start
 

@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS legs (
   payment_id TEXT, direction TEXT, account TEXT, amount DOUBLE PRECISION, peer TEXT,
   token TEXT, case_id TEXT, PRIMARY KEY (payment_id, direction));
 CREATE INDEX IF NOT EXISTS refs_case ON refs (case_id);
-CREATE INDEX IF NOT EXISTS messages_case ON messages (case_id);
+CREATE INDEX IF NOT EXISTS messages_case ON messages (case_id, rule);
 CREATE INDEX IF NOT EXISTS legs_case ON legs (case_id);
 """
 STATES = ("confirmed", "partial", "pending", "local", "hit")  # strongest first

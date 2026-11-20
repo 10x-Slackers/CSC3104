@@ -41,7 +41,7 @@ A **link** says "this incoming payment and this outgoing payment on one account 
 
 A worker is a Kafka consumer in the group `scorer-<bank>` (`main`). For each event it calls `Scorer.process`, which does five things and commits them together:
 
-1. **Record the bank's side of the payment** (`pay:`), and for a transfer with another bank, its token (`tok:`). The token is a keyed hash of the payment ID that only the two banks on the transfer can compute ([security.md](security.md)). Every cross-bank transfer is indexed, flagged or not, because a peer may ask about any of them. Until the privacy node has fetched the other bank's public keys, the worker waits.
+1. **Record the bank's side of the payment** (`pay:`), and for a transfer with another bank, its token (`tok:`). The token is a keyed hash of the payment ID that only the two banks on the transfer can compute ([security.md](security.md)). Every cross-bank transfer is indexed, flagged or not, because a peer may ask about any of them.
 2. **Read the account's window** of recent events and stop if this event is a repeat or too late.
 3. **Pair the event with each opposite one** in the window and write the fast and chain links.
 4. **Check the payee** for new payee and quick repeat (outgoing events only).
@@ -83,7 +83,7 @@ Valkey is not persisted, and it holds its own position in the topic: the `offset
 make rebuild BANK=a     # the same on purpose: pause the scorers, empty Valkey, start the scorers again
 ```
 
-A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)). The node removes hits from the stream once it has stored them, one batch behind its position.
+A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)).
 
 Limits:
 

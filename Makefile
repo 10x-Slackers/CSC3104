@@ -35,7 +35,6 @@ image:  ## build the one image every service runs
 	docker build -q -t mulechain:$(TAG) .
 
 k3d:  ## create the local cluster and deploy all three banks
-	mkdir -p workloads
 	k3d cluster create $(CLUSTER) --config deploy/k3d.yaml --wait
 	$(MAKE) load deploy
 

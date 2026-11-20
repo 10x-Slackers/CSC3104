@@ -92,7 +92,7 @@ The hop limit bounds the work and the disclosure one search can cause, like the 
 
 ## Failure handling
 
-**A bank is down.** Its neighbours' calls fail, so every search that needs it stays `pending`, and their case services show "Waiting for bank X". X is the neighbour the search asked, which can be a healthy bank passing the failure on from the bank behind it. Searches that don't need that bank carry on. When it returns, the searches are retried and the chains stored at all banks: `test_a_bank_that_is_down_delays_cases_but_loses_none`.
+**A bank is down.** Its neighbours' calls fail, so every search that needs it stays `pending`, and their case services show "Waiting for bank X". X is the neighbour the search asked, which can be a healthy bank passing the failure on from the bank behind it. Searches that don't need that bank carry on. (A bank that has never been reachable is different: its peers don't start scoring until they have its keys, [detection.md](detection.md#rebuilding-valkey-from-the-log).) When it returns, the searches are retried and the chains stored at all banks: `test_a_bank_that_is_down_delays_cases_but_loses_none`.
 
 **Retries with backoff** ([pattern 5](patterns.md#5-retry-with-capped-backoff-full-jitter-and-expiry)). A pending search waits a capped, random time before its next attempt (`backoff`). Only the starting bank retries, and it retries the whole search. After 24 h (`EXPIRY`) a search is no longer tried.
 

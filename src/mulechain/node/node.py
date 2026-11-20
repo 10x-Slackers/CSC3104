@@ -366,7 +366,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
             start = time.monotonic()
             try:
                 state = self.attempt(search)
-            except (KeyError, TypeError, ValueError):
+            except KeyError:
                 state = "pending"  # its payments aren't in Valkey: wait for the rebuild
             self.store.finish_search(search, state)
             log(

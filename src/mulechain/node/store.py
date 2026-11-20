@@ -7,7 +7,7 @@
     peer_keys  the public keys each peer last published
     hit_cursor how far into the scorer's stream of hits this bank has read
 
-Two patterns live here (docs/patterns.md):
+The patterns that live here (docs/patterns.md):
 
 - Transactional outbox. A chain and the messages it owes are written in one
   transaction, then delivered until acknowledged. A crash between "stored" and
@@ -15,6 +15,7 @@ Two patterns live here (docs/patterns.md):
 - Capped exponential backoff with full jitter. A search or a delivery that got no
   answer waits random(0, min(300 s, 10 s x 2^attempts)), so a bank that comes back
   isn't hit by every waiting message at once. Searches stop being retried after 24 h.
+- Advisory lock. `housekeeping` lets one replica at a time work these tables.
 """
 
 import hashlib

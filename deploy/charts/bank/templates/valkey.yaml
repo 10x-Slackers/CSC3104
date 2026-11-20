@@ -1,6 +1,6 @@
 # Valkey: the scorer's state, a view of the Kafka log. No persistence on purpose: if it
-# is lost, the scorers rebuild it from the topic (`make rebuild`). On AWS it is
-# the bank's ElastiCache instead.
+# is lost, the scorers rebuild it from the topic. On AWS it is the bank's ElastiCache
+# instead.
 {{- if not .Values.aws }}
 apiVersion: apps/v1
 kind: Deployment

@@ -10,8 +10,8 @@ the nodes still only exchange protocol messages.
 
 One difference from a cluster: here every event is scored before any search runs, so
 each search sees the finished picture. A cluster searches as soon as a rule fires, and
-a search is not repeated when the money moves on later, so its cases can hold fewer
-transfers and fewer alerts than this report (docs/evaluation.md).
+a search is not repeated when the money moves on later, so a case there can list fewer
+of a bank's payments than this report (docs/evaluation.md).
 
 The services' JSON log lines go to stderr; the report is the only thing on stdout.
 """

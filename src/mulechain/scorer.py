@@ -66,23 +66,24 @@ class Scorer:
 
         `partition` and `offset` say where the event sits in Kafka.
         """
-        read = self.db.pipeline(transaction=False)  # both reads in one round trip
+        read = self.db.pipeline(transaction=False)  # every read in one round trip
         read.hget("offsets", partition)
         read.zrange(f"win:{e['account']}", 0, -1, withscores=True)
-        position, window = read.execute()
+        read.get(f"last:{e['account']}:{e['counterparty_account']}")
+        position, window, last = read.execute()
         if position != self.position.get(partition, position):
             # Valkey restarted empty under this worker. Stop before writing to it: the
             # restart reads the partition from where Valkey's state now ends, its start.
             raise RuntimeError(f"Valkey lost partition {partition}'s state: restarting")
         made = {"links": [], "hits": []}
         tx = self.db.pipeline(transaction=True)  # MULTI ... EXEC: all or nothing
-        self._score(e, window, tx, made)
+        self._score(e, window, last, tx, made)
         tx.hset("offsets", partition, offset + 1)
         tx.execute()
         self.position[partition] = str(offset + 1)
         return made
 
-    def _score(self, e: dict, window: list, tx, made: dict) -> None:
+    def _score(self, e: dict, window: list, last: str | None, tx, made: dict) -> None:
         payment, direction, account = e["payment_id"], e["direction"], e["account"]
         now = datetime.fromisoformat(e["event_time"]).timestamp()
 
@@ -134,7 +135,6 @@ class Scorer:
         # 4. New payee and quick repeat: one entry per payer and payee, kept forever.
         if direction == "out":
             payee, cross = e["counterparty_account"], e["counterparty_bank"] != self.bank
-            last = self.db.get(f"last:{account}:{payee}")
             last_ts, last_flagged = map(float, last.split(":")) if last else (None, 0)
             if cross and last is None:
                 flagged = True

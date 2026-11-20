@@ -20,11 +20,10 @@ def lines(paths: list[str]):
     for path in paths:
         with open(path, errors="replace") as source:
             for line in source:
-                if "{" in line:  # a node's log files prefix each line with a timestamp
-                    try:
-                        yield json.loads(line[line.index("{") :])
-                    except ValueError:
-                        pass
+                try:  # a node's log files prefix each line with a timestamp
+                    yield json.loads(line[line.index("{") :])
+                except ValueError:
+                    pass
 
 
 def spread(values: list[float]) -> str:
@@ -37,7 +36,7 @@ def spread(values: list[float]) -> str:
 
 def main() -> None:
     ingested = {}  # (bank, payment) -> when Kafka took the event that made a link or hit
-    stored = defaultdict(list)  # bank -> the case service's stored lines, in time order
+    stored = defaultdict(list)  # bank -> the case service's stored lines
     accepted = defaultdict(list)  # bank -> when the ingestor accepted each replay batch
     searches = defaultdict(list)  # final state -> search milliseconds
     for line in lines(sys.argv[1:]):

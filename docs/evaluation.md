@@ -32,7 +32,7 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 | 1 | Does tracing work? | `make replay WORKLOAD=tiny && make cluster-check` | Every bank's cases equal the offline evaluator's |
 | 2 | Detection against Altman's labels | `evaluate workloads/altman-small --split dev`, then `--split eval` once | Recall by pattern and by payment, precision, cases per bank per day |
 | 3 | Thresholds | Dev only: change `CHAIN_RATIO` in [scorer.py](../src/mulechain/scorer.py) | False positives against recall |
-| 4 | Hop limit | `evaluate ... --hop-limit 8` | Chains completed against search time |
+| 4 | Hop limit | `evaluate ... --hop-limit 8` | Chains completed, and what else changes |
 | 5 | Does scaling help? | `make replay WORKLOAD=slice-24h ARGS="--rate 1500"`, and again with `--speed 0`, each with KEDA and with the scorers held at 1 (`kubectl annotate scaledobject scorer -n bank-a autoscaling.keda.sh/paused-replicas=1`) | Lag, replicas, latency p50/p95 |
 | 6 | HA against a single instance | `kubectl delete pod` on a Kafka broker, the PostgreSQL primary or a privacy node, in bank A (replicas) and bank B (single) | RTO, RPO |
 | 7 | Bank outage | `kubectl scale deploy/privacy-node -n bank-c --replicas=0` during a replay, then `--replicas=1` | Pending searches, time to drain, RPO |
@@ -113,7 +113,7 @@ Pod kills during `slice-6h` at 60×. A pause is the longest gap in the bank's ac
 
 ### AWS (experiments 1, 10, 11, 13)
 
-`make eks` created the cluster, the six Lambdas and the three ElastiCache groups in one command. The scorer and privacy-node changes that make a lost Valkey rebuild itself are newer than this run.
+`make eks` created the cluster, the six Lambdas and the three ElastiCache groups in one command. Not run on EKS: a Valkey lost with no command, which is the k3d result above.
 
 | Run | Result |
 | --- | --- |
