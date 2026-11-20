@@ -72,11 +72,7 @@ class CaseStore:
         self.db, self.bank = Db(url, SCHEMA), bank
 
     def record(self, messages: list[dict]) -> list[dict]:
-        """Store a batch of the node's messages; returns the case each one belongs to.
-
-        One transaction for the batch, under an advisory lock so that two replicas
-        can't both start a case for the same transfer.
-        """
+        """Store a batch of the node's messages; returns the case each one belongs to."""
         with self.db.transaction(lock=JOIN_LOCK):
             return [self._record(message) for message in messages]
 

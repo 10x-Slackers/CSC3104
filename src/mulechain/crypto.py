@@ -85,7 +85,7 @@ def pair_keys(bank: str, peer: str, own: list[PrivateKey], theirs: list[PublicKe
 
 
 def token(pair_key: bytes, payment_id: str) -> bytes:
-    """A transfer's 16-byte token: only the two banks holding `pair_key` can derive it."""
+    """A transfer's 16-byte token under one pair key."""
     message = b"mulechain token " + payment_id.encode()
     return hmac.new(pair_key, message, hashlib.sha256).digest()[:16]
 

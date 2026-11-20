@@ -20,7 +20,6 @@ def order(event):
 
 
 def test_replay_and_the_ingestor_rebuild_each_banks_events():
-    """Workload -> pacs.008 -> events gives every bank its events back."""
     for bank in BANKS:
         sent = [t for t in transfers(TINY) if bank in (t["bank"], t["counterparty_bank"])]
         made = ingestor.events(batch(*sent), bank)

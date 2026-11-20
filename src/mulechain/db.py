@@ -54,7 +54,7 @@ class Db:
 
     @contextmanager
     def transaction(self, lock: int | None = None):
-        """All-or-nothing: the writes inside commit together or not at all.
+        """The writes inside commit together or not at all.
 
         With `lock`, the transaction also holds that PostgreSQL advisory lock until it
         ends, so the same transaction in another replica waits its turn.
@@ -73,8 +73,8 @@ class Db:
     def try_lock(self, key: int) -> bool:
         """Take a PostgreSQL advisory lock if it is free.
 
-        Session-level: PostgreSQL releases it by itself if this process dies, so there
-        is no lease to time out. SQLite has a single process, so it always succeeds.
+        Session-level: PostgreSQL releases it if this process dies, so there is no lease
+        to time out.
         """
         return not self.postgres or self.all("SELECT pg_try_advisory_lock(?) AS ok", key)[0]["ok"]
 

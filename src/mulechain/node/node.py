@@ -420,7 +420,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 self.store.settle(messages, "queued")
 
     def work_once(self, block_ms: int | None = None) -> int | None:
-        """One pass of the background work, if no other replica is doing it.
+        """One pass of the background work.
 
         Returns how much there was to do, or None if another replica holds the lock.
         """

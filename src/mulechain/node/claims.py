@@ -63,6 +63,5 @@ def complete(claims: list[pb.LinkClaim]) -> bool:
 
 
 def digest(claims: list[pb.LinkClaim]) -> str:
-    """Content addressing: the same claims give the same chain ID at every bank,
-    whichever bank assembled them and from whichever end."""
+    """Content addressing: the same claims give the same chain ID, in whatever order."""
     return hashlib.sha256(b"".join(sorted({claim_bytes(c) for c in claims}))).hexdigest()

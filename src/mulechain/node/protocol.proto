@@ -3,9 +3,7 @@
 //
 // The caller's identity is not a field: it comes from its mTLS certificate.
 //
-// Regenerate the *_pb2* files with `make proto`, which runs:
-//   uv run python -m grpc_tools.protoc -Isrc --python_out=src --pyi_out=src \
-//     --grpc_python_out=src src/mulechain/node/protocol.proto
+// Regenerate the *_pb2* files with `make proto`.
 syntax = "proto3";
 
 package mulechain.v1;

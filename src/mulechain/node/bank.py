@@ -27,7 +27,6 @@ class Bank:
         return reply[0][1] if reply else []
 
     def publish_keys(self, keys: dict[str, str]) -> None:
-        """Give the scorer each peer's public keys, to derive its pair keys from."""
         self.db.hset("keys", mapping=keys)
 
     def peer(self, payment: str, direction: str) -> str:
@@ -45,8 +44,7 @@ class Bank:
     def lookup(self, token: bytes, direction: str, caller: str) -> str | None:
         """This bank's payment behind a token, if `caller` is the bank on its other side.
 
-        Tokens travel in claims, so a third bank can learn one. Only the transfer's own
-        counterparty may ask about it.
+        Tokens travel in claims, so a third bank can learn one.
         """
         payment, held = self.held(token)
         if held == direction and self.peer(payment, direction) == caller:

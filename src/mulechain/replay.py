@@ -44,7 +44,6 @@ def transfers(workload: Path) -> Iterator[dict]:
 
 
 def pacs008(e: dict) -> dict:
-    """One transfer as a pacs.008 credit transfer."""
     return {
         "PmtId": {"EndToEndId": e["payment_id"]},
         "PmtTpInf": {"LclInstrm": {"Prtry": e["payment_format"]}},

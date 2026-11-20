@@ -27,10 +27,7 @@ def log(service: str, **fields) -> None:
 
 
 def read_events(path: str | Path) -> Iterator[dict]:
-    """A workload's bank file as the events the ingestor would write to Kafka.
-
-    The file holds every payment type; only bank transfers are replayed and ingested.
-    """
+    """The bank transfers in a workload's bank file, as the ingestor would write them to Kafka."""
     with Path(path).open() as source:
         for row in csv.DictReader(source):
             if row["payment_format"] in BANK_TRANSFERS:

@@ -103,7 +103,6 @@ def producer() -> Producer:
 
 
 def handle(body: bytes | str) -> tuple[int, dict]:
-    """One batch -> (HTTP status, reply)."""
     ts = time.time()  # every record's Kafka timestamp: latency is measured from here
     out, errors = [], []
     try:
