@@ -1,13 +1,16 @@
 # The commands that build, deploy and run the system. `make` lists them.
 CLUSTER  ?= csc3104
-ENV      ?= k3d#        or eks
-TAG      ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
+# k3d or eks: whichever cluster kubectl points at
+ENV      ?= $(if $(findstring :eks:,$(shell kubectl config current-context 2>/dev/null)),eks,k3d)
+# The image tag is a hash of what goes into the image, so changed code always gets a new tag.
+TAG      ?= $(shell find Dockerfile pyproject.toml uv.lock src -type f ! -name '*.pyc' | sort | xargs cat | git hash-object --stdin | cut -c1-12)
+TAG      := $(TAG)
 WORKLOAD ?= tiny
 ARGS     ?=#            extra replay flags, e.g. ARGS="--speed 0"
 BANK     ?= a
-KEY      ?= 2
+export TAG
 
-HELMFILE = helmfile -f deploy/helmfile.yaml.gotmpl -e $(ENV) --state-values-set image.tag=$(TAG)
+HELMFILE = helmfile -f deploy/helmfile.yaml.gotmpl -e $(ENV) --state-values-set-string image.tag=$(TAG)
 TF       = terraform -chdir=deploy/terraform
 EKS      = $(if $(filter eks,$(ENV)),-f deploy/eks-values.yaml)
 
@@ -48,13 +51,14 @@ deploy:  ## install or update everything in the current cluster (ENV=k3d or eks)
 	$(HELMFILE) sync
 	kubectl wait -A --all --for=condition=Ready --timeout=15m \
 	  kafka,clusters.postgresql.cnpg.io,certificates.cert-manager.io
-	for bank in a b c; do kubectl rollout status deployment -n bank-$$bank --timeout=5m; done
+	set -e; for bank in a b c; do kubectl rollout status deployment -n bank-$$bank --timeout=5m; done
 
 replay:  ## replay a workload into the banks: make replay WORKLOAD=slice-6h ARGS="--speed 0"
-	helm template replay deploy/charts/replay $(EKS) --set image.tag=$(TAG) --set workload=$(WORKLOAD) \
-	  --set-string args='$(ARGS)' | kubectl replace --force --cascade=foreground -f -
+	helm template replay deploy/charts/replay $(EKS) --set workload=$(WORKLOAD) --set-string args='$(ARGS)' \
+	  --set image=$$(kubectl get deployment scorer -n bank-a -o jsonpath='{..image}') \
+	  | kubectl replace --force --cascade=foreground -f -
 	kubectl logs -n replay -f job/replay --pod-running-timeout=10m
-	kubectl wait -n replay --for=condition=complete job/replay --timeout=10s
+	kubectl wait -n replay --for=condition=complete job/replay --timeout=2m
 
 cases:  ## each bank's cases as "bank tier payments", to compare with `python -m mulechain.evaluate --cases`
 	@for bank in a b c; do kubectl exec -n bank-$$bank deploy/case -- python -c \
@@ -67,13 +71,15 @@ cluster-check:  ## check NetworkPolicies and mTLS on the running cluster (after 
 	uv run pytest deploy/test_cluster.py -v
 
 key-add:  ## rotation step 1: give a bank a new key version: make key-add BANK=b KEY=2
+	@! kubectl get secret bank-keys -n bank-$(BANK) -o jsonpath='{.data.$(KEY)}' | grep -q . \
+	  || { echo "bank $(BANK) already has a key $(KEY)"; exit 1; }
 	kubectl patch secret bank-keys -n bank-$(BANK) --type merge \
 	  -p "{\"data\": {\"$(KEY)\": \"$$(head -c 64 /dev/urandom | base64 -w0)\"}}"
 
 key-drop:  ## rotation step 2, five minutes later: retire an old key version: make key-drop BANK=b KEY=1
 	kubectl patch secret bank-keys -n bank-$(BANK) --type json -p '[{"op": "remove", "path": "/data/$(KEY)"}]'
 
-rebuild:  ## empty a bank's Valkey; its scorers rebuild it from the Kafka log: make rebuild BANK=a
+rebuild:  ## empty an idle bank's Valkey; its scorers rebuild it from the Kafka log: make rebuild BANK=a
 	kubectl annotate scaledobject scorer -n bank-$(BANK) --overwrite autoscaling.keda.sh/paused-replicas=0
 	kubectl wait pod -n bank-$(BANK) -l app=scorer --for=delete --timeout=5m
 	kubectl exec -n bank-$(BANK) deploy/privacy-node -- python -c \
@@ -91,7 +97,7 @@ lambda:  ## build the ingestor and summary Lambda zips into deploy/terraform/bui
 	  --python-version 3.12 --only-binary :all: -r deploy/terraform/build/requirements.txt
 	for app in ingestor summary; do cp -r src/mulechain deploy/terraform/build/$$app/ \
 	  && (cd deploy/terraform/build/$$app && find . -exec touch -t 198001020000 {} + \
-	  && find . -type f ! -path '*__pycache__*' | LC_ALL=C sort | zip -q -X ../$$app.zip -@); done
+	  && find . -type f ! -path '*__pycache__*' | LC_ALL=C sort | zip -q -X ../$$app.zip -@) || exit 1; done
 
 eks: lambda  ## create the AWS environment (EKS, ECR, ElastiCache, Lambdas) and deploy to it
 	$(TF) init -input=false

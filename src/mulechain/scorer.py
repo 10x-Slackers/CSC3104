@@ -6,8 +6,8 @@ The patterns this file shows (docs/patterns.md):
 
 - The log is the source of truth. Kafka keeps every event; everything in Valkey is
   derived from it. Valkey also holds how far into each partition its state goes, and
-  a worker starts reading there, so an emptied Valkey is rebuilt from the start of
-  the topic with no other step.
+  a worker starts reading there, so workers that start on an emptied Valkey rebuild
+  it from the start of the topic (`make rebuild`).
 - Partition ownership. Events are keyed by account, so each account lives in one
   partition and one worker owns it at a time. Workers share no account state, and
   KEDA adds workers as consumer lag grows, up to one per partition.
@@ -194,6 +194,7 @@ def main() -> None:
         {
             "bootstrap.servers": os.environ["KAFKA_BOOTSTRAP_SERVERS"],
             "group.id": f"scorer-{bank}",
+            "auto.offset.reset": "earliest",  # if a stored offset is past the topic's end
             # The client still commits offsets to Kafka, only so that KEDA can see the lag.
             "queued.max.messages.kbytes": 16384,  # 16 MiB prefetch, not the 64 MiB default
         }

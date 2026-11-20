@@ -1,9 +1,7 @@
 # A directory under workloads/, and extra replay flags such as "--speed 0".
 workload: tiny
 args: ""
-image:
-  repository: mulechain
-  tag: dev
+image: mulechain:dev
 # Where each bank takes payments. AWS: the ingestor Lambdas' function URLs.
 ingestorUrls:
   A: http://ingestor.bank-a:8080
