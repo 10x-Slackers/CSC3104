@@ -197,6 +197,7 @@ class CaseStore:
 
     def toggle(self, case_id: str, flag: str) -> None:
         """Flip the analyst's `bookmarked` or `reviewed` flag, on the case this one joined if any."""
-        while joined := self.get(case_id)["merged_into"]:
-            case_id = joined
-        self.db.run(f"UPDATE cases SET {flag} = 1 - {flag} WHERE id = ?", case_id)
+        with self.db.transaction(lock=JOIN_LOCK):  # so no merge happens in between
+            while joined := self.get(case_id)["merged_into"]:
+                case_id = joined
+            self.db.run(f"UPDATE cases SET {flag} = 1 - {flag} WHERE id = ?", case_id)
