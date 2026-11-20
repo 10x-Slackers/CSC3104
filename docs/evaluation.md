@@ -48,14 +48,14 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 
 | Metric | From → to | Source |
 | --- | --- | --- |
-| End-to-end detection latency | Kafka record timestamp at ingestion → case stored at the same bank | The scorer's log line per payment that made a link or hit (`payment_id`, `kafka_ts`) and the case service's `stored` lines (`payments`, `ts`, `tier`), matched by payment ID. The repository has no script for this join |
+| End-to-end detection latency | Kafka record timestamp at ingestion → case stored at the same bank | The scorer's log line per payment that made a link or hit (`payment_id`, `kafka_ts`) and the case service's `stored` lines (`payments`, `ts`), matched by payment ID: from the last of a case's payments to the case's first stored message |
 | Peer-trace latency | Search attempt start → its result | The node's `"event": "search"` lines (`ms`, `state`, `attempt`) |
 | Delivery | One `Deliver` call | The node's `"event": "deliver"` lines |
-| RTO | Fault → service again | Gaps between accepted replay batches (replay's log) and between `stored` lines; for Valkey loss, until lag is 0 |
+| RTO | Fault → service again | The longest gap between accepted replay batches (replay's log) and between `stored` lines at the faulted bank; for Valkey loss, until lag is 0 |
 | RPO | Cases lost | `make cases` against `evaluate --cases` |
 | Analyst load | Cases per bank per day, by tier | The offline evaluator |
 
-Every service logs one JSON object per line to stdout with its own `ts` ([`log`](../src/mulechain/__init__.py)). On k3d all pods share the host clock, and latency is measured from ingestion to a case at the same bank, so no clocks on different machines are compared. Where to look while a run is going is in [deployment.md](deployment.md#monitoring).
+[measure.py](../deploy/measure.py) computes the latencies and gaps from the collected log lines; its docstring has the commands. Every service logs one JSON object per line to stdout with its own `ts` ([`log`](../src/mulechain/__init__.py)). On k3d all pods share the host clock, and latency is measured from ingestion to a case at the same bank, so no clocks on different machines are compared. Where to look while a run is going is in [deployment.md](deployment.md#monitoring).
 
 ## Results
 
