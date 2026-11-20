@@ -45,7 +45,7 @@ Three rules make every token findable at each step:
 - **Name with own oldest, peer's newest.** When a bank asks a peer about a transfer it uses the token from its own oldest key and the peer's newest key (the first entry `pair_keys` returns). The answering bank uses the asker's token in its claim.
 - **Publish late.** A node tells peers about a change to its own keys only after the change has lasted `KEY_SETTLE_SECONDS` (120 s). A bank's pods see a changed Secret up to a minute apart. The wait means every scorer already uses a new key before any peer can name a transfer with it, and every scorer has stopped using a removed key before peers forget that key.
 
-The five-minute wait covers the Secret reaching every pod, the settle time, the peers' next fetch and their scorers' next reload. A node signs with its oldest key, and a signature verifies under any key the signer has published (`verify`).
+The five minutes cover the Secret reaching every pod, the settle time, the peers' next fetch and their scorers' next reload. A node signs with its oldest key, and a signature verifies under any key the signer has published (`verify`).
 
 Tests: `test_a_rotation_never_leaves_a_token_the_peer_has_not_indexed` ([test_crypto.py](../tests/test_crypto.py)) and `test_a_key_change_is_published_only_after_it_has_settled` ([test_system.py](../tests/test_system.py)).
 
@@ -54,11 +54,11 @@ Limits:
 - Both banks on a transfer must score it under overlapping key sets, which the waits above give when they score it well under a minute apart. If one bank scores it later than that across a key change, or a bank's Valkey is rebuilt after its peer rotated, the bank's name for an older transfer can be a token the peer never indexed. A search through that transfer stays pending and expires.
 - The settle timer is in memory. A node that restarts inside the two minutes publishes the changed keys at once, so a transfer scored in that window may get a token the peer has not indexed.
 - Once a key is dropped and unpublished, a chain signed with it can no longer be verified. A delivery of such a chain that is still being retried is refused for good.
-- During the overlap the two banks on a transfer may name it with different tokens, so the same chain can be stored under more than one ID. Each bank's case service merges them by payment ID ([cases.md](cases.md)). Loop detection compares tokens, so it can miss a loop then; the hop limit still bounds the chain ([protocol.md](protocol.md#known-limits)).
+- During the overlap the two banks on a transfer may name it with different tokens, so the same chain can be stored under more than one ID. Each bank's case service merges them by payment ID ([cases.md](cases.md)), and loop detection can miss a loop ([protocol.md](protocol.md#known-limits)).
 
 ## Signed link claims
 
-Each bank on a chain signs one claim with Ed25519 ([RFC 8032](https://www.rfc-editor.org/rfc/rfc8032)): "I received `in_token` from `in_from`, and my rule links it to `out_token`, which I sent to `out_to`". The signature covers every field, each length-prefixed (`claim_bytes` in [claims.py](../src/mulechain/node/claims.py)).
+Each bank on a chain signs one claim ([protocol.md](protocol.md#messages)) with Ed25519 ([RFC 8032](https://www.rfc-editor.org/rfc/rfc8032)). The signature covers every field, each length-prefixed (`claim_bytes` in [claims.py](../src/mulechain/node/claims.py)).
 
 `valid_chain` accepts a chain only if every claim verifies under its signer's published keys and each transfer is confirmed from both ends: the sender's claim and the receiver's claim must name each other and the same token. One bank cannot vouch for both sides. A chain's ID is a hash of its claims (`digest`), so no bank can relabel it.
 
@@ -78,7 +78,7 @@ Checked in [test_mtls.py](../tests/test_mtls.py) with real gRPC connections, and
 
 ## Who may ask what
 
-A valid certificate is not enough to ask about any transfer. Tokens travel inside claims, so a third bank on a chain can learn one. `Bank.lookup` ([bank.py](../src/mulechain/node/bank.py)) answers a `Trace` only when the caller is the bank on the other side of that transfer; anyone else gets the same empty reply as for an unknown token (`test_the_certificate_decides_what_a_caller_may_ask`, and `test_a_node_answers_only_the_bank_on_the_other_side_of_a_transfer` on the cluster).
+Tokens travel inside claims, so a third bank on a chain can learn one. `Bank.lookup` ([bank.py](../src/mulechain/node/bank.py)) answers a `Trace` only when the caller is the bank on the other side of that transfer; anyone else gets the same empty reply as for an unknown token (`test_the_certificate_decides_what_a_caller_may_ask`, and `test_a_node_answers_only_the_bank_on_the_other_side_of_a_transfer` on the cluster).
 
 ## Network paths
 
@@ -102,7 +102,7 @@ Every bank namespace starts with no network access in either direction, apart fr
 
 - Bank namespaces enforce the **restricted [Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/)** ([namespaces.yaml](../deploy/charts/platform/templates/namespaces.yaml)): Kubernetes rejects a pod that is not non-root, drops all capabilities and uses the default seccomp profile. The shared settings are in [_helpers.tpl](../deploy/charts/bank/templates/_helpers.tpl), with a read-only root filesystem.
 - None of the chart's service pods mounts a Kubernetes API token.
-- Keys and certificates are mounted from Secrets as whole directories. On k3d, Secrets are encrypted at rest (`--secrets-encryption` in [k3d.yaml](../deploy/k3d.yaml)); the Terraform for EKS configures no Secrets encryption of its own.
+- Keys and certificates are mounted from Secrets. On k3d, Secrets are encrypted at rest (`--secrets-encryption` in [k3d.yaml](../deploy/k3d.yaml)); the Terraform for EKS configures no Secrets encryption of its own.
 - The image runs as user 65532 and holds no state.
 
 ## Residual disclosure
