@@ -96,7 +96,7 @@ Almost every case in a slice is a single-bank hit, so the detection latency is m
 - Lag is sampled only every 10 to 35 s here, so the peaks are lower bounds.
 - Scaling out and back moves partitions between workers while they score. Every run still ended with the offline cases (44,983), so no event was skipped or scored against the wrong state.
 
-### Faults (experiments 6, 7, 9, 11)
+### Faults (experiments 6, 7, 8, 9, 11)
 
 Pod kills during `slice-6h` at 60×. A pause is the longest gap in the bank's accepted batches or stored cases after the kill; without a fault the gap is at most 1.0 s, the replay's own rhythm at this speed.
 
@@ -107,7 +107,8 @@ Pod kills during `slice-6h` at 60×. A pause is the longest gap in the bank's ac
 | Bank B: the PostgreSQL primary killed | PostgreSQL serves its open connections for 180 s more and then stops (CloudNativePG's [smart shutdown](https://cloudnative-pg.io/documentation/current/instance_manager/)): no case stored for 14.0 s. Batches are accepted throughout | 0 |
 | Bank B: the privacy node killed | None beyond 1.5 s: the replacement pod starts while the old one shuts down. Killed during PostgreSQL's 180 s shutdown instead, the new node can't connect until PostgreSQL is back: 104 s with no case stored | 0 |
 | Bank C's privacy node off for 240 s | Bank C stores no case until it is back (the longest wait 243.6 s), then all of them. Banks A and B are not slowed: latency p95 0.11 s. The one search that needed C waited through 4 unanswered attempts and was confirmed 7.3 s after C returned | 0 |
-| Summary service off at bank A (bulkhead), tiny replayed | All 5 of A's cases arrive. A case page takes 2.7 to 12.1 ms and shows no draft. With the service back, the first page with a draft takes 1.06 s and later ones 3.5 to 4.7 ms | 0 |
+| Bank C's privacy node with its clock 10 minutes ahead (libfaketime, wall clock only), tiny and then `slice-6h` at `--speed 0` | None. All 57 cluster checks pass and every search ends: 10 confirmed, 1 partial, 5 inside one bank, none failed or left pending. A deadline travels as a duration (`time_left` in [node.py](../src/mulechain/node/node.py)), so the banks need not agree on the time | 0 |
+| Summary service off at bank A (bulkhead), tiny replayed | All 5 of A's cases arrive. A case page takes 2.7 to 4.1 ms and shows no draft. With the service back, the first page with a draft takes 1.06 s and later ones 4.7 to 5.5 ms | 0 |
 | Valkey lost after six days of data (577,000 to 629,000 keys a bank): all three banks' Valkey pods deleted, then `make rebuild` for all three at once | Lag back to 0 after 150 s. Key counts and cases identical before and after | 0 |
 | Bank C's Valkey pod deleted during the replay, and no command run | The scorer stops, restarts and reads the topic from the start. Bank C stores no case for 19.0 s; its latency for the run is p95 2.5 s, max 19.5 s | 0 |
 
@@ -155,7 +156,6 @@ Attempts caught by pattern, as caught / attempts (reaching Tier 2):
 - The band decides how many attempts become cross-bank cases. Narrowing it halves the attempts that reach Tier 2. Widening it adds seven for about 40% more Tier 2 cases to review, and it moves the flagged share by less than 0.1 points either way, because almost all flags come from the new payee rule.
 - With `--hop-limit 8` the searches end with 16 partial chains where the default 4 ends with 44, and nothing else in the report changes: the same attempts caught at each tier and the same cases per bank per day. A partial chain already joins the same case and alerts like a confirmed one ([cases.md](cases.md)).
 
-### Not measured on this code
+### Not measured
 
-- **Clock skew (experiment 8)** was run on 19 Nov against the previous implementation of the same protocol: with bank C's node clock 10 minutes ahead, the cases were identical and every search was confirmed. The mechanism has not changed (`time_left` in [node.py](../src/mulechain/node/node.py) passes on a duration).
-- **Out of sample (experiment 14)** has not been run.
+**Out of sample (experiment 14)** has not been run.
