@@ -1,0 +1,8 @@
+{% macro tier(case) %}<mark{% if case.tier == 2 %} class="alert"{% endif %}>{{ tiers[case.tier] }}</mark>{% endmacro %}
+
+{% macro state(case) -%}
+  {% if case.state == "pending" and case.waiting %}<mark class="waiting">Waiting for bank {{ case.waiting }}</mark>
+  {%- else %}{{ states[case.state] }}{% endif %}
+{%- endmacro %}
+
+{% macro token(value) %}{% if value %}<code title="{{ value }}">{{ value[:12] }}…</code>{% endif %}{% endmacro %}

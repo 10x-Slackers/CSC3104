@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% import "macros.html" as show %}
+{% block title %}Bank {{ bank }} cases{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="5">{# new cases appear during a replay #}{% endblock %}
+{% block main %}
+<h1>Cases to review</h1>
+{% if cases %}
+<p><small>The 200 most urgent, alerts first. ★ marks a bookmarked case. This page reloads every 5 seconds.</small></p>
+<table>
+  <thead>
+    <tr><th>Case</th><th>Priority</th><th>Status</th><th>Rules fired</th><th>Amount (SGD)</th><th>Alert raised</th><th>Reviewed</th></tr>
+  </thead>
+  <tbody>
+    {% for case in cases %}
+    <tr{% if case.reviewed %} class="reviewed"{% endif %}>
+      <td><a href="/cases/{{ case.id }}"><code>{{ case.id[:16] }}</code></a>{{ " ★" if case.bookmarked }}</td>
+      <td>{{ show.tier(case) }}</td>
+      <td>{{ show.state(case) }}</td>
+      <td>{{ case.rules }}</td>
+      <td class="amount">{{ "{:,.2f}".format(case.amount) }}</td>
+      <td>{{ case.alerted_at | when }}</td>
+      <td>{{ "✓" if case.reviewed }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No cases yet. A case appears here when one of this bank's rules fires.</p>
+{% endif %}
+{% endblock %}

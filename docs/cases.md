@@ -2,7 +2,7 @@
 
 Each bank has its own case service. It takes the messages its privacy node sends, joins them into cases, decides which are alerts, and shows them to the bank's analyst. A separate summary service drafts a plain-English summary of a case.
 
-Code: [case/store.py](../src/mulechain/case/store.py) (cases), [case/app.py](../src/mulechain/case/app.py) (page and API), [summary.py](../src/mulechain/summary.py) (drafts).
+Code: [case/store.py](../src/mulechain/case/store.py) (cases), [case/app.py](../src/mulechain/case/app.py) (routes and API), [case/templates/](../src/mulechain/case/templates) (the pages), [summary.py](../src/mulechain/summary.py) (drafts).
 
 ## Messages from the node
 
@@ -70,14 +70,14 @@ A case shows the strongest state among its messages (`STATES`): `confirmed`, `pa
 
 | Path | Shows |
 | --- | --- |
-| `GET /` | The 200 most urgent cases: tier, state, rules fired, amount, alert time, flags. Reloads every 5 s |
-| `GET /cases/{id}` | One case: this bank's payments, the chain in money-flow order with the bank that signed each link, the messages received, and a draft summary |
+| `GET /` | The 200 most urgent cases: priority, status, rules fired, amount, alert time, flags. Reloads every 5 s |
+| `GET /cases/{id}` | One case: a draft summary, this bank's payments, the chain in money-flow order with the bank that signed each link, and the messages received |
 | `POST /cases/{id}/bookmarked`, `POST /cases/{id}/reviewed` | Flip a flag |
 | `GET /api/cases` | Every listed case as JSON, each with its own payment IDs (`payments`). `make cases` and the cluster checks compare this with the offline evaluator |
 | `GET /api/cases/{id}` | One case as JSON; this is also what the summary service receives |
 | `GET /healthz` | Readiness |
 
-The page is read-only apart from the two flags. There is no free text and no decision: what a bank does about a case is its own process. There is no login either; the page is reached with `make ui BANK=b` (a `kubectl port-forward`), so access control is the cluster's.
+The pages are [Jinja](https://jinja.palletsprojects.com/) templates styled with [MVP.css](https://andybrewer.github.io/mvp/), which the browser loads from a CDN, plus a few rules in `base.html`. They are read-only apart from the two flags. There is no free text and no decision: what a bank does about a case is its own process. There is no login either; the page is reached with `make ui BANK=b` (a `kubectl port-forward`), so access control is the cluster's.
 
 Each stored message logs one JSON line (`event: stored` with `key`, `kind`, `case_id`, `tier`, `alerted_at`, `payments`), from which alerts can be timed ([evaluation.md](evaluation.md)).
 

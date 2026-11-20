@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% import "macros.html" as show %}
+{% block title %}Case {{ case.id[:16] }}{% endblock %}
+{% block main %}
+<h1>Case <code>{{ case.id[:16] }}</code></h1>
+{% if case.merged_into %}
+<p>Merged into <a href="/cases/{{ case.merged_into }}"><code>{{ case.merged_into[:16] }}</code></a>.</p>
+{% endif %}
+<p>{{ show.tier(case) }} {{ show.state(case) }}{% if case.alerted_at %}, alert raised {{ case.alerted_at | when }}{% endif %}</p>
+<p>
+  <form method="post" action="/cases/{{ case.id }}/bookmarked">
+    <button>{{ "Remove bookmark" if case.bookmarked else "Bookmark" }}</button>
+  </form>
+  <form method="post" action="/cases/{{ case.id }}/reviewed">
+    <button>{{ "Mark not reviewed" if case.reviewed else "Mark reviewed" }}</button>
+  </form>
+</p>
+
+<h2>Draft summary</h2>
+{% if draft %}
+<article><aside><p>{{ draft }}</p></aside></article>
+{% else %}
+<p>No draft: the summary service is unavailable.</p>
+<p><small>A rule flags suspicion, not proven laundering. Each link is signed by the bank that states it; a signature doesn't prove its records are true.</small></p>
+{% endif %}
+
+<h2>This bank's payments</h2>
+<table>
+  <thead><tr><th>Payment</th><th>Direction</th><th>Account</th><th>Amount (SGD)</th><th>Other bank</th></tr></thead>
+  <tbody>
+    {% for leg in case.legs %}
+    <tr>
+      <td>{{ leg.payment_id }}</td>
+      <td>{{ "Received" if leg.direction == "in" else "Sent" }}</td>
+      <td>{{ leg.account }}</td>
+      <td class="amount">{{ "{:,.2f}".format(leg.amount) }}</td>
+      <td>{{ leg.peer or "This bank" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if case.links %}
+<h2>How the money moved</h2>
+<p><small>One row per bank on the chain, each signed by that bank. Other banks' transfers are shown as tokens only.</small></p>
+<table>
+  <thead><tr><th>Step</th><th>Received from</th><th>Bank</th><th>Sent on to</th><th>Incoming transfer</th><th>Outgoing transfer</th></tr></thead>
+  <tbody>
+    {% for link in case.links %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ link.in_from or "Chain starts here" }}</td>
+      <td><strong>{{ link.signer }}</strong>{{ " (this bank)" if link.signer == bank }}</td>
+      <td>{{ link.out_to or "Chain ends here" }}</td>
+      <td>{{ show.token(link.in_token) }}</td>
+      <td>{{ show.token(link.out_token) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<details>
+  <summary>Messages from the privacy node ({{ case.messages | length }})</summary>
+  <table>
+    <thead><tr><th>Kind</th><th>Rule</th><th>Waiting for</th><th>Key</th><th>Received</th></tr></thead>
+    <tbody>
+      {% for message in case.messages %}
+      <tr>
+        <td>{{ message.kind }}</td>
+        <td>{{ (message.rule or "") | replace("_", " ") }}</td>
+        <td>{{ message.waiting or "" }}</td>
+        <td><code>{{ message.key[:16] }}</code></td>
+        <td>{{ message.received_at | when }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endblock %}

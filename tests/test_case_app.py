@@ -24,7 +24,7 @@ def test_an_alert_page_shows_own_payments_tokens_and_a_draft(nodes):
     assert [c["tier"] for c in listed] == [2, 2, 1, 1, 1]
     loop = next(c for c in listed if c["payments"] == ["p10", "p11"])
     page = client.get(f"/cases/{loop['id']}").text
-    assert "ALERT" in page and "B-o1" in page  # this bank's own account
+    assert "Alert</mark>" in page and "B-o1" in page  # this bank's own account
     assert "A-o0" not in page and "C-o2" not in page and "p12" not in page  # nobody else's
     assert "Alert: the rules at banks B and C each linked these payments" in page
     assert "one chain of 3 transfers" in page
