@@ -1,19 +1,19 @@
 # Distributed-systems patterns
 
-Three banks run the same services and must agree on chains of transfers while pods crash, banks go offline and messages arrive twice. This page lists the patterns that make that safe, where each one lives in the code, where it comes from, and how to watch it work. [overview.md](overview.md) shows how the services fit together.
+Three banks run the same services and must agree on chains of transfers while pods crash, banks go offline and messages arrive twice. These ten patterns make that safe. [overview.md](overview.md) shows how the services fit together.
 
-| Pattern | Problem it solves here | Where | See it |
-| --- | --- | --- | --- |
-| [Log as source of truth](#1-the-log-is-the-source-of-truth) | Detection state can be lost | [scorer.py](../src/mulechain/scorer.py), [kafka.yaml](../deploy/charts/bank/templates/kafka.yaml) | `make rebuild BANK=a` |
-| [Partition ownership, autoscaling on lag](#2-partition-ownership-and-autoscaling-on-lag) | Many workers, one account's events in order | [ingestor.py](../src/mulechain/ingestor.py), [scorer.yaml](../deploy/charts/bank/templates/scorer.yaml) | `kubectl get hpa -A` during a replay |
-| [Delivery chain, idempotent receivers](#3-the-delivery-chain-and-idempotent-receivers) | Every hop can repeat a message | every service | `test_a_replayed_event_changes_nothing` ([test_scorer.py](../tests/test_scorer.py)) and others |
-| [Deadline propagation](#4-deadline-propagation) | A search crosses several banks | [node.py](../src/mulechain/node/node.py) | the `search` log lines |
-| [Backoff with jitter, expiry](#5-retry-with-capped-backoff-full-jitter-and-expiry) | A bank is offline for a while | [store.py](../src/mulechain/node/store.py) | `test_backoff_doubles_up_to_the_cap_with_full_jitter` ([test_node_store.py](../tests/test_node_store.py)) |
-| [Transactional outbox, dead letters](#6-transactional-outbox-and-dead-letters) | A crash between "stored" and "sent" | [store.py](../src/mulechain/node/store.py), [node.py](../src/mulechain/node/node.py) | `test_a_refused_delivery_becomes_a_dead_letter_and_others_are_retried` ([test_system.py](../tests/test_system.py)) |
-| [Advisory locks](#7-advisory-locks) | Two replicas share one database | [db.py](../src/mulechain/db.py) | bank A runs two privacy nodes |
-| [Key agreement with no dealer](#8-key-agreement-with-no-dealer) | Nobody may hold every bank's keys | [crypto.py](../src/mulechain/crypto.py) | `test_two_banks_derive_the_same_token_and_a_third_cannot` ([test_crypto.py](../tests/test_crypto.py)) |
-| [Zero trust](#9-zero-trust) | A peer, or a pod, may be hostile | [node.py](../src/mulechain/node/node.py), [networkpolicy.yaml](../deploy/charts/bank/templates/networkpolicy.yaml) | `make cluster-check` |
-| [Bulkhead, graceful degradation](#10-bulkhead-and-graceful-degradation) | One slow part must not stop the rest | [app.py](../src/mulechain/case/app.py) | `test_a_bank_that_is_down_delays_cases_but_loses_none` ([test_system.py](../tests/test_system.py)) |
+| Pattern | Problem it solves here | Where |
+| --- | --- | --- |
+| [Log as source of truth](#1-the-log-is-the-source-of-truth) | Detection state can be lost | [scorer.py](../src/mulechain/scorer.py), [kafka.yaml](../deploy/charts/bank/templates/kafka.yaml) |
+| [Partition ownership, autoscaling on lag](#2-partition-ownership-and-autoscaling-on-lag) | Many workers, one account's events in order | [ingestor.py](../src/mulechain/ingestor.py), [scorer.yaml](../deploy/charts/bank/templates/scorer.yaml) |
+| [Delivery chain, idempotent receivers](#3-the-delivery-chain-and-idempotent-receivers) | Every hop can repeat a message | every service |
+| [Deadline propagation](#4-deadline-propagation) | A search crosses several banks | [node.py](../src/mulechain/node/node.py) |
+| [Backoff with jitter, expiry](#5-retry-with-capped-backoff-full-jitter-and-expiry) | A bank is offline for a while | [store.py](../src/mulechain/node/store.py) |
+| [Transactional outbox, dead letters](#6-transactional-outbox-and-dead-letters) | A crash between "stored" and "sent" | [store.py](../src/mulechain/node/store.py), [node.py](../src/mulechain/node/node.py) |
+| [Advisory locks](#7-advisory-locks) | Two replicas share one database | [db.py](../src/mulechain/db.py) |
+| [Key agreement with no dealer](#8-key-agreement-with-no-dealer) | Nobody may hold every bank's keys | [crypto.py](../src/mulechain/crypto.py) |
+| [Zero trust](#9-zero-trust) | A peer, or a pod, may be hostile | [node.py](../src/mulechain/node/node.py), [networkpolicy.yaml](../deploy/charts/bank/templates/networkpolicy.yaml) |
+| [Bulkhead, graceful degradation](#10-bulkhead-and-graceful-degradation) | One slow part must not stop the rest | [app.py](../src/mulechain/case/app.py) |
 
 The unit tests are in [tests/](../tests) and run with `make check`. The cluster checks are in [test_cluster.py](../deploy/test_cluster.py) and run with `make cluster-check`.
 
@@ -21,13 +21,13 @@ The unit tests are in [tests/](../tests) and run with `make check`. The cluster 
 
 **Problem.** The scorer keeps its working state in Valkey, which runs in memory with no persistence. If that state is lost, detection must not be.
 
-**Here.** Each bank's Kafka topic keeps every event forever (`retention.ms: -1` in [kafka.yaml](../deploy/charts/bank/templates/kafka.yaml)). Everything in Valkey is derived from the topic. Valkey also records how far into each partition its state goes: `Scorer.process` in [scorer.py](../src/mulechain/scorer.py) writes an event's state and the partition's next offset to the `offsets` hash in one Valkey transaction (`MULTI`/`EXEC`: all of the writes happen or none), so the two can't disagree. When a worker is given partitions, `resume` (inside `main`) starts each one at the offset Valkey holds, or at the start of the topic if Valkey holds none. The offsets the client commits to Kafka are used only by KEDA to measure lag.
+**Here.** Each bank's Kafka topic keeps every event forever (`retention.ms: -1` in [kafka.yaml](../deploy/charts/bank/templates/kafka.yaml)), and everything in Valkey is derived from it. `Scorer.process` in [scorer.py](../src/mulechain/scorer.py) writes an event's state and the partition's next offset to the `offsets` hash in one Valkey transaction (`MULTI`/`EXEC`: all of the writes happen or none), so the two can't disagree. When a worker is given partitions, `resume` (inside `main`) starts each one at the offset Valkey holds, or at the start of the topic if Valkey holds none. The offsets the client commits to Kafka are used only by KEDA to measure lag.
 
 **Source.** Kreps, [The Log](https://www.linkedin.com/blog/engineering/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) (2013), describes a log as the record from which every other store is derived. Storing a consumer's offset together with the results it produced is the Kafka documentation's own recipe for exactly-once consumption ([KafkaConsumer, "Storing Offsets Outside Kafka"](https://kafka.apache.org/39/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html)). `MULTI`/`EXEC` is a [Valkey transaction](https://valkey.io/topics/transactions/).
 
-**See it.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts them again. They read the topic from the start, and the bank ends with the same keys and the same cases ([deployment.md](deployment.md)).
+**See it.** `make rebuild BANK=a` empties the bank's Valkey and restarts its scorers. They read the topic from the start, and the bank ends with the same keys and the same cases ([deployment.md](deployment.md)).
 
-**Limit.** A worker picks its position only when it is given partitions. A scorer that is running when Valkey is emptied carries on from where it was, so the rebuild needs the scorers restarted, which `make rebuild` does. Run it while the bank is idle: the privacy node keeps reading Valkey during the rebuild, and a search it tries in that time can fail.
+**Limit.** A worker picks its position only when it is given partitions, so a rebuild needs the scorers restarted, which `make rebuild` does. Run it while the bank is idle ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
 
 ## 2. Partition ownership and autoscaling on lag
 
@@ -65,7 +65,7 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **Problem.** A search asks bank B, which asks bank C, and so on. If each bank waited its own full timeout, the bank that started the search would give up long before the last one stopped working.
 
-**Here.** The bank that starts a search gives it `SEARCH_SECONDS = 10` in total ([node.py](../src/mulechain/node/node.py)). gRPC carries the time left to the next bank as a duration, so banks need not have matching clocks. Each bank reads it with `time_left` and passes it on in `Trace`, minus `REPLY_MARGIN = 0.25` seconds that it keeps to send its own reply. A bank that runs out of time answers `UNAVAILABLE`, and the starting bank records the search as pending and tries all of it again later. `Deliver` and `Keys` are not part of a search and use a fixed `CALL_SECONDS = 5`.
+**Here.** The bank that starts a search gives it `SEARCH_SECONDS = 10` in total ([node.py](../src/mulechain/node/node.py)). gRPC carries the time left to the next bank as a duration, so banks need not have matching clocks. Each bank reads it with `time_left` and passes it on in `Trace`, minus `REPLY_MARGIN = 0.25` seconds for its own reply. A bank that runs out of time answers `UNAVAILABLE`, and the starting bank records the search as pending and tries all of it again later. `Deliver` and `Keys` are not part of a search and use a fixed `CALL_SECONDS = 5`.
 
 **Source.** gRPC's guide to [deadlines](https://grpc.io/docs/guides/deadlines/), which describes deadline propagation, and Beyer et al., *Site Reliability Engineering* (2016), ch. 22, [Addressing Cascading Failures](https://sre.google/sre-book/addressing-cascading-failures/#xref_cascading-failure_latency-and-deadlines): every server in a request tree passes on the time that is left.
 
@@ -79,7 +79,7 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **Source.** The formula is "Full Jitter" in Brooker, [Exponential Backoff And Jitter](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) (AWS Architecture Blog, 2015), which compares backoff strategies by simulation. The AWS Builders' Library article [Timeouts, retries, and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/) explains why retries need backoff, a cap and jitter.
 
-**See it.** `test_backoff_doubles_up_to_the_cap_with_full_jitter` ([test_node_store.py](../tests/test_node_store.py)), `test_an_unacknowledged_message_waits_then_is_due_again` ([test_node_store.py](../tests/test_node_store.py)) and `test_a_pending_search_is_retried_until_it_expires` ([test_node_store.py](../tests/test_node_store.py)).
+**See it.** `test_backoff_doubles_up_to_the_cap_with_full_jitter`, `test_an_unacknowledged_message_waits_then_is_due_again` and `test_a_pending_search_is_retried_until_it_expires` ([test_node_store.py](../tests/test_node_store.py)).
 
 **Limit.** A case whose search expires or fails keeps showing "Waiting for bank X" ([protocol.md](protocol.md#known-limits)). Outbox messages have no expiry. A chain delivery ends when the peer acknowledges or refuses it; a batch of case messages that the case service can't store is sent again until it can, and holds up the messages behind it.
 
@@ -87,7 +87,7 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **Problem.** A verified chain must reach every bank on it and this bank's case service. If the node stored the chain and then crashed before sending, the others would never hear of it.
 
-**Here.** `save_chain` in [store.py](../src/mulechain/node/store.py) writes the chain and one `outbox` row per message it owes in a single transaction. `deliver` in [node.py](../src/mulechain/node/node.py) then sends the due rows and marks each one `sent` only when the receiver acknowledges it. A crash at any point leaves the row queued, so the worst case is a message sent twice, which receivers ignore (pattern 3). If a peer answers `INVALID_ARGUMENT`, it read the chain and refused it, and sending again can't help: the row becomes `dead` (a dead letter) and stays in the table for inspection. Any other failure means "try later" with backoff.
+**Here.** `save_chain` in [store.py](../src/mulechain/node/store.py) writes the chain and one `outbox` row per message it owes in a single transaction. `deliver` in [node.py](../src/mulechain/node/node.py) then sends the due rows and marks each one `sent` only when the receiver acknowledges it. A crash at any point leaves the row queued, so the worst case is a message sent twice, which receivers ignore (pattern 3). A peer that answers `INVALID_ARGUMENT` read the chain and refused it, so sending again can't help: the row becomes `dead` (a dead letter) and stays in the table for inspection. Any other failure is retried with backoff.
 
 **Source.** Richardson's [Transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html) pattern, and the [Dead Letter Channel](https://www.enterpriseintegrationpatterns.com/patterns/messaging/DeadLetterChannel.html) in *Enterprise Integration Patterns*.
 
@@ -112,11 +112,11 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **Problem.** The two banks on a transfer must give it the same name, and no third bank may be able to compute that name. A central party that hands out keys could read everything.
 
-**Here.** Each bank makes its own private keys and publishes only public keys, through its node's `Keys` call. Any two banks then derive the same pair key on their own: `HKDF(X25519(my private key, your public key))` (`pair_keys` in [crypto.py](../src/mulechain/crypto.py)). X25519 lets two banks compute the same secret from their own private key and the other's public key, and HKDF turns that secret into a key. A transfer's token is an HMAC of its payment ID under that pair key. Rotation needs no backfill of existing state: a bank indexes each transfer under every pair of keys, names it with its own oldest key and the peer's newest, and publishes a change to its keys only after `KEY_SETTLE_SECONDS = 120`. [security.md](security.md) has the detail and the steps.
+**Here.** Each bank makes its own private keys and publishes only public keys, through its node's `Keys` call. Any two banks then derive the same pair key on their own: `HKDF(X25519(my private key, your public key))` (`pair_keys` in [crypto.py](../src/mulechain/crypto.py)). X25519 lets two banks compute the same secret from their own private key and the other's public key, and HKDF turns that secret into a key. A transfer's token is an HMAC of its payment ID under that pair key. Rotation re-indexes nothing already stored, and a bank publishes a change to its keys only after `KEY_SETTLE_SECONDS = 120` ([security.md](security.md#key-rotation)).
 
 **Source.** Standard primitives only: X25519 key agreement ([RFC 7748](https://www.rfc-editor.org/rfc/rfc7748)), HKDF ([RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)), HMAC ([RFC 2104](https://www.rfc-editor.org/rfc/rfc2104)), and Ed25519 for the signatures on claims ([RFC 8032](https://www.rfc-editor.org/rfc/rfc8032)), all from the Python `cryptography` library.
 
-**See it.** `test_two_banks_derive_the_same_token_and_a_third_cannot` ([test_crypto.py](../tests/test_crypto.py)), `test_a_rotation_never_leaves_a_token_the_peer_has_not_indexed` ([test_crypto.py](../tests/test_crypto.py)) and `test_a_key_change_is_published_only_after_it_has_settled` ([test_system.py](../tests/test_system.py)).
+**See it.** `test_two_banks_derive_the_same_token_and_a_third_cannot` and `test_a_rotation_never_leaves_a_token_the_peer_has_not_indexed` ([test_crypto.py](../tests/test_crypto.py)), and `test_a_key_change_is_published_only_after_it_has_settled` ([test_system.py](../tests/test_system.py)).
 
 **Limit.** The wait is a timer in the node's memory. A node that restarts within two minutes of a key change publishes the change at once.
 
@@ -147,7 +147,7 @@ A bulkhead walls off one part so that its failure can't spread, like a ship's wa
 **Here.**
 
 - **Bulkhead around the summary service.** `summarizer` in [case/app.py](../src/mulechain/case/app.py) gives the call `SUMMARY_SECONDS = 2`. Any failure or slow answer means the page shows no draft, and the case itself is unaffected.
-- **A bank being down delays cases but loses none.** A search that got no answer stays a row and is retried (pattern 5). Meanwhile the case is shown as pending with the bank it is waiting for, and searches that don't need that bank carry on.
+- **A bank being down delays cases but loses none.** A search that got no answer is retried (pattern 5). Meanwhile its case is shown as pending with the bank it is waiting for, and searches that don't need that bank carry on.
 - **One queue per bank in replay.** A slow ingestor delays only its own bank's batches ([replay.py](../src/mulechain/replay.py)).
 - **Event time.** The rules use each payment's own time, not its arrival time, so replay speed, retries and late events within the allowed lateness don't change what is detected (`_score` in [scorer.py](../src/mulechain/scorer.py)).
 

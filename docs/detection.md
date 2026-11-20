@@ -13,10 +13,9 @@ Each bank has one topic, `bank-<X>-transactions`, declared in [kafka.yaml](../de
 | Setting | Value | Why |
 | --- | --- | --- |
 | Partitions | 6 | Up to six scorer workers |
-| Record key | The bank's own `account` | All of an account's events land in one partition, so one worker at a time owns the account and workers share no account state |
-| Retention | Forever (`retention.ms: -1`) | Kafka is the source of truth. Everything in Valkey is derived from it and can be rebuilt |
+| Record key | The bank's own `account` | All of an account's events land in one partition, so one worker at a time owns the account |
+| Retention | Forever (`retention.ms: -1`) | Kafka is the source of truth; Valkey is rebuilt from it |
 | Replication | 3 brokers with `min.insync.replicas` 2 in a bank deployed with replicas (`ha`); 1 broker otherwise | A write survives the loss of one broker |
-| Producer | Idempotent, `acks=all` ([ingestor.py](../src/mulechain/ingestor.py)) | The ingestor answers `200` only after Kafka has every event |
 
 Kafka keeps the order of one partition, not the order across partitions, and a resent batch can write an event twice. The scorer is built so that neither matters ([below](#event-time-repeats-and-late-events)).
 
@@ -31,11 +30,10 @@ A **link** says "this incoming payment and this outgoing payment on one account 
 | Fast pass-through | Money in, then 90–98 % of it out of the same account 1 to 30 minutes later (`FAST_RATIO`, `FAST_DELAY`) | [Guidelines to MAS Notice 626](https://www.mas.gov.sg/regulation/guidelines/guidelines-to-notice-626-on-prevention-of-money-laundering-and-cft-for-banks), Appendix B, B-2(iii): assets "withdrawn immediately after being deposited" | A link |
 | Chain | Money in, then 90–110 % of it out of the same account between 1 minute and 72 hours later, and at least one of the two payments is with another bank (`CHAIN_RATIO`, `CHAIN_DELAY`) | Same guidelines, B-4(i): "high velocity of funds through an account"; 90 % of Altman's laundering hops follow within about 70 hours | A link, a `chain` hit, and a cross-bank search |
 | New payee | A transfer to an account at another bank that this customer has never paid | No published red flag is cited. Fan-in, fan-out and scatter-gather laundering all create first-time payer and payee pairs | A `new_payee` hit |
-| Quick repeat | A transfer to a payee at another bank whose previous payment from this account was flagged (new payee or chain) at most 24 hours earlier (`REPEAT_WINDOW`) | No published red flag is cited. It catches the first payment that follows a flagged one to the same payee | A `quick_repeat` hit |
+| Quick repeat | A transfer to a payee at another bank whose previous payment from this account was flagged (a new payee hit, or the outgoing leg of a chain link) at most 24 hours earlier (`REPEAT_WINDOW`) | No published red flag is cited. It catches the first payment that follows a flagged one to the same payee | A `quick_repeat` hit |
 
 - Every qualifying in/out pair on an account is linked. The scorer doesn't split an incoming amount across several outgoing payments.
 - The fast band lies inside the chain band, so a fast link with another bank on either side is also a chain link. A fast link alone, with both payments inside the bank, makes no hit and no case (`test_fast_pass_through_inside_the_bank_links_without_a_hit`). It still lets the privacy node follow the money through the bank to the next cross-bank payment.
-- "Flagged" for quick repeat means the earlier payment was a new payee hit or the outgoing leg of a chain link.
 - Each `chain` hit starts one search at the privacy node (`take_hits` in [node.py](../src/mulechain/node/node.py)). Every hit becomes a case message; how hits and chains become Tier 1 cases and Tier 2 alerts is in [cases.md](cases.md).
 - Tests: `test_chain_links_money_passed_on_across_banks`, `test_no_link_outside_the_ratio_or_delay`, `test_new_payee_then_quick_repeat_within_a_day` in [test_scorer.py](../tests/test_scorer.py).
 
@@ -77,7 +75,7 @@ Every key except `last:`, `offsets` and `keys` expires 7 days after its last wri
 
 ## Rebuilding Valkey from the log
 
-Valkey is not persisted. The state in it and the position it was built up to live together: the `offsets` hash is written in the same transaction as each event's state, so the two can never disagree. When a worker is given partitions it starts each one at the offset Valkey holds, or at the start of the topic if Valkey holds none (`resume` in `main`). Workers that start on an empty Valkey therefore read the whole topic again and rebuild every key. The offsets the client also commits to Kafka are used for one thing only, letting KEDA see the lag.
+Valkey is not persisted, and it holds its own position in the topic: the `offsets` hash, written with each event's state ([pattern 1](patterns.md#1-the-log-is-the-source-of-truth)). Workers that start on an empty Valkey therefore read the whole topic again and rebuild every key.
 
 ```sh
 make rebuild BANK=a     # pause the scorers, empty Valkey, start the scorers again
@@ -88,7 +86,7 @@ A rebuild writes every hit to the stream again. The privacy node reads them agai
 Limits:
 
 - **Rebuild an idle bank.** The privacy node keeps running while Valkey is empty. A search that comes due in that time fails, and a peer that asks about a transfer is told the bank doesn't hold it.
-- **A running worker doesn't notice a lost Valkey.** The start position is chosen only when a worker is given its partitions. If Valkey restarts under an idle worker, the worker carries on from where it was, on empty state. `make rebuild` restarts the workers, which is what triggers the rebuild.
+- **A running worker doesn't notice a lost Valkey.** The start position is chosen only when a worker is given its partitions, so if Valkey restarts under an idle worker, the worker carries on from where it was, on empty state. `make rebuild` restarts the workers.
 
 ## Autoscaling on lag
 
@@ -101,4 +99,4 @@ A KEDA `ScaledObject` (the [Apache Kafka scaler](https://keda.sh/docs/2.21/scale
 | `offsetResetPolicy` | `earliest`, so a group that has committed nothing yet shows the whole topic as lag |
 | Reaction time | The defaults: KEDA polls the lag every 30 s ([ScaledObject](https://keda.sh/docs/2.21/reference/scaledobject-spec/)), and Kubernetes removes workers about 5 minutes after the lag has gone ([HorizontalPodAutoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)) |
 
-When workers are added or removed, Kafka moves partitions between them. A worker taking over a partition starts at the offset in Valkey, so it continues exactly where the last one stopped. Watch it with `kubectl get hpa -A` during a replay.
+When workers are added or removed, Kafka moves partitions between them. A worker taking over a partition starts at the offset in Valkey, exactly where the last one stopped. Watch it with `kubectl get hpa -A` during a replay.

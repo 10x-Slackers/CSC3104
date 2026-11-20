@@ -1,6 +1,6 @@
 # Data
 
-The payments the banks see: where they come from, how they become three banks' files, and how they enter a bank. The detection that follows is in [detection.md](detection.md).
+Where the banks' payments come from, how they become three banks' files, and how they enter a bank. Detection follows in [detection.md](detection.md).
 
 ```text
 IBM AML dataset → prepare.py → workloads/<name>/ → replay.py → pacs.008 over HTTP → ingestor → Kafka
@@ -75,7 +75,7 @@ uv run python -m mulechain.prepare workloads/slice-6h --start 2022-09-05 --hours
 | `altman-1-6sep` | `--start 2022-09-01 --hours 144` | 2,696,535 | Comparing a cluster run with the offline evaluator |
 | `altman-medium` | `--altman HI-Medium` | 29,336,378 | A check on data the thresholds were not tuned on (about 3 GB to download and far more memory to build) |
 
-- The evaluator reads `altman-small` whole and applies the split itself: `--split dev` counts attempts that start on 1–5 Sep, `--split eval` those on 6–10 Sep (`SPLITS` in [evaluate.py](../src/mulechain/evaluate.py)).
+- The evaluator reads `altman-small` whole and applies the dev/eval split itself (`SPLITS` in [evaluate.py](../src/mulechain/evaluate.py); [evaluation.md](evaluation.md#rules)).
 - A slice starts with no payment history, so every payee looks new at first and the new payee rule fires more than it would mid-stream. Use slices for load, failure and demo runs, not for detection quality. `altman-1-6sep` starts where the dataset starts, so it misses no history.
 
 ## The tiny workload
@@ -114,11 +114,11 @@ uv run python -m mulechain.replay workloads/tiny --url B=http://localhost:8080 -
 - **Back-pressure.** With `--speed N` or `--rate` the clock never waits for a reply, and a slow ingestor shows as a growing `queued` count in the log. With `--speed 0` the reader waits while any bank has 1,000 transfers queued (`BACKLOG`).
 - **Logs.** One JSON line per POST (`bank`, `message`, `status`, `attempt`, `transfers`, `ms`, `queued`) and a last line with the total transfers and seconds.
 
-In the cluster, `make replay` runs it as a Job in the `replay` namespace ([job.yaml](../deploy/charts/replay/templates/job.yaml)). On k3d the Job reads `workloads/` mounted from the host; on AWS it first copies the workload from an S3 bucket ([deployment.md](deployment.md)).
+In the cluster, `make replay` runs it as a Job in the `replay` namespace ([job.yaml](../deploy/charts/replay/templates/job.yaml), [deployment.md](deployment.md#replay-and-cases)).
 
 ## Ingestor
 
-[ingestor.py](../src/mulechain/ingestor.py) is a bank's front door. It takes a batch of payments, checks it, and writes the bank's events to Kafka. It is one function, `handle(body) -> (status, reply)`, behind two adapters: a small HTTP server in a container on k3d (`serve`), and a Lambda function URL with `AWS_IAM` on AWS (`lambda_handler`).
+[ingestor.py](../src/mulechain/ingestor.py) takes a batch of payments, checks it, and writes the bank's events to Kafka. It is one function, `handle(body) -> (status, reply)`, behind two adapters: a small HTTP server in a container on k3d (`serve`), and a Lambda function URL with `AWS_IAM` on AWS (`lambda_handler`).
 
 **Input:** a subset of ISO 20022 **pacs.008** (the credit transfer message) as JSON, `POST /`, one batch per message. Bank identifiers are fictional BICs (`BICS`: A `TSTASGSG`, B `TSTBSGSG`, C `TSTCSGSG`). A batch to Bank B holding p06:
 

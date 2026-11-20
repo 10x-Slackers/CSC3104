@@ -4,7 +4,7 @@ CSC3104 Cloud and Distributed Computing project.
 
 Money mules move funds through several banks, and each bank sees only its own part of the chain. Here three simulated banks find such chains together, peer to peer and with no central party, without showing each other their customers, accounts or amounts. Each bank's analyst gets a case that says which banks' rules confirmed each link.
 
-Start with [docs/overview.md](docs/overview.md). To read the code, start with [docs/patterns.md](docs/patterns.md). It covers the ten distributed-systems patterns the system is built from, with the code for each and how to see it work: the log as the source of truth, partition ownership and autoscaling on lag, the delivery chain and idempotent receivers, deadline propagation, backoff with jitter, the transactional outbox, advisory locks, key agreement with no dealer, zero trust, and bulkheads.
+Start with [docs/overview.md](docs/overview.md). To read the code, start with [docs/patterns.md](docs/patterns.md): the ten distributed-systems patterns the system is built from, each with its code and how to see it work. They are the log as the source of truth, partition ownership and autoscaling on lag, the delivery chain and idempotent receivers, deadline propagation, backoff with jitter, the transactional outbox, advisory locks, key agreement with no dealer, zero trust, and bulkheads.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ make k3d-down
 
 | Path | What |
 | --- | --- |
-| [src/mulechain/](src/mulechain) | The services, one module each: `ingestor`, `scorer`, `node/` (privacy node), `case/`, `summary`; and the tools `replay`, `prepare`, `evaluate` |
+| [src/mulechain/](src/mulechain) | The services and tools, one module each (the table above) |
 | [tests/](tests) | Unit tests, including the three banks end to end in one process |
 | [deploy/](deploy) | k3d config, helmfile, Helm charts, Terraform for AWS, and checks against a running cluster |
 | [workloads/tiny](workloads/tiny) | A 20-payment fixture with planted chains; `mulechain.prepare` generates the larger ones ([docs/data.md](docs/data.md)) |

@@ -4,9 +4,9 @@ CSC3104 Cloud and Distributed Computing: **Privacy Preserving Detection of Cross
 
 ## Problem
 
-Money mules pass funds through accounts to hide where the money came from. Each bank sees only its own transfers, so a chain that passes through several banks is split across organisations. In Singapore, "mule bank accounts are used to electronically move the scam monies between different banks, and out of the country" ([SPF, MAS, IMDA and GovTech, 17 Sep 2025](https://www.mas.gov.sg/news/media-releases/2025/joint-press-release-by-spf-mas-imda-and-govtech-on-restricting-access-to-facilities-for-scam-mules)). Singapore's banks already share information on customers who show several red flags through [COSMIC](https://www.mas.gov.sg/regulation/anti-money-laundering/cosmic), a platform MAS launched in 2024. This project looks at a different design: peer to peer, with no platform in the middle that holds every bank's data.
+Money mules pass funds through accounts to hide where the money came from. Each bank sees only its own transfers, so a chain through several banks is split across organisations. In Singapore, "mule bank accounts are used to electronically move the scam monies between different banks, and out of the country" ([SPF, MAS, IMDA and GovTech, 17 Sep 2025](https://www.mas.gov.sg/news/media-releases/2025/joint-press-release-by-spf-mas-imda-and-govtech-on-restricting-access-to-facilities-for-scam-mules)). Singapore's banks already share information on customers who show several red flags through [COSMIC](https://www.mas.gov.sg/regulation/anti-money-laundering/cosmic), a platform MAS launched in 2024. This project looks at a different design: peer to peer, with no platform in the middle that holds every bank's data.
 
-In this system three simulated banks cooperate to find these chains, while customer details and payment records stay inside each bank. The output is a case for each bank's own analyst, showing which banks' rules confirmed each link, with a template summary draft for human review.
+Three simulated banks cooperate to find these chains, while customer details and payment records stay inside each bank. The output is a case for each bank's own analyst, showing which banks' rules confirmed each link, with a template summary draft for human review.
 
 ## Goals
 
@@ -18,7 +18,7 @@ In this system three simulated banks cooperate to find these chains, while custo
 
 ## Requirements
 
-The module sets these requirements. Each row says how the system meets it and where to look.
+The module sets these requirements.
 
 | Requirement | How it is met | Where to look |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ The module sets these requirements. Each row says how the system meets it and wh
 
 ## Patterns
 
-The system is built from ten distributed-systems patterns. [patterns.md](patterns.md) gives each one's code and how to see it work:
+The system is built from ten distributed-systems patterns ([patterns.md](patterns.md)):
 
 1. [The log is the source of truth](patterns.md#1-the-log-is-the-source-of-truth)
 2. [Partition ownership and autoscaling on lag](patterns.md#2-partition-ownership-and-autoscaling-on-lag)
@@ -101,10 +101,10 @@ The offline evaluator runs the same scorer, node and case code in one process, w
 | Area | Choice | Why |
 | --- | --- | --- |
 | Language | Python 3.12, one package, `uv` | One language for every service, so the offline evaluator runs the cluster's own code |
-| Streaming | [Kafka](https://kafka.apache.org/intro) ([Strimzi](https://strimzi.io/docs/operators/latest/overview), KRaft mode), confluent-kafka, [KEDA](https://keda.sh/docs/2.21/scalers/apache-kafka/) | A partitioned log that can be read again from the start: order per account, state that can be rebuilt, scaling on lag |
+| Streaming | [Kafka](https://kafka.apache.org/intro) ([Strimzi](https://strimzi.io/docs/operators/latest/overview), KRaft mode), confluent-kafka, [KEDA](https://keda.sh/docs/2.21/scalers/apache-kafka/) | A partitioned log that can be read again: order per account, state that can be rebuilt, scaling on lag |
 | Payment messages | ISO 20022 pacs.008 subset as JSON; CloudEvents headers on Kafka records | The message banks use for a credit transfer, and a standard envelope for events |
 | Protocol | [gRPC](https://grpc.io/docs/guides/deadlines/) and protobuf | Deadlines that travel with a call, mutual TLS, and a schema that fixes what may cross between banks |
 | Cryptography | HMAC-SHA256 tokens, X25519 + HKDF key agreement, Ed25519 signatures (`cryptography`), [cert-manager](https://cert-manager.io/docs/) | Standard primitives ([security.md](security.md)), no cryptography of our own, and no party that hands out keys |
-| Storage | Kafka (source of truth), [Valkey](https://valkey.io/) (derived, rebuildable state), PostgreSQL ([CloudNativePG](https://cloudnative-pg.io/documentation/current/)) | Each kind of state where it fits: the log is the truth, Valkey is fast and can be rebuilt, PostgreSQL gives transactions and locks for what must not be lost |
+| Storage | Kafka (source of truth), [Valkey](https://valkey.io/) (derived, rebuildable state), PostgreSQL ([CloudNativePG](https://cloudnative-pg.io/documentation/current/)) | The log is the truth, Valkey is fast and can be rebuilt, PostgreSQL gives transactions and locks for what must not be lost |
 | Platform | k3d locally, Amazon EKS, AWS Lambda, ElastiCache, Helm, [helmfile](https://helmfile.readthedocs.io/en/latest/), Terraform, GitHub Actions | The same charts locally and on AWS, with managed services where the module asks for cloud services |
 | Monitoring | No dedicated stack: `kubectl top`, KEDA/HPA status, consumer lag, CloudWatch for Lambda, JSON logs | Enough to measure every experiment without more to run |

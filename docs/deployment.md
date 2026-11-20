@@ -23,7 +23,7 @@ Every service runs the same image, built from the root [Dockerfile](../Dockerfil
 | `make k3d` | Create the local cluster, build and load the image, deploy all three banks |
 | `make image` / `make load` | Build the image / copy it into the k3d cluster |
 | `make deploy` | Install or update everything in the current cluster and wait until it is ready |
-| `make replay WORKLOAD=tiny` | Replay a workload from `workloads/` into the banks; `ARGS` passes replay flags: `--speed 0` for full speed, `--rate N` for N events a second |
+| `make replay WORKLOAD=tiny` | Replay a workload from `workloads/` into the banks; `ARGS` passes replay flags ([data.md](data.md#replay)) |
 | `make cases` | Print each bank's cases as sorted `bank tier payments` lines |
 | `make ui BANK=b` | Open a bank's analyst page on <http://localhost:8000> |
 | `make cluster-check` | Check the running cluster (below) |
@@ -37,7 +37,7 @@ Two variables are chosen for you:
 - `ENV` is `eks` when `kubectl`'s current context is an EKS cluster and `k3d` otherwise, so the same commands work on both.
 - `TAG`, the image tag, is a hash of everything that goes into the image (`Dockerfile`, `pyproject.toml`, `uv.lock`, `src/`). Changed code always gets a new tag, so `make load deploy` rolls the pods.
 
-`CLUSTER` names the k3d cluster and defaults to `csc3104`. Pass another name if a cluster of that name already exists.
+`CLUSTER` names the k3d cluster and defaults to `csc3104`. If a cluster of that name already exists, pass another (`make k3d CLUSTER=<name>`), and the same one to `make load` and `make k3d-down`.
 
 ## What `make k3d` installs
 
@@ -87,11 +87,9 @@ Keys (`bank-keys`, mounted at `/keys`) and the node's certificate (`privacy-node
 ```sh
 make replay WORKLOAD=tiny                      # 60 simulated seconds per second (the default)
 make replay WORKLOAD=slice-6h ARGS="--speed 0" # as fast as the ingestors accept
-make cases                                     # bank, tier, payment IDs per case
-make ui BANK=a                                 # the analyst page
 ```
 
-`make replay` runs a Job in the `replay` namespace ([charts/replay](../deploy/charts/replay)) with the image the scorers run. It replaces any earlier replay Job, follows its log, and fails if the Job fails. On k3d the Job reads the workload from the mounted `workloads/` directory. `make cases` prints the cases as sorted `bank tier payments` lines, exactly as `uv run python -m mulechain.evaluate workloads/<name> --cases` does offline, so a cluster run is compared with the offline one by `diff` ([evaluation.md](evaluation.md)):
+`make replay` runs a Job in the `replay` namespace ([charts/replay](../deploy/charts/replay)) with the image the scorers run. It replaces any earlier replay Job, follows its log, and fails if the Job fails. `make cases` prints the same lines as `uv run python -m mulechain.evaluate workloads/<name> --cases` does offline, so a cluster run is compared with the offline one by `diff` ([evaluation.md](evaluation.md)):
 
 ```sh
 diff <(make cases) <(uv run python -m mulechain.evaluate workloads/tiny --cases 2>/dev/null) && echo identical
@@ -109,11 +107,11 @@ Workloads are described in [data.md](data.md).
 
 ## Operations
 
-**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again. They read the topic from the start, because Valkey holds how far its own state goes ([patterns.md](patterns.md)). Run it while the bank is idle: the privacy node keeps running against the emptied Valkey, so a search that comes due during the rebuild can fail. After a Valkey pod is lost, run the same command, because a scorer that was idle at the time does not notice the loss until it restarts.
+**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again, which read the topic from the start. Run it while the bank is idle, and also after a Valkey pod is lost; [detection.md](detection.md#rebuilding-valkey-from-the-log) says why.
 
-**Rotate a bank's keys.** `make key-add BANK=b KEY=2`, wait five minutes, `make key-drop BANK=b KEY=1`. `KEY` is the version number; `key-add` refuses a version that exists. Don't restart the bank's privacy node in the two minutes after either step. Why the wait is needed is in [security.md](security.md#key-rotation).
+**Rotate a bank's keys.** `make key-add BANK=b KEY=2`, wait five minutes, `make key-drop BANK=b KEY=1` ([security.md](security.md#key-rotation) says why). `KEY` is the version number; `key-add` refuses a version that exists. Don't restart the bank's privacy node in the two minutes after either step.
 
-**Simulate a bank outage.** `kubectl scale deploy/privacy-node -n bank-c --replicas=0` takes bank C off the network. Searches that need it stay pending and their cases show "Waiting for bank X", where X is the neighbour the search asked: bank C, or a bank that could not reach C. Scale it back and they finish ([protocol.md](protocol.md)). Other faults are injected the same way, with `kubectl delete pod`.
+**Simulate a bank outage.** `kubectl scale deploy/privacy-node -n bank-c --replicas=0` takes bank C off the network. Searches that need it stay pending and their cases show "Waiting for bank X" until it is scaled back ([protocol.md](protocol.md#failure-handling)). Other faults are injected the same way, with `kubectl delete pod`.
 
 ## AWS
 
@@ -145,9 +143,8 @@ What differs from k3d:
 | Ingestor | A pod | A Lambda. It reaches the bank's Kafka through a node-port listener (9094), and its security group opens only that bank's ports |
 | Summary service | A pod | A Lambda. The case service signs its calls with `LabRole` ([serverless.py](../src/mulechain/serverless.py)) |
 | Replay | Reads `workloads/` from the host, posts to the ingestor Services | An init container copies the workload from the bucket; posts are signed and go to the function URLs |
-| Replicas | Bank A | Every bank |
 
-Upload a workload once with `aws s3 sync workloads/<name> s3://csc3104-workloads-<account-id>/<name>`; the bucket survives `make eks-down`. The ingestor Lambdas are given the nodes' addresses when Terraform applies, so run `make eks` again if the node group replaces its nodes. The AWS-only network paths and their costs are in [security.md](security.md#trust-limits).
+Upload a workload once with `aws s3 sync workloads/<name> s3://csc3104-workloads-<account-id>/<name>`; the bucket survives `make eks-down`. The ingestor Lambdas are given the nodes' addresses when Terraform applies, so run `make eks` again if the node group replaces its nodes.
 
 ## Monitoring
 
@@ -162,4 +159,3 @@ There is no monitoring stack. Look at:
 
 - A new privacy-node pod may restart once: its first connection to PostgreSQL can be refused in the seconds before its NetworkPolicy takes effect.
 - During the first install the privacy-node and case pods restart a few times until their bank's PostgreSQL is up. `make deploy` waits for them.
-- The default cluster name is `csc3104`: `make k3d CLUSTER=<name>` avoids a clash with an existing cluster, and the same `CLUSTER` is then needed for `make load` and `make k3d-down`.

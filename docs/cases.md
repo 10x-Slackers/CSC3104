@@ -42,7 +42,7 @@ So a rule hit, the pending search it started and the chain that later confirms i
 
 **Repeats change nothing.** A message is stored once per `(key, kind)`; a second copy returns the same case (an idempotent receiver). `test_the_node_posts_batches_and_a_resent_batch_is_harmless` in [test_case_app.py](../tests/test_case_app.py).
 
-**Advisory lock.** A batch is stored in one transaction that holds the PostgreSQL advisory lock `JOIN_LOCK`, so two writers can't both start a case for the same transfer.
+**Advisory lock.** A batch is stored in one transaction that holds the PostgreSQL advisory lock `JOIN_LOCK` ([pattern 7](patterns.md#7-advisory-locks)), so two writers can't both start a case for the same transfer.
 
 ### Tiers and alerts
 
@@ -77,7 +77,7 @@ A case shows the strongest state among its messages (`STATES`): `confirmed`, `pa
 | `GET /api/cases/{id}` | One case as JSON; this is also what the summary service receives |
 | `GET /healthz` | Readiness |
 
-The page is read-only apart from the two flags. There is no free text and no decision: what a bank does about a case is its own process. There is no login either; the page is reached with `make ui BANK=b` (a `kubectl port-forward`), so access control is the cluster's. [deployment.md](deployment.md) has the commands.
+The page is read-only apart from the two flags. There is no free text and no decision: what a bank does about a case is its own process. There is no login either; the page is reached with `make ui BANK=b` (a `kubectl port-forward`), so access control is the cluster's.
 
 Each stored message logs one JSON line (`event: stored` with `key`, `kind`, `case_id`, `tier`, `alerted_at`, `payments`), from which alerts can be timed ([evaluation.md](evaluation.md)).
 
@@ -85,7 +85,7 @@ Each stored message logs one JSON line (`event: stored` with `key`, `kind`, `cas
 
 `summary.handle` takes one case as JSON and returns `{"draft": text}`: a headline saying why the case was raised, this bank's payments, the path of the money bank by bank, and a caveat. It is a fixed template, not a language model, because the input holds customer details.
 
-- **Bulkhead.** The case service gives it `SUMMARY_SECONDS = 2` and shows "No draft" on any failure or slow answer (`summarizer`), logging `event: no_draft`. A summary outage can't touch detection or the rest of the page: `test_a_slow_or_broken_summary_service_only_costs_the_draft`.
+- **Bulkhead.** The case service gives it `SUMMARY_SECONDS = 2` and shows "No draft" on any failure or slow answer (`summarizer`), logging `event: no_draft`: `test_a_slow_or_broken_summary_service_only_costs_the_draft`.
 - **Stateless.** It has no state, no keys and no network access of its own. Drafts aren't stored; each page view makes a fresh one from the stored case.
 - **Container or Lambda.** On k3d it is a small HTTP server (port 8080). On AWS the same `handle` runs as a Lambda behind a function URL, and the case service signs each request with SigV4 (`request_headers` in [serverless.py](../src/mulechain/serverless.py)).
 - Each request logs `status`, `ms`, `cold` (the first request in the process) and `case_id`.

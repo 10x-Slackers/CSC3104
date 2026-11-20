@@ -22,7 +22,7 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 ```
 
 - **Same code as the cluster.** Each bank's `Scorer` writes into its own in-process Valkey (fakeredis). Its `Node` reads the hits, searches and delivers, and its case messages go into a real `CaseStore` (SQLite). Peer calls are direct method calls. There is no Kafka, gRPC server or network.
-- **One difference.** Offline, every event is scored before any search runs. On a cluster, searches start while payments still arrive: a search is tried again while a bank on its path doesn't hold a transfer yet, and waits `INGESTION_GRACE_SECONDS` before it decides that a link stays inside its bank. A cluster run can therefore end with a long chain cut into different partial pieces, so that a case lists fewer of a bank's payments than offline. A difference of that kind is not a lost case; the runs below showed none.
+- **One difference.** Offline, every event is scored before any search runs. On a cluster, searches start while payments still arrive ([protocol.md](protocol.md#search-states)). A cluster run can therefore end with a long chain cut into different partial pieces, so that a case lists fewer of a bank's payments than offline. A difference of that kind is not a lost case; the runs below showed none.
 - **Report.** Per Altman pattern type: attempts caught at any tier and at Tier 2. Overall: payment-level recall over the scope, laundering by scope reason, precision, ordinary payments flagged (the share of all payments on the split's days that were flagged and are not laundering), and cases per bank per day by tier.
 
 ## Experiments

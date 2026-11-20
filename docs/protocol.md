@@ -40,7 +40,7 @@ A chain has no ID or state field. Every bank computes both from the claims, so t
 
 ### Who is calling, and errors
 
-The caller's bank is read from its client certificate (`caller`), never from a message field. A bank answers a `Trace` only if the caller is the bank on the other side of that transfer (`Bank.lookup`); anyone else gets the same empty reply as for an unknown token. Shown by [test_mtls.py](../tests/test_mtls.py) and `test_a_node_answers_only_the_bank_on_the_other_side_of_a_transfer` in [test_cluster.py](../deploy/test_cluster.py).
+The caller's bank is read from its client certificate (`caller`), never from a message field, and a bank answers a `Trace` only to the bank on the other side of that transfer ([security.md](security.md#who-may-ask-what)).
 
 Failures are gRPC status codes, not fields:
 
@@ -75,7 +75,7 @@ Any bank can start a search, and each delivers its own chains, so no bank is a h
 
 The hop limit bounds the work and the disclosure one search can cause, like the time-to-live of an IP packet ([RFC 791](https://www.rfc-editor.org/rfc/rfc791.txt)). Longer chains aren't lost: searches started at different banks each return a partial chain, and the case service joins them into one case.
 
-**Deadline propagation** ([gRPC](https://grpc.io/docs/guides/deadlines/), [patterns.md](patterns.md#4-deadline-propagation)). Every call's timeout is what is left of the starting bank's 10 seconds. A bank answering a `Trace` reads its caller's remaining time (`time_left`) and gives its own onward call that, minus `REPLY_MARGIN = 0.25` s to send its reply. gRPC carries the timeout as a duration, not a clock time, so banks need not agree on the time. The 10 seconds cover the `Trace` calls; checking the signatures on the answer afterwards is the starting bank's own work. `Keys` and `Deliver` use a fixed 5 s (`CALL_SECONDS`), since no search waits on them.
+**Deadline propagation** ([gRPC](https://grpc.io/docs/guides/deadlines/), [pattern 4](patterns.md#4-deadline-propagation)). Every `Trace` call's timeout is what is left of the starting bank's 10 seconds, less `REPLY_MARGIN = 0.25` s at each bank. The 10 seconds cover the `Trace` calls; checking the signatures on the answer afterwards is the starting bank's own work. `Keys` and `Deliver` use a fixed 5 s (`CALL_SECONDS`), since no search waits on them.
 
 ### Search states
 
@@ -92,17 +92,17 @@ The hop limit bounds the work and the disclosure one search can cause, like the 
 
 ## Failure handling
 
-**A bank is down.** Its neighbours' calls fail, so every search that needs it stays `pending`, and their case services show "Waiting for bank X". X is the neighbour the search asked, which can be a healthy bank passing the failure on from the bank behind it. Searches that don't need that bank carry on. When it returns, the searches are retried and the chains stored at all banks. Nothing is lost, only delayed: `test_a_bank_that_is_down_delays_cases_but_loses_none`.
+**A bank is down.** Its neighbours' calls fail, so every search that needs it stays `pending`, and their case services show "Waiting for bank X". X is the neighbour the search asked, which can be a healthy bank passing the failure on from the bank behind it. Searches that don't need that bank carry on. When it returns, the searches are retried and the chains stored at all banks: `test_a_bank_that_is_down_delays_cases_but_loses_none`.
 
-**Retries with backoff.** A pending search waits `random(0, min(300 s, 10 s × 2^attempts))` before its next attempt (`backoff`: capped, exponential, with full jitter), so a bank that comes back isn't hit by every waiting search at once. Only the starting bank retries, and it retries the whole search. After 24 h (`EXPIRY`) a search is no longer tried. See `test_backoff_doubles_up_to_the_cap_with_full_jitter` and `test_a_pending_search_is_retried_until_it_expires` in [test_node_store.py](../tests/test_node_store.py).
+**Retries with backoff** ([pattern 5](patterns.md#5-retry-with-capped-backoff-full-jitter-and-expiry)). A pending search waits a capped, random time before its next attempt (`backoff`). Only the starting bank retries, and it retries the whole search. After 24 h (`EXPIRY`) a search is no longer tried.
 
-**Outbox.** A chain and the messages it owes are written in one transaction (`save_chain`), then sent until acknowledged (`deliver`). A crash between storing and sending can't lose a message; it can only send one twice. Unacknowledged messages back off the same way as searches, and a bank that failed once isn't called again in the same pass.
+**Outbox** ([pattern 6](patterns.md#6-transactional-outbox-and-dead-letters)). A chain and the messages it owes are written in one transaction (`save_chain`), then sent until acknowledged (`deliver`), so a crash can send a message twice but never lose it. Unacknowledged messages back off like searches, and a bank that failed once isn't called again in the same pass.
 
 **Repeats are harmless.** A chain is stored under its digest with `ON CONFLICT DO NOTHING`, so a second `Deliver`, or a second search that finds the same chain, changes nothing and owes nothing new: `test_a_forged_chain_is_refused_and_a_repeated_one_is_harmless`.
 
-**Dead letters.** A `Deliver` refused with `INVALID_ARGUMENT` is marked `dead` and never sent again, because the receiver read it and sending it again can't help. Every other failure is retried: `test_a_refused_delivery_becomes_a_dead_letter_and_others_are_retried`. A receiver that can't fetch a signer's keys answers `UNAVAILABLE` instead, so a good chain isn't dead-lettered just because a third bank is down.
+**Dead letters.** A `Deliver` refused with `INVALID_ARGUMENT` is marked `dead` and never sent again. A receiver that can't fetch a signer's keys answers `UNAVAILABLE` instead, so a good chain isn't dead-lettered just because a third bank is down.
 
-**Replicas.** With `ha` a bank runs two node replicas behind one Service, sharing the store in PostgreSQL. Both answer RPCs and both fetch keys. The background work (reading hits, searching, delivering) is done by one replica at a time: each pass takes the PostgreSQL advisory lock `HOUSEKEEPING_LOCK` (`Store.housekeeping`) and skips if the other replica holds it. PostgreSQL releases the lock by itself if the holder dies. A node keeps no state of its own, so a restart loses nothing.
+**Replicas** ([pattern 7](patterns.md#7-advisory-locks)). With `ha` a bank runs two node replicas behind one Service, sharing the store in PostgreSQL. Both answer RPCs and both fetch keys. The background work (reading hits, searching, delivering) is done by one replica at a time, under the PostgreSQL advisory lock `HOUSEKEEPING_LOCK` (`Store.housekeeping`). A node keeps no state of its own, so a restart loses nothing.
 
 ## Durable state
 
@@ -131,5 +131,5 @@ The node prints one JSON line per search attempt and per `Deliver` call, for tim
 
 - A case that says "Waiting for bank X" keeps saying so if its search later ends without a chain: failed, or no longer tried after 24 h. Nothing tells the case service that the wait is over.
 - During a key rotation the two banks on a transfer can name it by different tokens ([security.md](security.md)). Loop detection compares tokens, so it can miss a loop then; the hop limit still bounds the chain.
-- A bank's rules can link several transfers onward, but a search follows one. The others are found by the searches their own hits start.
+- A search follows one of the transfers a bank's rules link onward. The others are found by the searches their own hits start.
 - What a signature proves, and what tokens and claims reveal, is in [security.md](security.md#residual-disclosure).
