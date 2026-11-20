@@ -366,8 +366,10 @@ class Node(pb_grpc.PrivacyNodeServicer):
             start = time.monotonic()
             try:
                 state = self.attempt(search)
-            except KeyError:
-                state = "pending"  # its payments aren't in Valkey: wait for the rebuild
+            except Exception as error:  # noqa: BLE001 - one bad search must not stop the rest
+                # Most often its payments aren't in Valkey while it rebuilds: try again later.
+                log("node", bank=self.name, search=search["id"], error=repr(error))
+                state = "pending"
             self.store.finish_search(search, state)
             log(
                 "node",

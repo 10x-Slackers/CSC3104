@@ -52,7 +52,7 @@ def events(batch: dict, bank: str) -> list[dict]:
             raise ValueError("the amount must be positive and in SGD")
         if t["PmtTpInf"]["LclInstrm"]["Prtry"] not in BANK_TRANSFERS:
             raise ValueError("only GIRO and MEPS+ transfers are ingested")
-        if not t["AccptncDtTm"].endswith("Z"):
+        if not str(t["AccptncDtTm"]).endswith("Z"):
             raise ValueError("AccptncDtTm must be UTC")
         datetime.fromisoformat(t["AccptncDtTm"])
         sender = (BANK_OF[t["DbtrAgt"]["FinInstnId"]["BICFI"]], t["DbtrAcct"]["Id"]["Othr"]["Id"])

@@ -122,6 +122,8 @@ def create_app(store: CaseStore, summarize: Callable[[dict], str | None]) -> Fas
     @app.get("/cases/{case_id}")
     def detail(request: Request, case_id: str):
         case = load(case_id)
+        if case["merged_into"]:  # joined another case: show that one
+            return RedirectResponse(f"/cases/{case['merged_into']}")
         return page(request, "case.html", case=case, draft=summarize(case))
 
     return app

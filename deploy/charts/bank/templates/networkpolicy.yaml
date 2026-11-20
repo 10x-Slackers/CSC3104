@@ -26,7 +26,8 @@ spec:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
     - to:  # the operators' pods (Kafka, PostgreSQL) need the API; an empty list would allow every address
-        {{- range required "no API server address found" $api }}
+        {{- $_ := required "no API server address found" (first $api) }}
+        {{- range $api }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports:
@@ -182,7 +183,8 @@ spec:
   policyTypes: [Egress]
   egress:
     - to:
-        {{- range required "aws.valkeyCidrs: an empty list would allow every address" .valkeyCidrs }}
+        {{- $_ := required "aws.valkeyCidrs: an empty list would allow every address" (first .valkeyCidrs) }}
+        {{- range .valkeyCidrs }}
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       ports: [{protocol: TCP, port: 6379}]

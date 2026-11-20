@@ -21,7 +21,10 @@ Handle = Callable[[bytes | str], tuple[int, dict]]
 def credentials():
     import botocore.session  # only needed on AWS
 
-    return botocore.session.get_session().get_credentials()
+    found = botocore.session.get_session().get_credentials()
+    if found is None:  # an error isn't cached, so the next call looks again
+        raise RuntimeError("no AWS credentials")
+    return found
 
 
 def request_headers(url: str, body: bytes) -> dict:

@@ -3,9 +3,6 @@
 {% block title %}Case {{ case.id[:16] }}{% endblock %}
 {% block main %}
 <h1>Case <code>{{ case.id[:16] }}</code></h1>
-{% if case.merged_into %}
-<p>Merged into <a href="/cases/{{ case.merged_into }}"><code>{{ case.merged_into[:16] }}</code></a>.</p>
-{% endif %}
 <p>{{ show.tier(case) }} {{ show.state(case) }}{% if case.alerted_at %}, alert raised {{ case.alerted_at | when }}{% endif %}</p>
 <p>
   <form method="post" action="/cases/{{ case.id }}/bookmarked">

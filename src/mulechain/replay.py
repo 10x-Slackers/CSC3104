@@ -100,8 +100,8 @@ def send(bank: str, url: str, todo: queue.Queue, failed: threading.Event) -> Non
             log("replay", bank=bank, message=message_id, queued=todo.qsize(), **fields)
             if status == 200:
                 break
+            log("replay", bank=bank, message=message_id, rejected=text)  # the reply, or the error
             if status == 400:
-                log("replay", bank=bank, message=message_id, rejected=text)
                 failed.set()
                 return
             if failed.wait(random.uniform(0, min(30, 2**attempt))):

@@ -47,6 +47,7 @@ def edit(path, value):
         edit(["IntrBkSttlmAmt", "Ccy"], "USD"),
         edit(["PmtTpInf", "LclInstrm", "Prtry"], "Cheque"),
         edit(["AccptncDtTm"], "2022-09-05T09:00:00"),
+        edit(["AccptncDtTm"], None),
         edit(["DbtrAgt", "FinInstnId", "BICFI"], "UNKNOWN"),
         edit(["PmtId", "EndToEndId"], ""),
         lambda message: message["FIToFICstmrCdtTrf"]["GrpHdr"].update(NbOfTxs="3"),
