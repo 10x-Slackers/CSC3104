@@ -33,13 +33,13 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 | 2 | Detection against Altman's labels | `evaluate workloads/altman-small --split dev`, then `--split eval` once | Recall by pattern and by payment, precision, cases per bank per day |
 | 3 | Thresholds | Dev only: change `CHAIN_RATIO` in [scorer.py](../src/mulechain/scorer.py) | False positives against recall |
 | 4 | Hop limit | `evaluate ... --hop-limit 8` | Chains completed against search time |
-| 5 | Does scaling help? | `make replay WORKLOAD=slice-6h ARGS="--rate 1500"`, with KEDA and with `maxReplicaCount` 1 | Throughput, lag (`kubectl get hpa -A`), replicas, latency p50/p95 |
+| 5 | Does scaling help? | `make replay WORKLOAD=slice-24h ARGS="--rate 1500"`, and again with `--speed 0`, each with KEDA and with the scorers held at 1 (`kubectl annotate scaledobject scorer -n bank-a autoscaling.keda.sh/paused-replicas=1`) | Lag, replicas, latency p50/p95 |
 | 6 | HA against a single instance | `kubectl delete pod` on a Kafka broker, the PostgreSQL primary or a privacy node, in bank A (replicas) and bank B (single) | RTO, RPO |
 | 7 | Bank outage | `kubectl scale deploy/privacy-node -n bank-c --replicas=0` during a replay, then `--replicas=1` | Pending searches, time to drain, RPO |
 | 8 | Clock skew | One bank's node with a shifted clock | Searches still complete: deadlines are durations |
 | 9 | Bulkhead | `kubectl scale deploy/summary -n bank-a --replicas=0` | Alerts still arrive; case pages show no draft |
 | 10 | Lambda | Ingestor and summary under load on AWS | Cold and warm latency; CloudWatch invocations, errors, duration |
-| 11 | Valkey loss | `make rebuild BANK=a` | Time until lag is 0 (RTO); state and cases unchanged (RPO 0) |
+| 11 | Valkey loss | `kubectl delete pod -l app=valkey -n bank-c` during a replay, and `make rebuild BANK=a` | Time until lag is 0 (RTO); state and cases unchanged (RPO 0) |
 | 12 | Key rotation | `make key-add`, five minutes, `make key-drop`, with replays between and during | No missed links: cases equal offline |
 | 13 | Offline = cluster | Replay a workload with `--speed 0`, then `diff` the output of `make cases` and of `evaluate --cases` | Identical cases and tiers |
 | 14 | Out of sample | Rules frozen, run once on a larger Altman dataset | Recall and false-positive rate |
@@ -59,18 +59,70 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 
 ## Results
 
-Measured on 20 Nov 2026. The cluster is k3d (k3s, one node) in a VM with 8 vCPUs and 15 GiB of memory, with bank A running replicas. Each cluster run is a single sample.
+Measured on 20 Nov 2026. The local cluster is k3d (k3s, one node) in a VM with 8 vCPUs and 15 GiB of memory, with bank A running replicas. The AWS cluster is EKS in `us-east-1` with three nodes, the Lambdas and ElastiCache ([deployment.md](deployment.md#aws)), with every bank running replicas. Each cluster run is a single sample on a new cluster, and every run below ended with exactly the offline evaluator's cases unless it says otherwise.
 
-### Cluster correctness (experiments 1, 7, 11, 12, 13)
+### Correctness and offline = cluster (experiments 1, 12, 13)
 
 | Run | Result |
 | --- | --- |
 | `make k3d` from nothing, images cached | Ready in 3 min 43 s |
-| Tiny workload at the default 60× speed, then `make cluster-check` | 14 cases (A 5, B 5, C 4), equal to offline; all 57 checks pass (the cases, 45 network paths, 11 mTLS checks) |
-| `slice-6h` at `--speed 0` (17,295 bank transfers) | Replayed in 11 to 13 s; scorers scale 1 → 6 on lag in every bank |
-| The same replay with bank C's privacy node off, C restored afterwards, and both of bank A's node pods deleted during recovery | Pending cases show "Waiting for bank C"; after recovery 11,291 cases, identical to offline (none lost, none extra) |
-| Valkey loss: bank A's Valkey pod deleted, then `make rebuild` for A and B (30,669 and 35,176 keys) | Lag back to 0 within 45 s; key counts, hits, offsets and cases identical; no duplicate searches or messages |
+| Tiny workload at the default 60× speed, then `make cluster-check` | 14 cases (A 5, B 5, C 4); all 57 checks pass (the cases, 45 network paths, 11 mTLS checks) |
+| `slice-6h` at `--speed 0` (17,295 bank transfers) | Replayed in 11 to 13 s; scorers scale 1 → 6 on lag in every bank; 11,291 cases |
+| `altman-1-6sep` at `--speed 0` (425,385 bank transfers, six days of data) | Replayed in 235 s; 146,897 cases, identical to offline |
 | Key rotation: bank B gets key 2 and tiny is replayed at once; five minutes later B drops key 1, bank A gets key 2 and `slice-6h` is replayed at once; six minutes later `slice-6h-sep6` is replayed | Cases identical to offline after each step: 14, then 11,305, then 21,002 (two six-hour slices and tiny) |
+
+### Latency (k3d)
+
+`slice-6h` at 60× (17,295 bank transfers in 6 minutes), no faults:
+
+| Measure | p50 | p95 | Max | n |
+| --- | --- | --- | --- | --- |
+| Detection latency, ingestion → case stored | 0.07 s | 0.13 s | 4.17 s | 11,291 cases |
+| A search that ends confirmed | 28.8 ms | 29.1 ms | 29.1 ms | 3 searches |
+
+Almost every case in a slice is a single-bank hit, so the detection latency is mostly the path Kafka → scorer → Valkey → privacy node → case service. The three cross-bank searches are the only ones this slice has.
+
+### Does scaling help? (experiment 5)
+
+| Load | Scorers | Peak lag per bank | Detection latency p50 / p95 / max | Time to accept the load |
+| --- | --- | --- | --- | --- |
+| `slice-24h` at `--rate 1500` (open loop, 69,109 bank transfers in 92 s) | 1, fixed | 1,778 to 2,521 | 0.26 / 1.14 / 3.31 s | 92 s |
+| The same | KEDA, 1 → 6 in every bank | 1,484 to 2,132 | 0.28 / 1.20 / 2.47 s | 92 s |
+| `slice-24h` at `--speed 0` (a burst, as fast as the ingestors accept) | 1, fixed | 3,282 to 5,523 | 12.2 / 21.5 / 24.6 s | 43 s |
+| The same | KEDA, 1 → 6 in every bank | 2,917 to 4,339 | 8.1 / 16.1 / 17.7 s | 54 s |
+
+- **At 1,500 events a second one scorer per bank keeps up**, so the extra scorers change nothing: the lag stays near 2,000 events and a case is stored about a quarter of a second after its last payment.
+- **In a burst the extra scorers cut the latency by about a third at p50 and a quarter at p95**, and the lag is back to 0 about 13 s after the last batch either way. The comparison is not a clean one on one machine: every pod shares the same 8 cores, so with 18 scorers running the ingestors accept the burst more slowly (54 s against 43 s).
+- Lag is sampled only every 10 to 35 s here, so the peaks are lower bounds.
+- Scaling out and back moves partitions between workers while they score. Every run still ended with the offline cases (44,983), so no event was skipped or scored against the wrong state.
+
+### Faults (experiments 6, 7, 9, 11)
+
+Pod kills during `slice-6h` at 60×. A pause is the longest gap in the bank's accepted batches or stored cases after the kill; without a fault the gap is at most 1.0 s, the replay's own rhythm at this speed.
+
+| Fault | Pause | Cases lost (RPO) |
+| --- | --- | --- |
+| Bank A (replicas): a Kafka broker, the PostgreSQL primary and a privacy node killed, 50 s apart | None beyond 1.0 s for any of the three | 0 |
+| Bank B (single instances): the Kafka broker killed | 25.5 s and 27.3 s in two runs: no batch accepted and no case stored | 0 |
+| Bank B: the PostgreSQL primary killed | PostgreSQL serves its open connections for 180 s more and then stops (CloudNativePG's [smart shutdown](https://cloudnative-pg.io/documentation/current/instance_manager/)): no case stored for 14.0 s. Batches are accepted throughout | 0 |
+| Bank B: the privacy node killed | None beyond 1.5 s: the replacement pod starts while the old one shuts down. Killed during PostgreSQL's 180 s shutdown instead, the new node can't connect until PostgreSQL is back: 104 s with no case stored | 0 |
+| Bank C's privacy node off for 240 s | Bank C stores no case until it is back (the longest wait 243.6 s), then all of them. Banks A and B are not slowed: latency p95 0.11 s. The one search that needed C waited through 4 unanswered attempts and was confirmed 7.3 s after C returned | 0 |
+| Summary service off at bank A (bulkhead), tiny replayed | All 5 of A's cases arrive. A case page takes 2.7 to 12.1 ms and shows no draft. With the service back, the first page with a draft takes 1.06 s and later ones 3.5 to 4.7 ms | 0 |
+| Valkey lost after six days of data (577,000 to 629,000 keys a bank): all three banks' Valkey pods deleted, then `make rebuild` for all three at once | Lag back to 0 after 150 s. Key counts and cases identical before and after | 0 |
+| Bank C's Valkey pod deleted during the replay, and no command run | The scorer stops, restarts and reads the topic from the start. Bank C stores no case for 19.0 s; its latency for the run is p95 2.5 s, max 19.5 s | 0 |
+
+### AWS (experiments 1, 10, 11, 13)
+
+`make eks` created the cluster, the six Lambdas and the three ElastiCache groups in one command. The scorer and privacy-node changes that make a lost Valkey rebuild itself are newer than this run.
+
+| Run | Result |
+| --- | --- |
+| Tiny at 60×, then `make cluster-check` | 14 cases; the 53 checks that apply on EKS pass |
+| `slice-6h` at `--speed 0` | 17,295 bank transfers accepted in 44.3 s by the ingestor Lambdas; scorers scale 1 → 6 in every bank; 11,305 cases with tiny, identical to offline |
+| Latency in that burst | Detection p50 31.9 s, p95 37.7 s: the scorers work through a backlog. A confirmed search takes 89 ms at p50 |
+| Ingestor Lambda (experiment 10) | 101 to 115 invocations a bank, no errors, no throttles. Duration p50 about 262 ms, p95 0.89 to 1.15 s, max 2.7 to 5.0 s; a cold start adds 210 to 267 ms |
+| Summary Lambda | 6 invocations a bank at about 1.9 ms; a cold start adds 139 to 144 ms. The first case page that calls it takes 673 to 754 ms, later ones 46 to 76 ms |
+| `make rebuild BANK=a` on ElastiCache (30,669 keys) | Lag back to 0 after 48 s; key count and cases unchanged |
 
 ### Detection, offline (experiment 2)
 
@@ -92,4 +144,18 @@ Attempts caught by pattern, as caught / attempts (reaching Tier 2):
 - The dev days start with no payment history, so the new payee rule fires on every first payment. The eval run has 1 to 5 Sep as history.
 - Laundering outside the scope on the eval days: 941 transfers inside one bank, 220 by cheque, card, cash or Bitcoin, and 399 after ordinary activity stops.
 
-Results for experiments 5, 6, 8, 9, 10 and 14 are not recorded here.
+### Thresholds and hop limit, offline on dev (experiments 3, 4)
+
+| Chain rule's amount ratio (`CHAIN_RATIO`) | Attempts caught, any tier | Attempts reaching Tier 2 | Payment recall | Ordinary payments flagged | Tier 2 cases per bank per day |
+| --- | --- | --- | --- | --- | --- |
+| 0.95 to 1.05 | 152 of 179 | 13 | 97.4% | 6.28% | 0.8 to 1.2 |
+| 0.90 to 1.10 (used) | 155 of 179 | 25 | 98.0% | 6.33% | 2.0 to 2.4 |
+| 0.85 to 1.15 | 159 of 179 | 32 | 98.3% | 6.39% | 2.8 to 3.0 |
+
+- The band decides how many attempts become cross-bank cases. Narrowing it halves the attempts that reach Tier 2. Widening it adds seven for about 40% more Tier 2 cases to review, and it moves the flagged share by less than 0.1 points either way, because almost all flags come from the new payee rule.
+- With `--hop-limit 8` the searches end with 16 partial chains where the default 4 ends with 44, and nothing else in the report changes: the same attempts caught at each tier and the same cases per bank per day. A partial chain already joins the same case and alerts like a confirmed one ([cases.md](cases.md)).
+
+### Not measured on this code
+
+- **Clock skew (experiment 8)** was run on 19 Nov against the previous implementation of the same protocol: with bank C's node clock 10 minutes ahead, the cases were identical and every search was confirmed. The mechanism has not changed (`time_left` in [node.py](../src/mulechain/node/node.py) passes on a duration).
+- **Out of sample (experiment 14)** has not been run.
