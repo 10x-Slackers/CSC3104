@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %}</title>
+  {% block head %}{% endblock %}
+  <link rel="stylesheet" href="https://unpkg.com/mvp.css@1.18.0/mvp.css">
+  <style>
+    /* MVP.css is built for landing pages: this turns it into a work page. */
+    :root {
+      --color-link: #1d4e63; --color-table: #1d4e63; --color-accent: #1d4e6310;
+      --color-secondary: #1d4e63; --color-secondary-accent: #1d4e630d;
+      --color-text-secondary: #666; --justify-important: left;
+    }
+    main { padding: 1.5rem 1rem }
+    form { border: 0; box-shadow: none; display: inline; min-width: 0; padding: 0 }
+    button { padding: .3rem 1rem }
+    td.amount { font-variant-numeric: tabular-nums; text-align: right }
+    tr.reviewed { color: var(--color-text-secondary) }
+    mark { background: var(--color-bg-secondary); border-radius: var(--border-radius); padding: .1rem .5rem }
+    mark.alert { background: #b3261e; color: #fff; font-weight: bold }
+    mark.waiting { background: #ffe9a8 }
+    article aside p { white-space: pre-line }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="/">Bank {{ bank }} cases</a></p>
+    {% block main %}{% endblock %}
+  </main>
+</body>
+</html>

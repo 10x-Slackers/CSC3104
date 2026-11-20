@@ -1,7 +1,7 @@
 # Each bank's Valkey on ElastiCache, Multi-AZ: a primary and a replica in another zone with automatic failover.
-# Derived state rebuilt from Kafka, so no snapshots, auth or TLS (docs/contracts/deployment.md).
+# Derived state rebuilt from Kafka, so no snapshots, auth or TLS.
 # Each bank gets two small subnets of its own (one per zone, above the default subnets' 172.31.0.0-95.255), so the
-# chart's valkey-clients policy can let a bank's pods reach only its own ElastiCache.
+# chart's elasticache policy can let a bank's pods reach only its own ElastiCache.
 resource "aws_subnet" "valkey" {
   for_each             = { for p in setproduct(keys(local.banks), [0, 1]) : join("", p) => p } # A0, A1, B0, ...
   vpc_id               = data.aws_vpc.default.id

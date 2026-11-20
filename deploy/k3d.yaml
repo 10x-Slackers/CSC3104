@@ -1,0 +1,13 @@
+# The local cluster: one k3s node in Docker. `make k3d` creates it.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: csc3104
+volumes:
+  - volume: ${PWD}/workloads:/workloads  # read by the replay Job
+    nodeFilters: [server:0]
+options:
+  k3s:
+    extraArgs:
+      - arg: --secrets-encryption  # Secrets (bank keys, TLS keys) are encrypted at rest in the datastore
+        nodeFilters: [server:0]

@@ -1,5 +1,4 @@
-# This bank's cases and read-only analyst UI, fed by the privacy node (docs/contracts/deployment.md, Case service row).
-# One replica: the store's transfer join takes a table lock, so more would only queue.
+# Case service: the bank's cases and its analyst page, fed only by its own privacy node.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,34 +13,20 @@ spec:
       {{- include "bank.pod" . | nindent 6 }}
       containers:
         - name: case
-          image: {{ .Values.image.repository }}/case:{{ .Values.image.tag }}
-          args: [python, -m, case.app]
+          image: {{ include "bank.image" . }}
+          args: [python, -m, mulechain.case.app]
           env:
-            - {name: CASE_BANK, value: {{ .Values.bank }}}
-            # libpq takes the credentials from PGUSER and PGPASSWORD
-            - {name: CASE_DATABASE_URL, value: "postgresql://postgres-rw:5432/cases"}
-            - name: PGUSER
+            - {name: BANK, value: {{ .Values.bank }}}
+            - name: DATABASE_URL
               valueFrom:
-                secretKeyRef: {name: postgres-app, key: username}
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef: {name: postgres-app, key: password}
-            - {name: CASE_KEY_DIRECTORY, value: /keys}
-            {{- with get .Values.aws .Values.bank }}
-            - {name: CASE_SUMMARY_URL, value: {{ .summaryUrl | quote }}}
-            - {name: CASE_SUMMARY_REGION, value: us-east-1}  # signs as LabRole from the node's metadata service
-            {{- else }}
-            - {name: CASE_SUMMARY_URL, value: "http://summary:8080/"}
-            {{- end }}
+                secretKeyRef: {name: postgres-app, key: uri}
+            # AWS: the summary Lambda's function URL, signed with the node's role
+            - {name: SUMMARY_URL, value: {{ .Values.aws.summaryUrl | default "http://summary:8080/" | quote }}}
           ports:
             - containerPort: 8000
           readinessProbe:
             httpGet: {path: /healthz, port: 8000}
-          volumeMounts:
-            - {name: keys, mountPath: /keys}
-          {{- include "bank.container" . | nindent 10 }}
-      volumes:
-        - {{- include "bank.keyVolume" (list . "{public,trusted}/signing/**") | nindent 10 }}
+          {{- include "bank.container" (dict "limit" "256Mi") | nindent 10 }}
 ---
 apiVersion: v1
 kind: Service
@@ -51,13 +36,3 @@ spec:
   selector: {app: case}
   ports:
     - port: 8000
----
-# The case service's own database in the bank's PostgreSQL, apart from the privacy node's.
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: cases
-spec:
-  name: cases
-  owner: app
-  cluster: {name: postgres}

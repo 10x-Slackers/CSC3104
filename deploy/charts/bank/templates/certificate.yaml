@@ -1,5 +1,6 @@
-# Privacy-node mTLS certificate (server and client), signed by the lab CA. Secret: privacy-node-tls.
-# Peers check the DNS name; the URI SAN is the bank identity the node binds `sender` to (security.md).
+# The privacy node's mTLS certificate, for both ends of a call (cert-manager renews it).
+# Peers check the DNS name when they call this bank. The URI is the bank's identity:
+# it is how a node knows which bank is calling (zero trust: mulechain/node/node.py).
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

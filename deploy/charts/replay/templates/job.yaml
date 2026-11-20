@@ -1,0 +1,51 @@
+{{- $hardening := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: replay
+  namespace: replay
+spec:
+  backoffLimit: 0  # replay retries failed batches itself; a rejected one can't succeed on a rerun
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      {{- if .Values.workloadsBucket }}
+      initContainers:
+        - name: fetch
+          image: amazon/aws-cli:2.40.1
+          args: [s3, sync, --only-show-errors, "s3://{{ .Values.workloadsBucket }}/{{ .Values.workload }}", "/workloads/{{ .Values.workload }}"]
+          volumeMounts: [{name: workloads, mountPath: /workloads}]
+          securityContext: {{ toJson $hardening }}
+      {{- end }}
+      containers:
+        - name: replay
+          image: {{ .Values.image }}
+          args:
+            - python
+            - -m
+            - mulechain.replay
+            - /workloads/{{ .Values.workload }}
+            {{- range $bank, $url := .Values.ingestorUrls }}
+            - --url={{ $bank }}={{ $url }}
+            {{- end }}
+            {{- range splitList " " .Values.args | compact }}
+            - {{ . | quote }}
+            {{- end }}
+          volumeMounts: [{name: workloads, mountPath: /workloads, readOnly: true}]
+          securityContext: {{ toJson $hardening }}
+          resources:
+            requests: {memory: 64Mi}
+            limits: {memory: 128Mi}
+      volumes:
+        - name: workloads
+          {{- if .Values.workloadsBucket }}
+          emptyDir: {}
+          {{- else }}
+          hostPath: {path: /workloads, type: Directory}
+          {{- end }}

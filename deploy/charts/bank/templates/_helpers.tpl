@@ -1,4 +1,4 @@
-{{/* Pod settings every bank service shares: no API token, non-root, restricted PSS. */}}
+{{/* Pod settings every service shares: no API token, non-root, the restricted Pod Security Standard. */}}
 {{- define "bank.pod" -}}
 automountServiceAccountToken: false
 securityContext:
@@ -8,7 +8,7 @@ securityContext:
   seccompProfile: {type: RuntimeDefault}
 {{- end }}
 
-{{/* Container hardening and memory; pass (dict "request" .. "limit" ..) instead of . to change the memory. */}}
+{{/* Container hardening and memory. Pass (dict "limit" "256Mi") instead of . for more memory. */}}
 {{- define "bank.container" -}}
 securityContext:
   allowPrivilegeEscalation: false
@@ -19,15 +19,11 @@ resources:
   limits: {memory: {{ .limit | default "128Mi" }}}
 {{- end }}
 
-{{/* This bank's key tree from keys/<bank>/ (install.sh generates it), mounted at /keys/<bank>/ without subPath.
-Takes (list $ "<glob under keys/<bank>/>"), so a service mounts only the keys it reads. */}}
-{{- define "bank.keyVolume" -}}
-{{- $ := index . 0 }}
-name: keys
-secret:
-  secretName: bank-keys
-  items:
-    {{- range $path, $_ := $.Files.Glob (printf "keys/%s/%s" $.Values.bank (index . 1)) }}
-    - {key: {{ $path | trimPrefix "keys/" | replace "/" "__" }}, path: {{ $path | trimPrefix "keys/" }}}
-    {{- end }}
+{{- define "bank.image" -}}
+{{ .Values.image.repository }}:{{ .Values.image.tag }}
+{{- end }}
+
+{{/* The scorer's state: a Valkey pod in the bank, or the bank's ElastiCache on AWS. */}}
+{{- define "bank.valkeyUrl" -}}
+{{ .Values.aws.valkeyUrl | default "valkey://valkey:6379" }}
 {{- end }}

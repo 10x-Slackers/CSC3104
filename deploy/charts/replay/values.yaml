@@ -1,0 +1,11 @@
+# A directory under workloads/, and extra replay flags such as "--speed 0".
+workload: tiny
+args: ""
+image: mulechain:dev
+# Where each bank takes payments. AWS: the ingestor Lambdas' function URLs.
+ingestorUrls:
+  A: http://ingestor.bank-a:8080
+  B: http://ingestor.bank-b:8080
+  C: http://ingestor.bank-c:8080
+# AWS only: the S3 bucket to copy the workload from. k3d mounts workloads/ from the host.
+workloadsBucket: ""

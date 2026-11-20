@@ -1,5 +1,6 @@
-# Bank-local PostgreSQL (CloudNativePG). Service: postgres-rw:5432, always the primary; credentials in Secret postgres-app.
-# Under the HA flag, a primary and two streaming replicas with automatic failover.
+# PostgreSQL (CloudNativePG): the privacy node's store and the case store. Service
+# postgres-rw:5432 always points at the primary; with `ha` there are two streaming
+# replicas and automatic failover. Credentials are in the Secret postgres-app.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:

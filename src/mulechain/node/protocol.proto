@@ -1,0 +1,70 @@
+// What banks say to each other. Nothing here can carry an account, an amount or a
+// payment ID: a transfer is only ever named by its token.
+//
+// The caller's identity is not a field: it comes from its mTLS certificate.
+//
+// Regenerate the *_pb2* files with `make proto`.
+syntax = "proto3";
+
+package mulechain.v1;
+
+service PrivacyNode {
+  // This bank's public keys, oldest first. Peers derive pair keys from them.
+  rpc Keys(Empty) returns (PublicKeys);
+  // "Do you hold this transfer, and does your rule move it on?" The bank answers
+  // with its signed claim and asks the next bank the same question.
+  rpc Trace(TraceRequest) returns (TraceReply);
+  // Push a finished chain to a bank that signed part of it (server-to-server callback).
+  rpc Deliver(Chain) returns (Ack);
+}
+
+message Empty {}
+
+message PublicKey {
+  bytes agreement = 1;  // X25519
+  bytes signing = 2;    // Ed25519
+}
+
+message PublicKeys {
+  repeated PublicKey keys = 1;
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DOWNSTREAM = 1;  // the token is the receiver's incoming transfer: follow the money forward
+  UPSTREAM = 2;    // the token is the receiver's outgoing transfer: follow it backward
+}
+
+message TraceRequest {
+  bytes token = 1;             // 16 bytes; only the two banks on the transfer can derive it
+  Direction direction = 2;
+  int32 hops_remaining = 3;    // further transfers this search may add
+  repeated bytes visited = 4;  // tokens already on the chain, which stops loops
+}
+
+// One bank's signed statement: "I received in_token from in_from, and my rule links it
+// to out_token, which I sent to out_to". An empty side means the chain starts or ends
+// at the signer.
+message LinkClaim {
+  string signer = 1;
+  string in_from = 2;
+  bytes in_token = 3;
+  string out_to = 4;
+  bytes out_token = 5;
+  bool cut = 6;  // the signer knows of more that it didn't follow (hop limit or a branch)
+  bytes signature = 7;
+}
+
+// Claims in the order asked, nearest bank first. Empty: a bank on the path doesn't
+// hold its side of the transfer (yet), or the caller may not ask about it.
+message TraceReply {
+  repeated LinkClaim claims = 1;
+}
+
+// A whole chain in money-flow order. Its ID and whether it is complete are computed
+// from the claims by every bank that receives it, never sent.
+message Chain {
+  repeated LinkClaim claims = 1;
+}
+
+message Ack {}

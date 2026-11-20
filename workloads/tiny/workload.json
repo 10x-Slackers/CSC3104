@@ -1,0 +1,10 @@
+{
+  "t0": "2022-09-05T09:00:00Z",
+  "source": "workloads/tiny/transfers.csv",
+  "transfers": 20,
+  "events": {
+    "A": 13,
+    "B": 15,
+    "C": 12
+  }
+}

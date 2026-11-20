@@ -1,5 +1,5 @@
-# pacs.008 batches in over HTTP, Kafka events out (docs/contracts/deployment.md, Ingestor row).
-{{- if not (get .Values.aws .Values.bank) }}  # EKS: the ingestor Lambda instead
+# Ingestor: pacs.008 batches in over HTTP, Kafka events out. On AWS it is a Lambda instead.
+{{- if not .Values.aws }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,15 +14,15 @@ spec:
       {{- include "bank.pod" . | nindent 6 }}
       containers:
         - name: ingestor
-          image: {{ .Values.image.repository }}/ingestor:{{ .Values.image.tag }}
-          args: [python, -m, ingestor.app]
+          image: {{ include "bank.image" . }}
+          args: [python, -m, mulechain.ingestor]
           env:
-            - {name: INGESTOR_BANK, value: {{ .Values.bank }}}
+            - {name: BANK, value: {{ .Values.bank }}}
             - {name: KAFKA_BOOTSTRAP_SERVERS, value: kafka-kafka-bootstrap:9092}
           ports:
             - containerPort: 8080
           readinessProbe:
-            httpGet: {path: /healthz, port: 8080}
+            httpGet: {path: /, port: 8080}
           {{- include "bank.container" . | nindent 10 }}
 ---
 apiVersion: v1

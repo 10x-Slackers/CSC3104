@@ -1,0 +1,30 @@
+# The lab certificate authority for privacy-node mTLS: a self-signed root that signs
+# every bank's certificate. In real life each bank would bring a certificate from a CA
+# the others trust; cert-manager would still renew it.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: bank-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: csc3104-bank-ca
+  secretName: bank-ca
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: bank-ca
+spec:
+  ca:
+    secretName: bank-ca

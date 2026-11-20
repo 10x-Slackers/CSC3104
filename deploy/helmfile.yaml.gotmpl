@@ -1,0 +1,63 @@
+# Everything that runs in the cluster, in dependency order: the operators, the shared
+# platform (namespaces and the lab CA), then one release of the same chart per bank.
+# `make deploy` syncs it for k3d or EKS.
+environments:
+  k3d:
+    values:
+      - image: {repository: mulechain}
+        ha: [a]  # banks that run with replicas; a laptop has room for one
+        aws: {}
+  eks:
+    values:
+      - eks-values.yaml  # written by `make eks` from Terraform's outputs
+      - ha: [a, b, c]
+---
+repositories:
+  - {name: cnpg, url: https://cloudnative-pg.github.io/charts}
+  - {name: kedacore, url: https://kedacore.github.io/charts}
+
+helmDefaults:
+  wait: true
+  timeout: 600
+
+releases:
+  - name: strimzi  # Kafka operator
+    namespace: strimzi
+    chart: oci://quay.io/strimzi-helm/strimzi-kafka-operator
+    version: 1.2.0
+    values:
+      - watchAnyNamespace: true
+        generateNetworkPolicy: false
+        extraEnvs:  # make Kafka pods pass the restricted Pod Security Standard
+          - {name: STRIMZI_POD_SECURITY_PROVIDER_CLASS, value: restricted}
+  - name: cnpg  # PostgreSQL operator
+    namespace: cnpg-system
+    chart: cnpg/cloudnative-pg
+    version: 0.29.1
+  - name: keda  # scales the scorer on Kafka consumer lag
+    namespace: keda
+    chart: kedacore/keda
+    version: 2.21.0
+  - name: cert-manager  # issues and renews the privacy nodes' mTLS certificates
+    namespace: cert-manager
+    chart: oci://quay.io/jetstack/charts/cert-manager
+    version: v1.21.2
+    values:
+      - crds: {enabled: true}
+  - name: platform
+    namespace: cert-manager
+    chart: charts/platform
+    needs: [cert-manager/cert-manager]
+  {{- range $bank := list "a" "b" "c" }}
+  - name: bank-{{ $bank }}
+    namespace: bank-{{ $bank }}
+    createNamespace: false  # the platform chart makes it, with its Pod Security labels
+    chart: charts/bank
+    wait: false  # `make deploy` waits for Kafka, PostgreSQL and the pods instead
+    needs: [cert-manager/platform, strimzi/strimzi, cnpg-system/cnpg, keda/keda]
+    values:
+      - bank: {{ upper $bank }}
+        ha: {{ has $bank $.Values.ha }}
+        image: {{ toJson $.Values.image }}
+        aws: {{ get (upper $bank) (dict) $.Values.aws | toJson }}
+  {{- end }}

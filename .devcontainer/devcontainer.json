@@ -11,7 +11,4 @@
 			"terragrunt": "none"
 		}
 	}
-	// "forwardPorts": []
-	// "customizations": {}
-	// "remoteUser": "root"
 }

@@ -1,5 +1,6 @@
-# Draft case summaries for the case service (docs/contracts/deployment.md, Summary service row).
-{{- if not (get .Values.aws .Values.bank) }}  # EKS: the summary Lambda instead
+# Summary service: drafts a case summary for the case service. Stateless and allowed to
+# fail (the case service waits two seconds, then shows no draft). On AWS it is a Lambda.
+{{- if not .Values.aws }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,12 +15,12 @@ spec:
       {{- include "bank.pod" . | nindent 6 }}
       containers:
         - name: summary
-          image: {{ .Values.image.repository }}/summary:{{ .Values.image.tag }}
-          args: [python, -m, summary.app]
+          image: {{ include "bank.image" . }}
+          args: [python, -m, mulechain.summary]
           ports:
             - containerPort: 8080
           readinessProbe:
-            httpGet: {path: /healthz, port: 8080}
+            httpGet: {path: /, port: 8080}
           {{- include "bank.container" . | nindent 10 }}
 ---
 apiVersion: v1
