@@ -115,6 +115,7 @@ def create_app(store: CaseStore, summarize: Callable[[dict], str | None]) -> Fas
                 case_id=case["id"],
                 tier=case["tier"],
                 alerted_at=case["alerted_at"],
+                payments=sorted(leg["payment_id"] for leg in message["legs"]),
             )
         return {"stored": len(batch)}
 

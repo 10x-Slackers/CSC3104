@@ -81,3 +81,14 @@ def test_an_event_later_than_the_allowed_lateness_is_not_scored(scorer):
     made = scorer.process(event("old", "in", 0, 1000, "B"))  # 80 h behind the account
     assert made == {"links": [], "hits": []}
     assert scorer.db.zcard("win:A-1") == 1
+
+
+def test_a_repeat_after_a_key_change_keeps_the_token_the_peer_indexed():
+    keys = [b"k" * 32]
+    scorer = Scorer("A", fakeredis.FakeValkey(decode_responses=True), lambda peer: keys)
+    scorer.process(event("p1", "out", 0, 1000))
+    first = scorer.db.hget("pay:p1:out", "token")
+    keys.insert(0, b"n" * 32)  # the peer published a newer key, then the log is read again
+    scorer.process(event("p1", "out", 0, 1000))
+    assert scorer.db.hget("pay:p1:out", "token") == first
+    assert len(scorer.db.keys("tok:*")) == 2  # still findable under the new pair too

@@ -35,7 +35,7 @@ The unit tests are in [tests/](../tests) and run with `make check`. The cluster 
 
 **See it.** Run `kubectl get hpa -A` during `make replay WORKLOAD=slice-6h ARGS="--speed 0"` (generate the workload first: [data.md](data.md#workloads)): the scorer deployments grow, then shrink again once the lag is gone.
 
-**Limit.** The parts of one chain are scored by different workers and different banks, a little apart in time. The privacy node therefore waits 60 seconds (`INGESTION_GRACE_SECONDS`) before "no bank holds this" is final ([protocol.md](protocol.md)).
+**Limit.** The parts of one chain are scored by different workers and different banks, a little apart in time. A search that reaches a bank before its side of a transfer does therefore stays pending and is tried again, and "the money stays inside this bank" becomes final only after 60 seconds (`INGESTION_GRACE_SECONDS`) ([protocol.md](protocol.md#search-states)).
 
 ## 3. The delivery chain and idempotent receivers
 
@@ -71,7 +71,7 @@ In the HA bank a write needs two of three brokers (`min.insync.replicas` in [kaf
 
 **See it.** `test_backoff_doubles_up_to_the_cap_with_full_jitter` ([test_node_store.py](../tests/test_node_store.py)), `test_an_unacknowledged_message_waits_then_is_due_again` ([test_node_store.py](../tests/test_node_store.py)) and `test_a_pending_search_is_retried_until_it_expires` ([test_node_store.py](../tests/test_node_store.py)).
 
-**Limit.** A case whose search expires, or ends with no match, keeps showing "Waiting for bank X" ([protocol.md](protocol.md#known-limits)). Outbox messages have no expiry. A chain delivery ends when the peer acknowledges or refuses it; a batch of case messages that the case service can't store is sent again until it can, and holds up the messages behind it.
+**Limit.** A case whose search expires or fails keeps showing "Waiting for bank X" ([protocol.md](protocol.md#known-limits)). Outbox messages have no expiry. A chain delivery ends when the peer acknowledges or refuses it; a batch of case messages that the case service can't store is sent again until it can, and holds up the messages behind it.
 
 ## 6. Transactional outbox and dead letters
 

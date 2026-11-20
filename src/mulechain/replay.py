@@ -105,7 +105,8 @@ def send(bank: str, url: str, todo: queue.Queue, failed: threading.Event) -> Non
                 log("replay", bank=bank, message=message_id, rejected=text)
                 failed.set()
                 return
-            time.sleep(random.uniform(0, min(30, 2**attempt)))
+            if failed.wait(random.uniform(0, min(30, 2**attempt))):
+                return  # another bank refused its batch for good
         if last:
             return
 

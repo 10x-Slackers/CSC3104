@@ -57,7 +57,8 @@ message LinkClaim {
   bytes signature = 7;
 }
 
-// Claims in the order asked, nearest bank first. Empty: no match.
+// Claims in the order asked, nearest bank first. Empty: a bank on the path doesn't
+// hold its side of the transfer (yet), or the caller may not ask about it.
 message TraceReply {
   repeated LinkClaim claims = 1;
 }

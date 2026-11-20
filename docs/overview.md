@@ -53,7 +53,7 @@ The system is built from ten distributed-systems patterns. [patterns.md](pattern
 | In | Out |
 | --- | --- |
 | Three simulated banks: A, B, C | Training a detection model |
-| Bounded **linear** chains, up to five transfers | Split payments, merged flows, broad graph discovery |
+| Bounded **linear** chains: a search follows up to five transfers | Split payments, merged flows, broad graph discovery |
 | Four transparent rules on bank transfers, two of them from published red flags; amounts in SGD | Live banking integration |
 | IBM AML data with Altman's labels as ground truth; planted chains as acceptance tests ([data.md](data.md)) | Real freezes, holds or reports; analyst decisions |
 | Read-only analyst page; template summary drafts | A sophisticated GUI |

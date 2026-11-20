@@ -21,7 +21,7 @@ BANK_TRANSFERS = ("GIRO", "MEPS+")  # the only payment types replayed and ingest
 
 
 def log(service: str, **fields) -> None:
-    """One JSON line to stdout; the evaluation joins these lines on payment and chain IDs."""
+    """One JSON line to stdout; the lines of different services share payment IDs."""
     sys.stdout.write(json.dumps({"ts": time.time(), "service": service} | fields) + "\n")
     sys.stdout.flush()
 

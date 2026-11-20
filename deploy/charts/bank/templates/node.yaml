@@ -29,7 +29,7 @@ spec:
             - {name: CASE_URL, value: "http://case:8000"}
             - {name: KEY_DIR, value: /keys}
             - {name: TLS_DIR, value: /tls}
-            # how long a peer may take to ingest its side of a transfer before "no match" is final
+            # how long the bank's scorers get to catch up before a link counts as inside this bank only
             - {name: INGESTION_GRACE_SECONDS, value: "60"}
           ports:
             - containerPort: 50051

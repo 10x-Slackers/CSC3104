@@ -10,28 +10,35 @@ import base64
 import json
 import os
 from collections.abc import Callable
+from functools import cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 Handle = Callable[[bytes | str], tuple[int, dict]]
 
 
+@cache
+def credentials():
+    import botocore.session  # only needed on AWS
+
+    return botocore.session.get_session().get_credentials()
+
+
 def request_headers(url: str, body: bytes) -> dict:
     """Headers for a JSON POST, signed (SigV4) if `url` is a Lambda function URL.
 
     The signature is made with whatever AWS role the process runs as, and is valid for
-    five minutes, so callers ask again for every request.
+    five minutes, so callers ask again for every request. The credentials are looked up
+    once; botocore renews them itself.
     """
     headers = {"Content-Type": "application/json"}
     host = urlsplit(url).hostname or ""
     if host.endswith(".on.aws"):  # <id>.lambda-url.<region>.on.aws
-        import botocore.session  # only needed on AWS
-        from botocore.auth import SigV4Auth
+        from botocore.auth import SigV4Auth  # botocore is only needed on AWS
         from botocore.awsrequest import AWSRequest
 
-        credentials = botocore.session.get_session().get_credentials()
         signed = AWSRequest("POST", url, data=body, headers=headers)
-        SigV4Auth(credentials, "lambda", host.split(".")[2]).add_auth(signed)
+        SigV4Auth(credentials(), "lambda", host.split(".")[2]).add_auth(signed)
         headers = dict(signed.headers)
     return headers
 

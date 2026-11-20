@@ -41,7 +41,7 @@ from mulechain.node.bank import Bank
 from mulechain.node.claims import claim_bytes, complete, digest, tokens, valid_chain
 from mulechain.node.store import CASE, Store
 
-HOP_LIMIT = 4  # a chain holds at most HOP_LIMIT + 1 transfers
+HOP_LIMIT = 4  # a search follows at most HOP_LIMIT + 1 transfers
 SEARCH_SECONDS = 10  # the whole search's deadline, set by the bank that starts it
 REPLY_MARGIN = 0.25  # seconds each bank keeps back to send its own reply
 CALL_SECONDS = 5  # for Deliver and Keys, which no search is waiting on
@@ -89,7 +89,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
     ) -> None:
         self.name, self.bank, self.store = bank.name, bank, store
         self.key_dir, self.call, self.send_cases = key_dir, call, send_cases
-        # Seconds to let ingestion catch up before "no bank holds this" is final.
+        # Seconds the bank's scorers get to catch up before a link counts as inside it.
         self.grace = grace
         self.peers = [b for b in BANKS if b != self.name]
         self.own = crypto.load_keys(key_dir)
@@ -267,20 +267,20 @@ class Node(pb_grpc.PrivacyNodeServicer):
     def attempt(self, search: dict) -> str:
         """Try one stored search and return its new state.
 
-        pending    try again later: a bank didn't answer, or ingestion may not be done
+        pending    try again later: a bank didn't answer, or doesn't hold its side of
+                   the transfer yet
         moved      the link is inside this bank; another search took over from the
                    cross-bank transfers around it
         local      the money starts or stays inside this bank: a case for this bank only
-        no_match   a bank on the path doesn't hold its side of the transfer
         confirmed  a complete chain, signed by every bank on it
         partial    a chain that some bank cut short (hop limit or a branch)
         failed     the answers didn't verify, or the payments have expired
         """
         incoming, outgoing = search["incoming"], search["outgoing"]
-        late = time.time() - search["started"] >= self.grace
         starts, ends = self.bank.ends(incoming, "in"), self.bank.ends(outgoing, "out")
         if not (starts and ends):
-            if not late:  # an intra-bank link on another account may not be scored yet
+            if time.time() - search["started"] < self.grace:
+                # an intra-bank link on another account may not be scored yet
                 return "pending"
             legs = self.bank.internal_legs(incoming, outgoing)
             self.store.queue_case({"key": search["id"], "kind": "local", "legs": legs})
@@ -297,8 +297,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
             waiting = {"key": search["id"], "kind": "pending", "waiting_for": silent.peer}
             self.store.queue_case(waiting | {"legs": legs})
             return "pending"
-        if not claims:
-            return "no_match" if late else "pending"
+        if not claims:  # a bank on the path hasn't ingested its side yet
+            return "pending"
         return self.save(claims, deliver_to=sorted({c.signer for c in claims} - {self.name}))
 
     def save(self, claims: list[pb.LinkClaim], deliver_to: list[str]) -> str:

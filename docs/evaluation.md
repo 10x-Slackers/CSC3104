@@ -22,7 +22,7 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 ```
 
 - **Same code as the cluster.** Each bank's `Scorer` writes into its own in-process Valkey (fakeredis). Its `Node` reads the hits, searches and delivers, and its case messages go into a real `CaseStore` (SQLite). Peer calls are direct method calls. There is no Kafka, gRPC server or network.
-- **One difference.** Offline, every event is scored before any search runs. On a cluster, searches start while payments still arrive, and the node waits `INGESTION_GRACE_SECONDS` before treating "no bank holds this" as final. A cluster run can therefore end with a long chain cut into different partial pieces, so that a case lists fewer of a bank's payments than offline. A difference of that kind is not a lost case; the runs below showed none.
+- **One difference.** Offline, every event is scored before any search runs. On a cluster, searches start while payments still arrive: a search is tried again while a bank on its path doesn't hold a transfer yet, and waits `INGESTION_GRACE_SECONDS` before it decides that a link stays inside its bank. A cluster run can therefore end with a long chain cut into different partial pieces, so that a case lists fewer of a bank's payments than offline. A difference of that kind is not a lost case; the runs below showed none.
 - **Report.** Per Altman pattern type: attempts caught at any tier and at Tier 2. Overall: payment-level recall over the scope, laundering by scope reason, precision, ordinary payments flagged, and cases per bank per day by tier.
 
 ## Experiments
@@ -41,14 +41,14 @@ uv run python -m mulechain.evaluate workloads/altman-small --split dev --hop-lim
 | 10 | Lambda | Ingestor and summary under load on AWS | Cold and warm latency; CloudWatch invocations, errors, duration |
 | 11 | Valkey loss | `make rebuild BANK=a` | Time until lag is 0 (RTO); state and cases unchanged (RPO 0) |
 | 12 | Key rotation | `make key-add`, five minutes, `make key-drop`, with replays between and during | No missed links: cases equal offline |
-| 13 | Offline = cluster | Replay a workload with `--speed 0`, then compare `make cases` with `evaluate --cases` | Identical cases and tiers |
+| 13 | Offline = cluster | Replay a workload with `--speed 0`, then `diff` the output of `make cases` and of `evaluate --cases` | Identical cases and tiers |
 | 14 | Out of sample | Rules frozen, run once on a larger Altman dataset | Recall and false-positive rate |
 
 ## Metrics and where they come from
 
 | Metric | From → to | Source |
 | --- | --- | --- |
-| End-to-end detection latency | Kafka record timestamp at ingestion → case stored at the same bank | The scorer's log line per payment that made a link or hit (`kafka_ts`) joined with the case service's `stored` lines (`ts`) through the hit or chain key |
+| End-to-end detection latency | Kafka record timestamp at ingestion → case stored at the same bank | The scorer's log line per payment that made a link or hit (`payment_id`, `kafka_ts`) and the case service's `stored` lines (`payments`, `ts`, `tier`), matched by payment ID. The repository has no script for this join |
 | Peer-trace latency | Search attempt start → its result | The node's `"event": "search"` lines (`ms`, `state`, `attempt`) |
 | Delivery | One `Deliver` call | The node's `"event": "deliver"` lines |
 | RTO | Fault → service again | Gaps between accepted replay batches (replay's log) and between `stored` lines; for Valkey loss, until lag is 0 |

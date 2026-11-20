@@ -24,7 +24,7 @@ Every service runs the same image, built from the root [Dockerfile](../Dockerfil
 | `make image` / `make load` | Build the image / copy it into the k3d cluster |
 | `make deploy` | Install or update everything in the current cluster and wait until it is ready |
 | `make replay WORKLOAD=tiny` | Replay a workload from `workloads/` into the banks; `ARGS` passes replay flags: `--speed 0` for full speed, `--rate N` for N events a second |
-| `make cases` | Print each bank's cases as `bank tier payments` |
+| `make cases` | Print each bank's cases as sorted `bank tier payments` lines |
 | `make ui BANK=b` | Open a bank's analyst page on <http://localhost:8000> |
 | `make cluster-check` | Check the running cluster (below) |
 | `make key-add` / `make key-drop` | The two steps of a key rotation |
@@ -91,7 +91,13 @@ make cases                                     # bank, tier, payment IDs per cas
 make ui BANK=a                                 # the analyst page
 ```
 
-`make replay` runs a Job in the `replay` namespace ([charts/replay](../deploy/charts/replay)) with the image the scorers run. It replaces any earlier replay Job, follows its log, and fails if the Job fails. On k3d the Job reads the workload from the mounted `workloads/` directory. `make cases` prints the cases in the same form as `uv run python -m mulechain.evaluate workloads/<name> --cases` does offline (bank, tier, payment IDs), which is how a cluster run is compared with the offline one ([evaluation.md](evaluation.md)). Workloads are described in [data.md](data.md).
+`make replay` runs a Job in the `replay` namespace ([charts/replay](../deploy/charts/replay)) with the image the scorers run. It replaces any earlier replay Job, follows its log, and fails if the Job fails. On k3d the Job reads the workload from the mounted `workloads/` directory. `make cases` prints the cases as sorted `bank tier payments` lines, exactly as `uv run python -m mulechain.evaluate workloads/<name> --cases` does offline, so a cluster run is compared with the offline one by `diff` ([evaluation.md](evaluation.md)):
+
+```sh
+diff <(make cases) <(uv run python -m mulechain.evaluate workloads/tiny --cases 2>/dev/null) && echo identical
+```
+
+Workloads are described in [data.md](data.md).
 
 ## Cluster checks
 

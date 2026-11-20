@@ -235,12 +235,11 @@ def main() -> None:
     node_module.HOP_LIMIT = args.hop_limit
     with redirect_stdout(sys.stderr):
         found, searches = run(args.workload)
-    if args.cases:
-        listed = sorted((c.bank, c.tier, " ".join(sorted(c.ids))) for c in found)
-        report = {"searches": searches, "cases": listed}
-    else:
-        report = {"split": args.split, "searches": searches}
-        report |= score(found, *load(args.workload), args.split)
+    if args.cases:  # one "bank tier payments" line per case, as `make cases` prints them
+        print(*sorted(" ".join([c.bank, str(c.tier), *sorted(c.ids)]) for c in found), sep="\n")
+        return
+    report = {"split": args.split, "searches": searches}
+    report |= score(found, *load(args.workload), args.split)
     print(json.dumps(report, indent=2))
 
 

@@ -78,15 +78,17 @@ class Scorer:
 
         # 1. This bank's side of the payment, and its token if it crosses banks.
         own = {k: e[k] for k in ("account", "amount", "counterparty_bank")}
+        tx.hset(f"pay:{payment}:{direction}", mapping=own)
+        tx.expire(f"pay:{payment}:{direction}", TTL)
         if e["counterparty_bank"] != self.bank:
             tokens = [
                 crypto.token(k, payment).hex() for k in self.pair_keys(e["counterparty_bank"])
             ]
             for token in tokens:  # one per key pair, so the peer finds it during a rotation
                 tx.set(f"tok:{token}", f"{payment}:{direction}", ex=TTL)
-            own["token"] = tokens[0]  # what this bank calls the transfer when it asks the peer
-        tx.hset(f"pay:{payment}:{direction}", mapping=own)
-        tx.expire(f"pay:{payment}:{direction}", TTL)
+            # What this bank calls the transfer when it asks the peer. A repeat after a
+            # key change keeps the first name: the one the peer indexed.
+            tx.hsetnx(f"pay:{payment}:{direction}", "token", tokens[0])
 
         # 2. The account's window, by event time. A repeat or a too-late event stops here.
         window = [

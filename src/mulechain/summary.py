@@ -72,6 +72,7 @@ def headline(case: dict) -> str:
     reasons = []  # every reason a Tier 1 case is listed
     hits = [m["rule"].replace("_", " ") for m in messages if m["kind"] == "hit"]
     waiting = [m["waiting"] for m in messages if m["kind"] == "pending"]
+    waiting = waiting if case["state"] == "pending" else []  # a later chain answered it
     if hits:
         reasons.append(f"bank {bank}'s {listed(hits)} rule flagged these payments")
     if waiting:

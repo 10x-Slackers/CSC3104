@@ -17,7 +17,7 @@ Banks speak gRPC over mutual TLS on port 50051. No message can carry an account,
 | Message | Fields |
 | --- | --- |
 | `TraceRequest` | `token`; `direction` (`DOWNSTREAM`: follow the money forward, `UPSTREAM`: backward); `hops_remaining` (transfers the search may still add); `visited` (tokens already on the chain) |
-| `TraceReply` | `claims`, nearest bank first. Empty means no match |
+| `TraceReply` | `claims`, nearest bank first. Empty means a bank on the path doesn't hold its side of the transfer (yet), or the caller may not ask about it |
 | `LinkClaim` | `signer`, `in_from`, `in_token`, `out_to`, `out_token`, `cut`, `signature` |
 | `Chain` | `claims` in money-flow order |
 
@@ -68,7 +68,7 @@ Any bank can start a search, and each delivers its own chains, so no bank is a h
 
 | Limit | Value | How it works |
 | --- | --- | --- |
-| Hop limit | `HOP_LIMIT = 4` | A chain has at most 5 transfers (4 hops). The starting bank knows 2 of them, so the two directions share a budget of 3 more. Downstream runs first; upstream gets what is left. A bank with no hops left names the next transfer in a `cut` claim and doesn't follow it |
+| Hop limit | `HOP_LIMIT = 4` | A search follows at most 5 transfers (4 hops). The starting bank knows 2 of them, so the two directions share a budget of 3 more. Downstream runs first; upstream gets what is left. A bank with no hops left names the next transfer in a `cut` claim and doesn't follow it, so a chain can name one more transfer at each end than its search followed |
 | Loops | `visited` | The request carries every token already on the chain. A bank whose next transfer is in it signs the closing link and stops |
 | Branches | Follow one | If a bank's rules link more than one transfer onward, it follows the first by payment ID and sets `cut` |
 | Deadline | `SEARCH_SECONDS = 10` | Set once, by the bank that starts the search. See below |
@@ -81,15 +81,14 @@ The hop limit bounds the work and the disclosure one search can cause, like a ti
 
 | State | Meaning | Final |
 | --- | --- | --- |
-| `pending` | A bank didn't answer, or ingestion may not have caught up. Tried again later | no |
+| `pending` | A bank didn't answer, or doesn't hold its side of the transfer yet. Tried again later, with backoff, for 24 hours | no |
 | `moved` | The link is inside this bank; another search took over | yes |
 | `local` | The money starts or stays inside this bank: a case for this bank only | yes |
-| `no_match` | After the ingestion grace, a bank on the path still doesn't hold its side of the transfer | yes |
 | `confirmed` | A complete chain, signed by every bank on it | yes |
 | `partial` | A chain some bank cut short (hop limit or a branch). Stored and delivered like a confirmed one | yes |
 | `failed` | The answers didn't verify, or the payments have expired from Valkey | yes |
 
-**Ingestion grace.** Banks ingest the same transfer at slightly different moments. For `INGESTION_GRACE_SECONDS` (60 in the cluster) after a search is first stored, "no bank holds this" is not final: the search stays `pending` and is tried again.
+**Late ingestion.** Banks ingest the same transfer at different moments, and a scorer can be behind. An empty answer therefore never ends a search: it stays `pending` and is retried like an unanswered one, until the bank holds the transfer or the search expires. Only `local` cannot wait that long. A link whose money seems to stay inside the bank is given `INGESTION_GRACE_SECONDS` (60 in the cluster) for the bank's own scorers to catch up, and is then final.
 
 ## Failure handling
 
@@ -119,7 +118,7 @@ One PostgreSQL database per bank (SQLite in tests and the offline evaluator, sam
 
 ## Logs
 
-The node prints one JSON line per search attempt and per `Deliver` call. The evaluation reads them ([evaluation.md](evaluation.md)).
+The node prints one JSON line per search attempt and per `Deliver` call, for timing them ([evaluation.md](evaluation.md#metrics-and-where-they-come-from)).
 
 ```json
 {"ts": 1795140803.82, "service": "node", "bank": "B", "event": "search", "search": "6316…", "state": "confirmed", "attempt": 1, "ms": 4.5}
@@ -130,7 +129,7 @@ The node prints one JSON line per search attempt and per `Deliver` call. The eva
 
 ## Known limits
 
-- A case that says "Waiting for bank X" keeps saying so if its search later ends without a chain: no match, failed, or no longer tried after 24 h. Nothing tells the case service that the wait is over.
+- A case that says "Waiting for bank X" keeps saying so if its search later ends without a chain: failed, or no longer tried after 24 h. Nothing tells the case service that the wait is over.
 - During a key rotation the two banks on a transfer can name it by different tokens ([security.md](security.md)). Loop detection compares tokens, so it can miss a loop then; the hop limit still bounds the chain.
 - A bank's rules can link several transfers onward, but a search follows one. The others are found by the searches their own hits start.
 - What a signature proves, and what tokens and claims reveal, is in [security.md](security.md#residual-disclosure).

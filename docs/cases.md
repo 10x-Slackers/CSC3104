@@ -79,7 +79,7 @@ A case shows the strongest state among its messages (`STATES`): `confirmed`, `pa
 
 The page is read-only apart from the two flags. There is no free text and no decision: what a bank does about a case is its own process. There is no login either; the page is reached with `make ui BANK=b` (a `kubectl port-forward`), so access control is the cluster's. [deployment.md](deployment.md) has the commands.
 
-Each stored message logs one JSON line (`event: stored` with `key`, `kind`, `case_id`, `tier`, `alerted_at`), which the evaluation uses to time alerts ([evaluation.md](evaluation.md)).
+Each stored message logs one JSON line (`event: stored` with `key`, `kind`, `case_id`, `tier`, `alerted_at`, `payments`), from which alerts can be timed ([evaluation.md](evaluation.md)).
 
 ## Summary service
 
