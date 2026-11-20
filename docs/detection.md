@@ -77,16 +77,18 @@ Every key except `last:`, `offsets` and `keys` expires 7 days after its last wri
 
 Valkey is not persisted, and it holds its own position in the topic: the `offsets` hash, written with each event's state ([pattern 1](patterns.md#1-the-log-is-the-source-of-truth)). Workers that start on an empty Valkey therefore read the whole topic again and rebuild every key.
 
+**A lost Valkey rebuilds itself.** Before a worker scores an event, it compares the partition's offset in Valkey with the one it last wrote there (`Scorer.process`). If they differ, Valkey has restarted empty. The worker stops without writing, Kubernetes restarts it, and it reads the partition from the start of the topic. The peers' public keys were in Valkey too, so a starting worker first waits until the privacy node has written them again, which takes up to 10 seconds.
+
 ```sh
-make rebuild BANK=a     # pause the scorers, empty Valkey, start the scorers again
+make rebuild BANK=a     # the same on purpose: pause the scorers, empty Valkey, start the scorers again
 ```
 
-A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)).
+A rebuild writes every hit to the stream again. The privacy node reads them again and nothing is duplicated, because a search is keyed by its two payments and a case message by the hit's ID ([protocol.md](protocol.md)). The node removes hits from the stream once it has stored them, so the stream holds only what is not yet read.
 
 Limits:
 
-- **Rebuild an idle bank.** The privacy node keeps running while Valkey is empty. A search that comes due in that time fails, and a peer that asks about a transfer is told the bank doesn't hold it.
-- **A running worker doesn't notice a lost Valkey.** The start position is chosen only when a worker is given its partitions, so if Valkey restarts under an idle worker, the worker carries on from where it was, on empty state. `make rebuild` restarts the workers.
+- **A bank answers from partial state while it rebuilds.** The privacy node keeps running. A search of its own whose payments are missing stays pending and is tried again. A peer that asks about a transfer not yet rebuilt gets an empty answer and also tries again. But a peer that asks about a transfer whose onward link is not yet rebuilt gets a chain that ends at this bank. Run `make rebuild` while the bank is idle.
+- **Workers wait for keys.** A worker scores nothing until Valkey holds every peer's public keys, because a transfer to that bank would get no token. A bank whose privacy node has never reached one of its peers therefore doesn't start scoring. After the first contact the node keeps the keys in PostgreSQL, so a peer that is down later doesn't stop the scorers.
 
 ## Autoscaling on lag
 

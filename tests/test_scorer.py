@@ -76,6 +76,14 @@ def test_a_replayed_event_changes_nothing(scorer):
     assert scorer.db.xlen("hits") == hits
 
 
+def test_a_worker_stops_before_writing_to_an_emptied_valkey(scorer):
+    scorer.process(event("in", "in", 0, 1000, "B"), partition=3, offset=7)
+    scorer.db.flushall()  # Valkey restarted with nothing in it
+    with pytest.raises(RuntimeError):
+        scorer.process(event("out", "out", 120, 1050, "C"), partition=3, offset=8)
+    assert scorer.db.keys() == []  # nothing scored against the missing history
+
+
 def test_an_event_later_than_the_allowed_lateness_is_not_scored(scorer):
     scorer.process(event("new", "out", 80 * 60, 1000, "C"))
     made = scorer.process(event("old", "in", 0, 1000, "B"))  # 80 h behind the account

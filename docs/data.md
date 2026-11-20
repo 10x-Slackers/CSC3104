@@ -70,11 +70,13 @@ uv run python -m mulechain.prepare workloads/slice-6h --start 2022-09-05 --hours
 | --- | --- | --- | --- |
 | `tiny` (committed) | `--transfers workloads/tiny/transfers.csv` | 20 | Tests and the cluster checks |
 | `slice-6h` | `--start 2022-09-05 --hours 6` | 129,415 | Demo, load and failure runs |
+| `slice-6h-sep6` | `--start 2022-09-06 --hours 6` | 129,150 | A second slice, replayed after `slice-6h` in the key rotation run |
 | `slice-24h` | `--start 2022-09-05 --hours 24` | 472,251 | Load runs |
 | `altman-small` | none (all of HI-Small) | 4,487,133 | Offline detection quality, both splits |
 | `altman-1-6sep` | `--start 2022-09-01 --hours 144` | 2,696,535 | Comparing a cluster run with the offline evaluator |
 | `altman-medium` | `--altman HI-Medium` | 29,336,378 | A check on data the thresholds were not tuned on (about 3 GB to download and far more memory to build) |
 
+- The counts are transfers of every payment type. The replay sends only the bank transfers among them (GIRO and MEPS+): 17,295 of `slice-6h`, 69,109 of `slice-24h` and 425,385 of `altman-1-6sep`.
 - The evaluator reads `altman-small` whole and applies the dev/eval split itself (`SPLITS` in [evaluate.py](../src/mulechain/evaluate.py); [evaluation.md](evaluation.md#rules)).
 - A slice starts with no payment history, so every payee looks new at first and the new payee rule fires more than it would mid-stream. Use slices for load, failure and demo runs, not for detection quality. `altman-1-6sep` starts where the dataset starts, so it misses no history.
 

@@ -107,7 +107,7 @@ Workloads are described in [data.md](data.md).
 
 ## Operations
 
-**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again, which read the topic from the start. Run it while the bank is idle, and also after a Valkey pod is lost; [detection.md](detection.md#rebuilding-valkey-from-the-log) says why.
+**Rebuild Valkey from Kafka.** `make rebuild BANK=a` pauses the bank's scorers, empties its Valkey and starts the scorers again, which read the topic from the start. Run it while the bank is idle. A Valkey pod that is lost needs no command: the scorers notice, restart and rebuild it ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
 
 **Rotate a bank's keys.** `make key-add BANK=b KEY=2`, wait five minutes, `make key-drop BANK=b KEY=1` ([security.md](security.md#key-rotation) says why). `KEY` is the version number; `key-add` refuses a version that exists. Don't restart the bank's privacy node in the two minutes after either step.
 
@@ -157,5 +157,5 @@ There is no monitoring stack. Look at:
 
 ## Things to expect
 
-- A new privacy-node pod may restart once: its first connection to PostgreSQL can be refused in the seconds before its NetworkPolicy takes effect.
-- During the first install the privacy-node and case pods restart a few times until their bank's PostgreSQL is up. `make deploy` waits for them.
+- A privacy-node or case pod that starts before its bank's PostgreSQL waits for it, and a scorer waits for the peers' keys (it logs `waiting_for_keys_of`). `make deploy` waits for all of them.
+- Scorer pods restart once after their Valkey is lost. That restart is the rebuild.

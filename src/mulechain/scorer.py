@@ -6,8 +6,8 @@ The patterns this file shows (docs/patterns.md):
 
 - The log is the source of truth. Kafka keeps every event; everything in Valkey is
   derived from it. Valkey also holds how far into each partition its state goes, and
-  a worker starts reading there, so workers that start on an emptied Valkey rebuild
-  it from the start of the topic (`make rebuild`).
+  a worker starts reading there. A worker that finds Valkey emptied under it stops,
+  and its restart rebuilds the state from the start of the topic.
 - Partition ownership. Events are keyed by account, so each account lives in one
   partition and one worker owns it at a time. Workers share no account state, and
   KEDA adds workers as consumer lag grows, up to one per partition.
@@ -43,7 +43,7 @@ from decimal import Decimal
 from confluent_kafka import OFFSET_BEGINNING, Consumer, KafkaException
 from valkey import Valkey
 
-from mulechain import crypto, log
+from mulechain import BANKS, crypto, log
 from mulechain.ingestor import topic
 
 # The four rules. Amount ratios are outgoing / incoming on one account.
@@ -59,20 +59,30 @@ class Scorer:
     def __init__(self, bank: str, db: Valkey, pair_keys: Callable[[str], list[bytes]]) -> None:
         """`db` needs decode_responses=True. `pair_keys(peer)` gives the keys shared with a peer."""
         self.bank, self.db, self.pair_keys = bank, db, pair_keys
+        self.position = {}  # partition -> the offset Valkey held when this worker last looked
 
     def process(self, e: dict, partition: int = 0, offset: int = 0) -> dict:
         """Score one event and write its state. Returns the links and hits it made.
 
         `partition` and `offset` say where the event sits in Kafka.
         """
+        read = self.db.pipeline(transaction=False)  # both reads in one round trip
+        read.hget("offsets", partition)
+        read.zrange(f"win:{e['account']}", 0, -1, withscores=True)
+        position, window = read.execute()
+        if position != self.position.get(partition, position):
+            # Valkey restarted empty under this worker. Stop before writing to it: the
+            # restart reads the partition from where Valkey's state now ends, its start.
+            raise RuntimeError(f"Valkey lost partition {partition}'s state: restarting")
         made = {"links": [], "hits": []}
         tx = self.db.pipeline(transaction=True)  # MULTI ... EXEC: all or nothing
-        self._score(e, tx, made)
+        self._score(e, window, tx, made)
         tx.hset("offsets", partition, offset + 1)
         tx.execute()
+        self.position[partition] = str(offset + 1)
         return made
 
-    def _score(self, e: dict, tx, made: dict) -> None:
+    def _score(self, e: dict, window: list, tx, made: dict) -> None:
         payment, direction, account = e["payment_id"], e["direction"], e["account"]
         now = datetime.fromisoformat(e["event_time"]).timestamp()
 
@@ -91,10 +101,7 @@ class Scorer:
             tx.hsetnx(f"pay:{payment}:{direction}", "token", tokens[0])
 
         # 2. The account's window, by event time. A repeat or a too-late event stops here.
-        window = [
-            (json.loads(member), ts)
-            for member, ts in self.db.zrange(f"win:{account}", 0, -1, withscores=True)
-        ]
+        window = [(json.loads(member), ts) for member, ts in window]
         latest = max([now, *(ts for _, ts in window)])
         repeat = any(o["payment_id"] == payment and o["direction"] == direction for o, _ in window)
         if repeat or now < latest - WINDOW:
@@ -175,17 +182,14 @@ class PairKeys:
         self.keys, self.loaded = {}, -KEY_RELOAD_SECONDS
 
     def __call__(self, peer: str) -> list[bytes]:
-        while peer not in self.keys or time.monotonic() - self.loaded >= KEY_RELOAD_SECONDS:
+        if time.monotonic() - self.loaded >= KEY_RELOAD_SECONDS:
             own = crypto.load_keys(self.key_dir)
             self.keys = {
                 peer: crypto.pair_keys(self.bank, peer, own, crypto.decode(text))
                 for peer, text in self.db.hgetall("keys").items()
             }
             self.loaded = time.monotonic()
-            if peer not in self.keys:  # the node hasn't met that bank yet
-                log("scorer", bank=self.bank, waiting_for_keys_of=peer)
-                time.sleep(1)
-        return self.keys[peer]
+        return self.keys[peer]  # a KeyError (Valkey lost them) restarts the worker
 
 
 def main() -> None:
@@ -209,9 +213,15 @@ def main() -> None:
         """Start each partition where Valkey's state ends, or at the start of the topic."""
         done = db.hgetall("offsets")
         for p in partitions:
+            scorer.position[p.partition] = done.get(str(p.partition))
             p.offset = int(done.get(str(p.partition), OFFSET_BEGINNING))
         consumer.assign(partitions)
 
+    # Score nothing until the privacy node has put every peer's keys in Valkey: an
+    # event to that bank would get no token.
+    while not stop.is_set() and (missing := sorted({*BANKS} - {bank, *db.hkeys("keys")})):
+        log("scorer", bank=bank, waiting_for_keys_of=missing)
+        stop.wait(1)
     consumer.subscribe([topic(bank)], on_assign=resume)
     try:
         while not stop.is_set():

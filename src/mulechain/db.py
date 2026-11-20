@@ -10,6 +10,7 @@ safe between writers. Both are PostgreSQL advisory locks, and no-ops on SQLite.
 
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 
 import psycopg
@@ -20,7 +21,12 @@ class Db:
     def __init__(self, url: str, schema: str) -> None:
         self.url, self.postgres = url, url.startswith("postgres")
         self.lock = threading.RLock()  # one connection, so one statement at a time
-        self._connect()
+        while True:
+            try:
+                self._connect()
+                break
+            except psycopg.OperationalError:  # PostgreSQL is still starting: wait for it
+                time.sleep(1)
         if self.postgres:
             # One transaction under a lock, so replicas starting together can't collide.
             self.conn.execute(f"SELECT pg_advisory_xact_lock(1); {schema}")

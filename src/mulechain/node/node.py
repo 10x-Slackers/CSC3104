@@ -274,7 +274,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
         local      the money starts or stays inside this bank: a case for this bank only
         confirmed  a complete chain, signed by every bank on it
         partial    a chain that some bank cut short (hop limit or a branch)
-        failed     the answers didn't verify, or the payments have expired
+        failed     the answers didn't verify
         """
         incoming, outgoing = search["incoming"], search["outgoing"]
         starts, ends = self.bank.ends(incoming, "in"), self.bank.ends(outgoing, "out")
@@ -353,6 +353,7 @@ class Node(pb_grpc.PrivacyNodeServicer):
                 if hit["rule"] == "chain":
                     self.store.add_search(hit["incoming"], hit["outgoing"])
             self.store.set_cursor(hits[-1][0])
+        self.bank.drop_hits(hits[-1][0])  # stored, so the stream need not keep them
         return len(hits)
 
     def run_searches(self) -> int:
@@ -362,8 +363,8 @@ class Node(pb_grpc.PrivacyNodeServicer):
             start = time.monotonic()
             try:
                 state = self.attempt(search)
-            except (KeyError, TypeError, ValueError):  # its payments are gone from Valkey
-                state = "failed"
+            except (KeyError, TypeError, ValueError):
+                state = "pending"  # its payments aren't in Valkey: wait for the rebuild
             self.store.finish_search(search, state)
             log(
                 "node",

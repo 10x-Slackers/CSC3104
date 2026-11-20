@@ -2,9 +2,10 @@
 
 The node keeps no copy, so it starts with the bank's full state and a restart loses
 nothing. Payment IDs, accounts and amounts read here stay inside the bank: only
-tokens go to peers, and own-leg details go to this bank's case service. The one
-thing the node writes is `keys`, the peers' public keys the scorer needs. `lookup`
-answers only the bank on the other side of a transfer (zero trust, docs/patterns.md).
+tokens go to peers, and own-leg details go to this bank's case service. The node
+changes two things: it writes `keys`, the peers' public keys the scorer needs, and
+removes the hits it has read. `lookup` answers only the bank on the other side of a
+transfer (zero trust, docs/patterns.md).
 
 A transfer between two accounts of this bank has no token and no peer to ask, so the
 node walks through such intra-bank hops until it reaches a payment that crosses banks.
@@ -25,6 +26,10 @@ class Bank:
         """The scorer's rule hits after stream position `after`, as (position, hit)."""
         reply = self.db.xread({"hits": after}, count=500, block=block_ms)
         return reply[0][1] if reply else []
+
+    def drop_hits(self, before: str) -> None:
+        """Remove the hits before a stream position: the node has stored them."""
+        self.db.xtrim("hits", minid=before, approximate=False)
 
     def publish_keys(self, keys: dict[str, str]) -> None:
         self.db.hset("keys", mapping=keys)

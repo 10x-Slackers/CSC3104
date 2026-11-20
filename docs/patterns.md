@@ -25,9 +25,9 @@ The unit tests are in [tests/](../tests) and run with `make check`. The cluster 
 
 **Source.** Kreps, [The Log](https://www.linkedin.com/blog/engineering/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying) (2013), describes a log as the record from which every other store is derived. Storing a consumer's offset together with the results it produced is the Kafka documentation's own recipe for exactly-once consumption ([KafkaConsumer, "Storing Offsets Outside Kafka"](https://kafka.apache.org/39/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html)). `MULTI`/`EXEC` is a [Valkey transaction](https://valkey.io/topics/transactions/).
 
-**See it.** `make rebuild BANK=a` empties the bank's Valkey and restarts its scorers. They read the topic from the start, and the bank ends with the same keys and the same cases ([deployment.md](deployment.md)).
+**See it.** `make rebuild BANK=a` empties the bank's Valkey and restarts its scorers. They read the topic from the start, and the bank ends with the same keys and the same cases ([deployment.md](deployment.md)). Deleting the Valkey pod does the same unasked: each worker finds the partition's offset gone before it scores its next event, stops, and starts again from the log (`test_a_worker_stops_before_writing_to_an_emptied_valkey` in [test_scorer.py](../tests/test_scorer.py)).
 
-**Limit.** A worker picks its position only when it is given partitions, so a rebuild needs the scorers restarted, which `make rebuild` does. Run it while the bank is idle ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
+**Limit.** While Valkey rebuilds, the privacy node answers peers from partial state, so run `make rebuild` while the bank is idle ([detection.md](detection.md#rebuilding-valkey-from-the-log)).
 
 ## 2. Partition ownership and autoscaling on lag
 
